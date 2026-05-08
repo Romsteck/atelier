@@ -1,0 +1,23 @@
+[Unit]
+Description=Atelier — HomeRoute application platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/atelier/bin/atelier
+WorkingDirectory=/opt/atelier
+EnvironmentFile=-/opt/atelier/.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atelier
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/run /var/lib/atelier /opt/atelier/data /tmp
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

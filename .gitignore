@@ -1,0 +1,14 @@
+/target/
+**/target/
+**/*.rs.bk
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+node_modules/
+web/dist/
+.env
+.env.local
+*.log
+*.pid

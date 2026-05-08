@@ -1,0 +1,20 @@
+[package]
+name = "atelier"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "atelier"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+atelier-api = { workspace = true }

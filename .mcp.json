@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "homeroute": {
+      "type": "http",
+      "url": "http://10.0.0.254:4001/mcp",
+      "description": "MCP HomeRoute (apps, db, docs, flows) — Medion. À remplacer par mcp__atelier__ une fois la Phase 9 (cutover) terminée."
+    }
+  }
+}
