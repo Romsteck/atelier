@@ -20,8 +20,13 @@ deploy: atelier
 
 install-service:
 	sudo install -m 0644 systemd/atelier.service /etc/systemd/system/atelier.service
+	sudo install -m 0644 systemd/atelier-sync-docs.service /etc/systemd/system/atelier-sync-docs.service
+	sudo install -m 0644 systemd/atelier-sync-docs.timer /etc/systemd/system/atelier-sync-docs.timer
+	sudo install -d -m 0755 /opt/atelier/bin
+	sudo install -m 0755 scripts/sync-docs.sh /opt/atelier/bin/sync-docs.sh
 	sudo systemctl daemon-reload
 	sudo systemctl enable atelier.service
+	sudo systemctl enable --now atelier-sync-docs.timer
 
 logs:
 	journalctl -u atelier -f

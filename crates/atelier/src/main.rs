@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,6 +11,8 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:4100";
 const DEFAULT_IPC_SOCK: &str = "/run/atelier.sock";
+const DEFAULT_DOCS_DIR: &str = "/var/lib/atelier/docs";
+const DEFAULT_DOCS_INDEX: &str = "/var/lib/atelier/docs-index.sqlite";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,13 +20,22 @@ async fn main() -> Result<()> {
 
     let http_addr = std::env::var("ATELIER_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
     let ipc_sock = PathBuf::from(std::env::var("ATELIER_IPC_SOCK").unwrap_or_else(|_| DEFAULT_IPC_SOCK.to_string()));
+    let docs_dir = PathBuf::from(std::env::var("ATELIER_DOCS_DIR").unwrap_or_else(|_| DEFAULT_DOCS_DIR.to_string()));
+    let docs_index_path = PathBuf::from(std::env::var("ATELIER_DOCS_INDEX").unwrap_or_else(|_| DEFAULT_DOCS_INDEX.to_string()));
 
-    info!(http_addr = %http_addr, ipc_sock = %ipc_sock.display(), "atelier starting");
+    info!(
+        http_addr = %http_addr,
+        ipc_sock = %ipc_sock.display(),
+        docs_dir = %docs_dir.display(),
+        docs_index = %docs_index_path.display(),
+        "atelier starting"
+    );
 
-    let state = ApiState::new();
-    let app = atelier_api::router(state.clone());
+    let docs_index = open_docs_index(&docs_index_path, &docs_dir);
+    let state = ApiState::new(docs_dir.clone(), docs_index);
 
-    // HTTP server
+    let app = atelier_api::router(state);
+
     let listener = TcpListener::bind(&http_addr)
         .await
         .with_context(|| format!("bind HTTP {http_addr}"))?;
@@ -35,14 +47,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    // IPC server (Unix socket)
     let ipc_task = tokio::spawn(serve_ipc(ipc_sock.clone()));
 
-    // Graceful shutdown
     shutdown_signal().await;
     info!("shutdown signal received");
 
-    // Best-effort socket cleanup
     if ipc_sock.exists() {
         if let Err(err) = tokio::fs::remove_file(&ipc_sock).await {
             warn!(?err, path = %ipc_sock.display(), "failed to remove ipc socket");
@@ -66,6 +75,25 @@ fn init_tracing() {
         .init();
 }
 
+fn open_docs_index(index_path: &PathBuf, docs_dir: &PathBuf) -> Option<Arc<hr_docs::Index>> {
+    match hr_docs::Index::open_or_rebuild(index_path, docs_dir.clone()) {
+        Ok(idx) => {
+            let count = idx.count().unwrap_or(0);
+            info!(
+                fts5 = idx.fts5_available,
+                entries = count,
+                index = %index_path.display(),
+                "docs index opened"
+            );
+            Some(Arc::new(idx))
+        }
+        Err(err) => {
+            warn!(?err, "failed to open docs index — search disabled");
+            None
+        }
+    }
+}
+
 async fn serve_ipc(path: PathBuf) -> Result<()> {
     if path.exists() {
         if let Err(err) = tokio::fs::remove_file(&path).await {
@@ -84,8 +112,6 @@ async fn serve_ipc(path: PathBuf) -> Result<()> {
                 continue;
             }
         };
-        // Phase 0: connection accepted but no protocol handler yet.
-        // The IPC contract will be defined when migrating apps lifecycle (Phase 9).
         drop(stream);
     }
 }

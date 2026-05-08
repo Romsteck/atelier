@@ -1,15 +1,14 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ApiState {
-    pub inner: Arc<Inner>,
+    pub docs_dir: PathBuf,
+    pub docs_index: Option<Arc<hr_docs::Index>>,
 }
 
-#[derive(Default)]
-pub struct Inner {}
-
 impl ApiState {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(docs_dir: PathBuf, docs_index: Option<Arc<hr_docs::Index>>) -> Self {
+        Self { docs_dir, docs_index }
     }
 }

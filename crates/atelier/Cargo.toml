@@ -18,3 +18,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 atelier-api = { workspace = true }
+hr-docs = { workspace = true }

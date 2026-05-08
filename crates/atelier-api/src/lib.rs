@@ -11,5 +11,7 @@ pub fn router(state: ApiState) -> Router {
 }
 
 fn api_router() -> Router<ApiState> {
-    Router::new().merge(routes::health::router())
+    Router::new()
+        .merge(routes::health::router())
+        .nest("/docs", routes::docs::router())
 }
