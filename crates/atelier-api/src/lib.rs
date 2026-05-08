@@ -54,5 +54,6 @@ fn api_router() -> Router<ApiState> {
         .merge(routes::health::router())
         .nest("/docs", routes::docs::router())
         .nest("/store", routes::store::router())
+        .nest("/git", routes::git::router())
         .fallback(api_404)
 }

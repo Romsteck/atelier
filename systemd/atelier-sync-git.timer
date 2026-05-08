@@ -1,0 +1,12 @@
+[Unit]
+Description=Atelier — sync git repos every 5 minutes
+Requires=atelier-sync-git.service
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=atelier-sync-git.service
+
+[Install]
+WantedBy=timers.target

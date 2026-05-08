@@ -40,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 hr-common = { path = "/nvme/homeroute/crates/shared/hr-common" }
 hr-ipc    = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
 hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
+hr-git    = { path = "/nvme/homeroute/crates/orchestrator/hr-git" }
 
 # Crates internes Atelier
 atelier-api = { path = "crates/atelier-api" }

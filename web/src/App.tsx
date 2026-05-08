@@ -6,17 +6,13 @@ import DocsApp from "./pages/DocsApp";
 import DocsEntry from "./pages/DocsEntry";
 import StoreList from "./pages/StoreList";
 import StoreAppPage from "./pages/StoreApp";
+import GitList from "./pages/GitList";
+import GitRepoPage from "./pages/GitRepo";
 
 const PLACEHOLDERS: Record<
   string,
   { phase: number; feature: string; description: string }
 > = {
-  git: {
-    phase: 4,
-    feature: "Git",
-    description:
-      "Bare repos par app, smart HTTP, navigation des commits. Pousse / clone se font via HTTPS authentifié.",
-  },
   flows: {
     phase: 5,
     feature: "Flows",
@@ -58,7 +54,8 @@ export default function App() {
         <Route path="/docs/:appId/:docType/:name" element={<DocsEntry />} />
         <Route path="/store" element={<StoreList />} />
         <Route path="/store/:slug" element={<StoreAppPage />} />
-        <Route path="/git" element={<PlaceholderPage slug="git" />} />
+        <Route path="/git" element={<GitList />} />
+        <Route path="/git/:slug" element={<GitRepoPage />} />
         <Route path="/flows" element={<PlaceholderPage slug="flows" />} />
         <Route
           path="/dataverse"

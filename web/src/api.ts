@@ -91,6 +91,64 @@ export async function getStoreApp(slug: string): Promise<StoreApp> {
   return data.app;
 }
 
+// ─── Git ───────────────────────────────────────────────────────
+
+export interface GitMirror {
+  github_url: string;
+  enabled: boolean;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+}
+
+export interface GitRepo {
+  slug: string;
+  name: string;
+  default_branch: string | null;
+  size_bytes: number;
+  branch_count: number;
+  commit_count: number;
+  last_commit_at: string | null;
+  last_commit_message: string | null;
+  visibility: string;
+  mirror: GitMirror | null;
+}
+
+export interface GitCommit {
+  sha: string;
+  author_name: string;
+  author_email: string;
+  date: string;
+  message: string;
+}
+
+export interface GitBranch {
+  name: string;
+  sha: string;
+  is_default: boolean;
+}
+
+export async function listRepos(): Promise<GitRepo[]> {
+  const data = await getJson<{ repos: GitRepo[] }>("/api/git/repos");
+  return data.repos ?? [];
+}
+
+export async function getRepo(slug: string): Promise<GitRepo> {
+  const data = await getJson<{ repo: GitRepo }>(`/api/git/repos/${slug}`);
+  return data.repo;
+}
+
+export async function getCommits(slug: string, limit = 50): Promise<GitCommit[]> {
+  const res = await fetch(`/api/git/repos/${slug}/commits?limit=${limit}`);
+  const data = await res.json();
+  return data.commits ?? [];
+}
+
+export async function getBranches(slug: string): Promise<GitBranch[]> {
+  const res = await fetch(`/api/git/repos/${slug}/branches`);
+  const data = await res.json();
+  return data.branches ?? [];
+}
+
 export function formatBytes(n: number | null): string {
   if (n == null) return "—";
   if (n < 1024) return `${n} B`;

@@ -34,6 +34,7 @@ dependencies = [
  "atelier-api",
  "axum",
  "hr-docs",
+ "hr-git",
  "serde",
  "serde_json",
  "tokio",
@@ -50,6 +51,7 @@ dependencies = [
  "axum",
  "chrono",
  "hr-docs",
+ "hr-git",
  "serde",
  "serde_json",
  "tokio",
@@ -384,6 +386,18 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "hr-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
