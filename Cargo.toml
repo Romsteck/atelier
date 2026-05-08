@@ -37,10 +37,16 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Path-deps vers homeroute (à terme : repo `homeroute-core` séparé)
 # La source de vérité reste /nvme/homeroute/crates/shared/. Ne pas modifier ces crates depuis Atelier.
-hr-common = { path = "/nvme/homeroute/crates/shared/hr-common" }
-hr-ipc    = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
-hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
-hr-git    = { path = "/nvme/homeroute/crates/orchestrator/hr-git" }
+hr-common    = { path = "/nvme/homeroute/crates/shared/hr-common" }
+hr-ipc       = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
+hr-docs      = { path = "/nvme/homeroute/crates/shared/hr-docs" }
+hr-git       = { path = "/nvme/homeroute/crates/orchestrator/hr-git" }
+hr-dataverse = { path = "/nvme/homeroute/crates/orchestrator/hr-dataverse" }
+hr-dvexpr    = { path = "/nvme/homeroute/crates/orchestrator/hr-dvexpr" }
+
+# Postgres + sqlx — voir commentaire dans homeroute Cargo.toml
+sqlx-core    = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json", "chrono", "uuid", "migrate"] }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chrono", "uuid", "json", "migrate", "bigdecimal"] }
 
 # Crates internes Atelier
 atelier-api = { path = "crates/atelier-api" }

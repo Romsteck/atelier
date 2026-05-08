@@ -8,6 +8,11 @@ import StoreList from "./pages/StoreList";
 import StoreAppPage from "./pages/StoreApp";
 import GitList from "./pages/GitList";
 import GitRepoPage from "./pages/GitRepo";
+import AppsList from "./pages/AppsList";
+import AppDetail from "./pages/AppDetail";
+import StudioPage from "./pages/Studio";
+import DataverseList from "./pages/DataverseList";
+import DataverseSchemaPage from "./pages/DataverseSchema";
 
 const PLACEHOLDERS: Record<
   string,
@@ -18,24 +23,6 @@ const PLACEHOLDERS: Record<
     feature: "Flows",
     description:
       "Moteur d'orchestration TOML. Read-only en Phase 5 (visualisation), exécution en Phase 6. La cible long terme est un daemon multi-stack hr-flowd qui rend les flows utilisables aussi côté NextJS.",
-  },
-  dataverse: {
-    phase: 7,
-    feature: "Dataverse",
-    description:
-      "Postgres avec schéma dynamique, GraphQL gateway, expressions dvexpr. Atelier expose la console schéma + l'éditeur de tables + un mode SQL brut.",
-  },
-  apps: {
-    phase: 9,
-    feature: "Apps",
-    description:
-      "Lifecycle complet des apps : start / stop / build / deploy / logs. C'est la phase finale du cutover : Atelier reprend la supervision actuellement assurée par hr-orchestrator sur Medion.",
-  },
-  studio: {
-    phase: 9,
-    feature: "Studio",
-    description:
-      "Code-server intégré : édition des sources, consultation logs, exécution de tâches. La page actuelle studio.mynetwk.biz reste fonctionnelle pendant tout le cutover.",
   },
 };
 
@@ -57,12 +44,11 @@ export default function App() {
         <Route path="/git" element={<GitList />} />
         <Route path="/git/:slug" element={<GitRepoPage />} />
         <Route path="/flows" element={<PlaceholderPage slug="flows" />} />
-        <Route
-          path="/dataverse"
-          element={<PlaceholderPage slug="dataverse" />}
-        />
-        <Route path="/apps" element={<PlaceholderPage slug="apps" />} />
-        <Route path="/studio" element={<PlaceholderPage slug="studio" />} />
+        <Route path="/dataverse" element={<DataverseList />} />
+        <Route path="/dataverse/:slug" element={<DataverseSchemaPage />} />
+        <Route path="/apps" element={<AppsList />} />
+        <Route path="/apps/:slug" element={<AppDetail />} />
+        <Route path="/studio" element={<StudioPage />} />
         <Route path="*" element={<Navigate to="/docs" replace />} />
       </Routes>
     </Layout>

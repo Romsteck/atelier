@@ -37,14 +37,14 @@ export const NAV: NavGroup[] = [
       { to: "/store", icon: StoreIcon, label: "Store", phase: 3, ready: true },
       { to: "/git", icon: GitBranch, label: "Git", phase: 4, ready: true },
       { to: "/flows", icon: Workflow, label: "Flows", phase: 5, ready: false },
-      { to: "/dataverse", icon: Database, label: "Dataverse", phase: 7, ready: false },
-      { to: "/apps", icon: Boxes, label: "Apps", phase: 9, ready: false },
+      { to: "/dataverse", icon: Database, label: "Dataverse", phase: 7, ready: true },
+      { to: "/apps", icon: Boxes, label: "Apps", phase: 9, ready: true },
     ],
   },
   {
     label: "Édition",
     items: [
-      { to: "/studio", icon: Code2, label: "Studio", phase: 9, ready: false },
+      { to: "/studio", icon: Code2, label: "Studio", phase: 9, ready: true },
     ],
   },
 ];

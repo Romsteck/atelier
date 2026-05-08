@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { FileText } from "lucide-react";
-import { AppCard, listApps } from "../api";
+import { AppCard, listDocApps } from "../api";
 
 export default function DocsList() {
   const [apps, setApps] = useState<AppCard[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listApps()
+    listDocApps()
       .then(setApps)
       .catch((e) => setError(String(e)));
   }, []);

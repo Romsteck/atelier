@@ -1,0 +1,11 @@
+[Unit]
+Description=Atelier — sync apps + port registry from Medion
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/atelier/bin/sync-state.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atelier-sync-state

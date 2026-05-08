@@ -15,6 +15,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
-hr-docs = { workspace = true }
-hr-git  = { workspace = true }
+hr-common    = { workspace = true }
+hr-docs      = { workspace = true }
+hr-git       = { workspace = true }
+hr-dataverse = { workspace = true }
+sqlx-postgres = { workspace = true }

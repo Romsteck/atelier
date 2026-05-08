@@ -15,7 +15,11 @@ const DEFAULT_DOCS_DIR: &str = "/var/lib/atelier/docs";
 const DEFAULT_DOCS_INDEX: &str = "/var/lib/atelier/docs-index.sqlite";
 const DEFAULT_STORE_DIR: &str = "/var/lib/atelier/store";
 const DEFAULT_GIT_REPOS_DIR: &str = "/var/lib/atelier/git/repos";
+const DEFAULT_APPS_STATE_DIR: &str = "/var/lib/atelier/state";
 const DEFAULT_WEB_DIST: &str = "/opt/atelier/web/dist";
+/// Hôte des Postgres apps (Medion). Le secret synchronisé contient `127.0.0.1`
+/// (point de vue de Medion) — Atelier le swap vers cet hôte au registre des DSN.
+const DEFAULT_DV_HOST: &str = "10.0.0.254";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,6 +31,7 @@ async fn main() -> Result<()> {
     let docs_index_path = PathBuf::from(std::env::var("ATELIER_DOCS_INDEX").unwrap_or_else(|_| DEFAULT_DOCS_INDEX.to_string()));
     let store_dir = PathBuf::from(std::env::var("ATELIER_STORE_DIR").unwrap_or_else(|_| DEFAULT_STORE_DIR.to_string()));
     let git_repos_dir = PathBuf::from(std::env::var("ATELIER_GIT_REPOS_DIR").unwrap_or_else(|_| DEFAULT_GIT_REPOS_DIR.to_string()));
+    let apps_state_dir = PathBuf::from(std::env::var("ATELIER_APPS_STATE_DIR").unwrap_or_else(|_| DEFAULT_APPS_STATE_DIR.to_string()));
     let web_dist = PathBuf::from(std::env::var("ATELIER_WEB_DIST").unwrap_or_else(|_| DEFAULT_WEB_DIST.to_string()));
 
     info!(
@@ -36,13 +41,22 @@ async fn main() -> Result<()> {
         docs_index = %docs_index_path.display(),
         store_dir = %store_dir.display(),
         git_repos_dir = %git_repos_dir.display(),
+        apps_state_dir = %apps_state_dir.display(),
         web_dist = %web_dist.display(),
         "atelier starting"
     );
 
     let docs_index = open_docs_index(&docs_index_path, &docs_dir);
     let git = Arc::new(hr_git::GitService::with_repos_dir(git_repos_dir));
-    let state = ApiState::new(docs_dir.clone(), docs_index, store_dir.clone(), git);
+    let dv = init_dv(&apps_state_dir).await;
+    let state = ApiState::new(
+        docs_dir.clone(),
+        docs_index,
+        store_dir.clone(),
+        git,
+        apps_state_dir.clone(),
+        dv,
+    );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
     let app = atelier_api::router(state, web_dist_opt);
@@ -84,6 +98,60 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(true)
         .init();
+}
+
+async fn init_dv(state_dir: &PathBuf) -> Option<Arc<hr_dataverse::manager::DataverseManager>> {
+    let admin_dsn = match std::env::var("ATELIER_DV_ADMIN_URL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            warn!("ATELIER_DV_ADMIN_URL absent — /api/dv désactivé");
+            return None;
+        }
+    };
+    let secrets_path = state_dir.join("dataverse-secrets.json");
+    if !secrets_path.exists() {
+        warn!(path = %secrets_path.display(), "dataverse-secrets.json absent — /api/dv désactivé");
+        return None;
+    }
+
+    let mgr = match hr_dataverse::manager::DataverseManager::connect_admin(
+        admin_dsn,
+        hr_dataverse::provisioning::ProvisioningConfig::default(),
+        Some(secrets_path.clone()),
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(err) => {
+            warn!(?err, "DataverseManager init failed — /api/dv désactivé");
+            return None;
+        }
+    };
+
+    // Override des DSN per-slug pour rediriger 127.0.0.1 → 10.0.0.254.
+    let dv_host = std::env::var("ATELIER_DV_HOST").unwrap_or_else(|_| DEFAULT_DV_HOST.to_string());
+    if let Ok(bytes) = std::fs::read(&secrets_path) {
+        if let Ok(secrets) =
+            serde_json::from_slice::<hr_dataverse::manager::SecretsFile>(&bytes)
+        {
+            let mut applied = 0;
+            for (slug, sec) in secrets.apps.iter() {
+                let swapped = sec
+                    .dsn
+                    .replace("127.0.0.1", &dv_host)
+                    .replace("@localhost:", &format!("@{dv_host}:"));
+                mgr.set_dsn_override(slug.clone(), swapped).await;
+                applied += 1;
+            }
+            info!(
+                count = applied,
+                host = %dv_host,
+                "Dataverse DSN overrides loaded"
+            );
+        }
+    }
+
+    Some(Arc::new(mgr))
 }
 
 fn open_docs_index(index_path: &PathBuf, docs_dir: &PathBuf) -> Option<Arc<hr_docs::Index>> {

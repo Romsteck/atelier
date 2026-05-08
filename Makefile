@@ -32,15 +32,19 @@ install-service:
 	sudo install -m 0644 systemd/atelier-sync-store.timer /etc/systemd/system/atelier-sync-store.timer
 	sudo install -m 0644 systemd/atelier-sync-git.service /etc/systemd/system/atelier-sync-git.service
 	sudo install -m 0644 systemd/atelier-sync-git.timer /etc/systemd/system/atelier-sync-git.timer
+	sudo install -m 0644 systemd/atelier-sync-state.service /etc/systemd/system/atelier-sync-state.service
+	sudo install -m 0644 systemd/atelier-sync-state.timer /etc/systemd/system/atelier-sync-state.timer
 	sudo install -d -m 0755 /opt/atelier/bin
 	sudo install -m 0755 scripts/sync-docs.sh /opt/atelier/bin/sync-docs.sh
 	sudo install -m 0755 scripts/sync-store.sh /opt/atelier/bin/sync-store.sh
 	sudo install -m 0755 scripts/sync-git.sh /opt/atelier/bin/sync-git.sh
+	sudo install -m 0755 scripts/sync-state.sh /opt/atelier/bin/sync-state.sh
 	sudo systemctl daemon-reload
 	sudo systemctl enable atelier.service
 	sudo systemctl enable --now atelier-sync-docs.timer
 	sudo systemctl enable --now atelier-sync-store.timer
 	sudo systemctl enable --now atelier-sync-git.timer
+	sudo systemctl enable --now atelier-sync-state.timer
 
 logs:
 	journalctl -u atelier -f

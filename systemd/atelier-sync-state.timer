@@ -1,0 +1,12 @@
+[Unit]
+Description=Atelier — sync state JSON every 2 minutes
+Requires=atelier-sync-state.service
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=2min
+AccuracySec=5s
+Unit=atelier-sync-state.service
+
+[Install]
+WantedBy=timers.target
