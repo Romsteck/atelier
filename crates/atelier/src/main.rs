@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
     let docs_index = open_docs_index(&docs_index_path, &docs_dir);
     let git = Arc::new(hr_git::GitService::with_repos_dir(git_repos_dir));
     let dv = init_dv(&apps_state_dir).await;
+    let task_store = open_task_store(&apps_state_dir);
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
         git,
         apps_state_dir.clone(),
         dv,
+        task_store,
     );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
@@ -98,6 +100,28 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(true)
         .init();
+}
+
+fn open_task_store(state_dir: &PathBuf) -> Arc<hr_common::task_store::TaskStore> {
+    let path = state_dir.join("tasks.db");
+    match hr_common::task_store::TaskStore::new(&path) {
+        Ok(store) => {
+            info!(path = %path.display(), "task_store opened");
+            Arc::new(store)
+        }
+        Err(err) => {
+            warn!(?err, "task_store init failed — endpoints retourneront vide");
+            // Fallback : on ouvre une DB temporaire éphémère, pour ne pas casser
+            // le boot du service. Les endpoints /api/tasks renverront simplement
+            // "tasks: [], total: 0" jusqu'au prochain sync.
+            let tmp = std::env::temp_dir().join("atelier-tasks-empty.db");
+            let _ = std::fs::remove_file(&tmp);
+            Arc::new(
+                hr_common::task_store::TaskStore::new(&tmp)
+                    .expect("fallback task_store"),
+            )
+        }
+    }
 }
 
 async fn init_dv(state_dir: &PathBuf) -> Option<Arc<hr_dataverse::manager::DataverseManager>> {

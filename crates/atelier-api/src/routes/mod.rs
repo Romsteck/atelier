@@ -5,3 +5,4 @@ pub mod dv;
 pub mod git;
 pub mod health;
 pub mod store;
+pub mod tasks;

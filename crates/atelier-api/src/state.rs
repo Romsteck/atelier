@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use hr_common::task_store::TaskStore;
+
 #[derive(Clone)]
 pub struct ApiState {
     pub docs_dir: PathBuf,
@@ -9,6 +11,7 @@ pub struct ApiState {
     pub git: Arc<hr_git::GitService>,
     pub apps_state_dir: PathBuf,
     pub dv: Option<Arc<hr_dataverse::manager::DataverseManager>>,
+    pub task_store: Arc<TaskStore>,
 }
 
 impl ApiState {
@@ -19,6 +22,7 @@ impl ApiState {
         git: Arc<hr_git::GitService>,
         apps_state_dir: PathBuf,
         dv: Option<Arc<hr_dataverse::manager::DataverseManager>>,
+        task_store: Arc<TaskStore>,
     ) -> Self {
         Self {
             docs_dir,
@@ -27,6 +31,7 @@ impl ApiState {
             git,
             apps_state_dir,
             dv,
+            task_store,
         }
     }
 }
