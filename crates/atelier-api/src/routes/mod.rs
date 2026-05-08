@@ -2,6 +2,7 @@ pub mod apps;
 pub mod apps_db;
 pub mod docs;
 pub mod dv;
+pub mod flows;
 pub mod git;
 pub mod health;
 pub mod store;

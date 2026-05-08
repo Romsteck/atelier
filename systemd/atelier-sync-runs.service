@@ -1,0 +1,11 @@
+[Unit]
+Description=Atelier — sync flow runs from Medion
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/atelier/bin/sync-runs.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atelier-sync-runs

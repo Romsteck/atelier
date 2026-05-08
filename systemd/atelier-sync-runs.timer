@@ -1,0 +1,12 @@
+[Unit]
+Description=Atelier — sync flow runs every 2 minutes
+Requires=atelier-sync-runs.service
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=atelier-sync-runs.service
+
+[Install]
+WantedBy=timers.target

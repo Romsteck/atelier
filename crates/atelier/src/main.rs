@@ -16,6 +16,8 @@ const DEFAULT_DOCS_INDEX: &str = "/var/lib/atelier/docs-index.sqlite";
 const DEFAULT_STORE_DIR: &str = "/var/lib/atelier/store";
 const DEFAULT_GIT_REPOS_DIR: &str = "/var/lib/atelier/git/repos";
 const DEFAULT_APPS_STATE_DIR: &str = "/var/lib/atelier/state";
+const DEFAULT_APPS_SRC_ROOT: &str = "/opt/homeroute/apps";
+const DEFAULT_APPS_RUNTIME_ROOT: &str = "/var/lib/atelier/apps";
 const DEFAULT_WEB_DIST: &str = "/opt/atelier/web/dist";
 /// Hôte des Postgres apps (Medion). Le secret synchronisé contient `127.0.0.1`
 /// (point de vue de Medion) — Atelier le swap vers cet hôte au registre des DSN.
@@ -32,6 +34,8 @@ async fn main() -> Result<()> {
     let store_dir = PathBuf::from(std::env::var("ATELIER_STORE_DIR").unwrap_or_else(|_| DEFAULT_STORE_DIR.to_string()));
     let git_repos_dir = PathBuf::from(std::env::var("ATELIER_GIT_REPOS_DIR").unwrap_or_else(|_| DEFAULT_GIT_REPOS_DIR.to_string()));
     let apps_state_dir = PathBuf::from(std::env::var("ATELIER_APPS_STATE_DIR").unwrap_or_else(|_| DEFAULT_APPS_STATE_DIR.to_string()));
+    let apps_src_root = PathBuf::from(std::env::var("ATELIER_APPS_SRC_ROOT").unwrap_or_else(|_| DEFAULT_APPS_SRC_ROOT.to_string()));
+    let apps_runtime_root = PathBuf::from(std::env::var("ATELIER_APPS_RUNTIME_ROOT").unwrap_or_else(|_| DEFAULT_APPS_RUNTIME_ROOT.to_string()));
     let web_dist = PathBuf::from(std::env::var("ATELIER_WEB_DIST").unwrap_or_else(|_| DEFAULT_WEB_DIST.to_string()));
 
     info!(
@@ -42,6 +46,8 @@ async fn main() -> Result<()> {
         store_dir = %store_dir.display(),
         git_repos_dir = %git_repos_dir.display(),
         apps_state_dir = %apps_state_dir.display(),
+        apps_src_root = %apps_src_root.display(),
+        apps_runtime_root = %apps_runtime_root.display(),
         web_dist = %web_dist.display(),
         "atelier starting"
     );
@@ -58,6 +64,8 @@ async fn main() -> Result<()> {
         apps_state_dir.clone(),
         dv,
         task_store,
+        apps_src_root,
+        apps_runtime_root,
     );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
