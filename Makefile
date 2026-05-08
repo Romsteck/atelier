@@ -1,17 +1,23 @@
-.PHONY: all atelier web deploy install-service logs clean test
+.PHONY: all atelier web deploy deploy-web install-service logs clean test
 
 ATELIER_BIN := /opt/atelier/bin/atelier
 RELEASE_BIN := target/release/atelier
+WEB_DIST := web/dist
+WEB_DEST := /opt/atelier/web/dist
 
-all: atelier
+all: atelier web
 
 atelier:
 	cargo build --release -p atelier
 
 web:
-	@if [ -f web/package.json ]; then cd web && npm run build; else echo "no web/ yet (Phase 2+)"; fi
+	cd web && npm run build
 
-deploy: atelier
+deploy-web: web
+	sudo install -d -m 0755 /opt/atelier/web
+	sudo rsync -aH --delete $(WEB_DIST)/ $(WEB_DEST)/
+
+deploy: atelier deploy-web
 	sudo install -d -m 0755 /opt/atelier/bin /opt/atelier/data /var/lib/atelier
 	sudo install -m 0755 $(RELEASE_BIN) $(ATELIER_BIN)
 	sudo systemctl restart atelier.service
