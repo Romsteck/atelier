@@ -48,6 +48,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "hr-docs",
  "serde",
  "serde_json",

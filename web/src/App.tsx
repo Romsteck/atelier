@@ -4,17 +4,13 @@ import PhasePlaceholder from "./components/PhasePlaceholder";
 import DocsList from "./pages/DocsList";
 import DocsApp from "./pages/DocsApp";
 import DocsEntry from "./pages/DocsEntry";
+import StoreList from "./pages/StoreList";
+import StoreAppPage from "./pages/StoreApp";
 
 const PLACEHOLDERS: Record<
   string,
   { phase: number; feature: string; description: string }
 > = {
-  store: {
-    phase: 3,
-    feature: "Store",
-    description:
-      "Catalogue des apps Flutter installables. Lecture seule sur les manifest YAML des apps. Aucun runtime — purement déclaratif.",
-  },
   git: {
     phase: 4,
     feature: "Git",
@@ -60,7 +56,8 @@ export default function App() {
         <Route path="/docs" element={<DocsList />} />
         <Route path="/docs/:appId" element={<DocsApp />} />
         <Route path="/docs/:appId/:docType/:name" element={<DocsEntry />} />
-        <Route path="/store" element={<PlaceholderPage slug="store" />} />
+        <Route path="/store" element={<StoreList />} />
+        <Route path="/store/:slug" element={<StoreAppPage />} />
         <Route path="/git" element={<PlaceholderPage slug="git" />} />
         <Route path="/flows" element={<PlaceholderPage slug="flows" />} />
         <Route

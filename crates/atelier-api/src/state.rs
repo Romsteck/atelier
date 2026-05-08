@@ -5,10 +5,19 @@ use std::sync::Arc;
 pub struct ApiState {
     pub docs_dir: PathBuf,
     pub docs_index: Option<Arc<hr_docs::Index>>,
+    pub store_dir: PathBuf,
 }
 
 impl ApiState {
-    pub fn new(docs_dir: PathBuf, docs_index: Option<Arc<hr_docs::Index>>) -> Self {
-        Self { docs_dir, docs_index }
+    pub fn new(
+        docs_dir: PathBuf,
+        docs_index: Option<Arc<hr_docs::Index>>,
+        store_dir: PathBuf,
+    ) -> Self {
+        Self {
+            docs_dir,
+            docs_index,
+            store_dir,
+        }
     }
 }

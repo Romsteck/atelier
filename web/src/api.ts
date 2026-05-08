@@ -52,6 +52,53 @@ async function getJson<T>(path: string): Promise<T> {
   return data;
 }
 
+// ─── Store ─────────────────────────────────────────────────────
+
+export interface StoreAppSummary {
+  slug: string;
+  name: string;
+  description: string;
+  category: string;
+  icon: string | null;
+  android_package: string | null;
+  publisher_app_id: string;
+  latest_version: string | null;
+  latest_size_bytes: number | null;
+  release_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoreRelease {
+  version: string;
+  changelog: string;
+  sha256: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface StoreApp extends StoreAppSummary {
+  releases: StoreRelease[];
+}
+
+export async function listStoreApps(): Promise<StoreAppSummary[]> {
+  const data = await getJson<{ apps: StoreAppSummary[] }>("/api/store/apps");
+  return data.apps;
+}
+
+export async function getStoreApp(slug: string): Promise<StoreApp> {
+  const data = await getJson<{ app: StoreApp }>(`/api/store/apps/${slug}`);
+  return data.app;
+}
+
+export function formatBytes(n: number | null): string {
+  if (n == null) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 export async function listApps(): Promise<AppCard[]> {
   const data = await getJson<{ apps: AppCard[] }>("/api/docs");
   return data.apps;
