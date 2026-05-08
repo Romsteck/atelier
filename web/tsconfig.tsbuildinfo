@@ -1,1 +1,0 @@
-{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/nav.ts","./src/components/Header.tsx","./src/components/Layout.tsx","./src/components/PhasePlaceholder.tsx","./src/components/Sidebar.tsx","./src/pages/DocsApp.tsx","./src/pages/DocsEntry.tsx","./src/pages/DocsList.tsx"],"version":"5.9.3"}
