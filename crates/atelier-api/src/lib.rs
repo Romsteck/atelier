@@ -56,6 +56,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/store", routes::store::router())
         .nest("/git", routes::git::router())
         .nest("/apps", routes::apps::router())
+        .nest("/apps", routes::apps_db::router())
         .nest("/dv", routes::dv::router())
         .fallback(api_404)
 }

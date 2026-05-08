@@ -1,28 +1,40 @@
 {
-  "name": "atelier-web",
-  "private": true,
-  "version": "0.1.0",
+  "name": "server-dashboard-web",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src"
   },
   "dependencies": {
-    "lucide-react": "^0.460.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.27.0"
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "axios": "^1.6.2",
+    "lucide-react": "^0.294.0",
+    "mermaid": "^11.14.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^9.1.0",
+    "react-router-dom": "^6.21.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@tailwindcss/typography": "^0.5.15",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.3",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.14",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "@eslint/js": "^9.17.0",
+    "@tailwindcss/typography": "^0.5.19",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react": "^7.37.2",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "globals": "^15.14.0",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.3.6",
+    "vite": "^5.0.8"
   }
 }
