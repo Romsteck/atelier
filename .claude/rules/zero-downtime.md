@@ -1,21 +1,24 @@
-# Zero downtime — règle critique pendant la migration
+# Zero downtime — règle obsolète
 
-Pendant TOUTES les phases de la migration depuis homeroute (cf. plan en cours), homeroute continue à servir les apps existantes. **Zéro downtime** sur les domaines `{slug}.mynetwk.biz` et `proxy.mynetwk.biz`.
+> **Cette règle ne s'applique plus depuis le rapatriement Atelier sur Medion (2026-05-09).** Conservée pour mémoire.
 
-## Ce que ça implique
+Auparavant (Phase 9 cutover Medion→CloudMaster), la règle protégeait contre le double pilotage des apps pendant la transition. Plus de phase parallèle aujourd'hui : Medion est l'unique hôte des apps + Atelier supervisor.
 
-- Atelier sur CloudMaster ne touche PAS aux processus apps gérés par hr-orchestrator (Medion). Au minimum jusqu'au cutover (Phase 9).
-- Atelier peut lire les sources des apps dans `/opt/homeroute/apps/` (CloudMaster, sources canoniques) en read-only.
-- Atelier peut éditer le contenu des apps via le Studio code-server (déjà le cas), mais ne pas restart les apps.
-- Toute modification d'un crate partagé (`hr-common`, `hr-ipc`, `hr-docs` via path-dep) doit garder homeroute compilable. Tester avec `cd /nvme/homeroute && cargo build --release` avant de pousser.
+## Règles toujours valables (héritage)
 
-## Comparaison parité (per feature)
+- Toute modification d'un crate partagé encore en path-dep vers `/nvme/homeroute/crates/shared/` (`hr-common`, `hr-ipc`, `hr-docs`) doit garder homeroute compilable. Tester avec `cd /nvme/homeroute && cargo build --release` avant de pousser.
+- Pendant un déploiement Atelier (`make deploy`), prévoir une fenêtre de ~5 secondes où l'API Atelier est down pendant le restart. Les apps elles-mêmes continuent à tourner (transient systemd units).
+- Pendant un `make deploy-app SLUG=<x>`, l'app concernée est restart (1-3 sec d'indisponibilité du domaine). Pas d'impact sur les autres.
 
-À chaque feature migrée vers Atelier, vérifier sur 24-48h que les deux endpoints retournent la même donnée :
+## Pour rollback éventuel
+
+En cas de problème post-déploiement, deux possibilités :
 
 ```bash
-diff <(curl -s https://proxy.mynetwk.biz/api/<route> | jq -S .) \
-     <(curl -s https://app.mynetwk.biz/api/<route> | jq -S .)
-```
+# 1. Rollback du binaire Atelier sur Medion
+ssh romain@10.0.0.254 "sudo tar xzf /var/backups/atelier-cloudmaster-2026-05-09.tar.gz -C /tmp && sudo cp /tmp/opt/atelier/bin/atelier /opt/atelier/bin/atelier && sudo systemctl restart atelier"
 
-Si divergence : investiguer, ne pas avancer sur la feature suivante.
+# 2. Rollback total vers CloudMaster (si Medion impossible à remonter)
+# scripts/swap-edge-routes.sh cloudmaster --apply
+# (puis restaurer /opt/atelier sur CloudMaster depuis l'archive et restart)
+```

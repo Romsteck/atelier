@@ -30,10 +30,21 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RESTART_RESET_AFTER: Duration = Duration::from_secs(300);
 const MAX_RESTARTS_PER_MIN: u32 = 10;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
-const SLICE: &str = "hr-apps.slice";
+/// Default systemd slice for apps spawned by Atelier. Override with
+/// `ATELIER_APP_SLICE` (used during the CloudMaster→Medion transition where
+/// the legacy slice name `hr-apps.slice` must be preserved).
+fn slice_name() -> String {
+    std::env::var("ATELIER_APP_SLICE").unwrap_or_else(|_| "atelier-apps.slice".to_string())
+}
+
+/// Default unit name prefix for spawned apps. Override with
+/// `ATELIER_APP_UNIT_PREFIX` (default `atelier-app` → `atelier-app-{slug}.service`).
+fn unit_prefix() -> String {
+    std::env::var("ATELIER_APP_UNIT_PREFIX").unwrap_or_else(|_| "atelier-app".to_string())
+}
 
 fn unit_name(slug: &str) -> String {
-    format!("hr-app-{slug}.service")
+    format!("{}-{slug}.service", unit_prefix())
 }
 
 /// Status snapshot of a supervised app process.
@@ -561,7 +572,7 @@ async fn systemd_run_app(app: &Application) -> Result<()> {
 
     let mut cmd = Command::new("systemd-run");
     cmd.arg(format!("--unit={unit}"));
-    cmd.arg(format!("--slice={SLICE}"));
+    cmd.arg(format!("--slice={}", slice_name()));
     cmd.arg("--collect");
     cmd.arg("--quiet");
     cmd.arg("--no-block");
@@ -753,7 +764,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unit_name_format() {
+    fn unit_name_format_default() {
+        // Run with cleared env vars to assert the new default.
+        // Tests in the same file may set ATELIER_APP_UNIT_PREFIX so we explicitly clear it.
+        // Safety: tests in this module run sequentially within a single binary; no other
+        // thread relies on this var.
+        unsafe {
+            std::env::remove_var("ATELIER_APP_UNIT_PREFIX");
+        }
+        assert_eq!(unit_name("foo"), "atelier-app-foo.service");
+    }
+
+    #[test]
+    fn unit_name_format_legacy_override() {
+        // The CloudMaster .env sets ATELIER_APP_UNIT_PREFIX=hr-app to keep
+        // managing the pre-rename services during the migration window.
+        unsafe {
+            std::env::set_var("ATELIER_APP_UNIT_PREFIX", "hr-app");
+        }
         assert_eq!(unit_name("foo"), "hr-app-foo.service");
+        unsafe {
+            std::env::remove_var("ATELIER_APP_UNIT_PREFIX");
+        }
     }
 }

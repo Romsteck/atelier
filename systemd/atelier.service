@@ -16,7 +16,7 @@ SyslogIdentifier=atelier
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/run /var/lib/atelier /opt/atelier/data /opt/homeroute/apps /tmp
+ReadWritePaths=/run /var/lib/atelier /opt/atelier/data /tmp
 ProtectHome=false
 
 [Install]

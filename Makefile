@@ -1,9 +1,28 @@
-.PHONY: all atelier web deploy deploy-web install-service logs clean test
+.PHONY: all atelier web deploy deploy-medion deploy-app logs clean test help
 
-ATELIER_BIN := /opt/atelier/bin/atelier
-RELEASE_BIN := target/release/atelier
-WEB_DIST := web/dist
-WEB_DEST := /opt/atelier/web/dist
+# Atelier vit désormais sur Medion. Les sources des apps restent sur
+# CloudMaster (édition via code-server). Le Makefile build localement et
+# pousse les artefacts vers Medion.
+
+MEDION ?= romain@10.0.0.254
+ATELIER_API ?= http://10.0.0.254:4100
+
+ATELIER_BIN_LOCAL := target/release/atelier
+WEB_DIST_LOCAL := web/dist
+
+help:
+	@echo "Targets:"
+	@echo "  atelier            cargo build --release -p atelier (local)"
+	@echo "  web                build frontend (web/dist) (local)"
+	@echo "  deploy             build all + push binary + web/dist to Medion + restart atelier.service"
+	@echo "  deploy-app SLUG=x  build + rsync app x to Medion + restart via API"
+	@echo "  logs               tail journalctl on Medion"
+	@echo "  test               cargo test --workspace"
+	@echo "  clean              cargo clean"
+	@echo ""
+	@echo "Variables (override on command line):"
+	@echo "  MEDION       (default: $(MEDION))"
+	@echo "  ATELIER_API  (default: $(ATELIER_API))"
 
 all: atelier web
 
@@ -13,45 +32,26 @@ atelier:
 web:
 	cd web && npm run build
 
-deploy-web: web
-	sudo install -d -m 0755 /opt/atelier/web
-	sudo rsync -aH --delete $(WEB_DIST)/ $(WEB_DEST)/
+# Push binary + frontend to Medion + restart Atelier service.
+deploy: deploy-medion
 
-deploy: atelier deploy-web
-	sudo install -d -m 0755 /opt/atelier/bin /opt/atelier/data /var/lib/atelier
-	sudo install -m 0755 $(RELEASE_BIN) $(ATELIER_BIN)
-	sudo systemctl restart atelier.service
-	sleep 1
-	curl -fsS http://127.0.0.1:4100/api/health | jq . || (sudo journalctl -u atelier -n 30 --no-pager; exit 1)
+deploy-medion: atelier web
+	@echo "→ rsync atelier binary + web/dist to Medion"
+	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):/opt/atelier/bin/atelier.new
+	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):/opt/atelier/web/dist/
+	@echo "→ atomic swap + restart atelier.service on Medion"
+	ssh $(MEDION) 'sudo install -o root -g root -m 0755 /opt/atelier/bin/atelier.new /opt/atelier/bin/atelier && sudo rm /opt/atelier/bin/atelier.new && sudo systemctl restart atelier.service'
+	@sleep 3
+	@echo "→ healthcheck"
+	curl -fsS $(ATELIER_API)/api/health | jq . || (ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager'; exit 1)
 
-install-service:
-	sudo install -m 0644 systemd/atelier.service /etc/systemd/system/atelier.service
-	sudo install -m 0644 systemd/atelier-sync-docs.service /etc/systemd/system/atelier-sync-docs.service
-	sudo install -m 0644 systemd/atelier-sync-docs.timer /etc/systemd/system/atelier-sync-docs.timer
-	sudo install -m 0644 systemd/atelier-sync-store.service /etc/systemd/system/atelier-sync-store.service
-	sudo install -m 0644 systemd/atelier-sync-store.timer /etc/systemd/system/atelier-sync-store.timer
-	sudo install -m 0644 systemd/atelier-sync-git.service /etc/systemd/system/atelier-sync-git.service
-	sudo install -m 0644 systemd/atelier-sync-git.timer /etc/systemd/system/atelier-sync-git.timer
-	sudo install -m 0644 systemd/atelier-sync-state.service /etc/systemd/system/atelier-sync-state.service
-	sudo install -m 0644 systemd/atelier-sync-state.timer /etc/systemd/system/atelier-sync-state.timer
-	sudo install -m 0644 systemd/atelier-sync-runs.service /etc/systemd/system/atelier-sync-runs.service
-	sudo install -m 0644 systemd/atelier-sync-runs.timer /etc/systemd/system/atelier-sync-runs.timer
-	sudo install -d -m 0755 /opt/atelier/bin
-	sudo install -m 0755 scripts/sync-docs.sh /opt/atelier/bin/sync-docs.sh
-	sudo install -m 0755 scripts/sync-store.sh /opt/atelier/bin/sync-store.sh
-	sudo install -m 0755 scripts/sync-git.sh /opt/atelier/bin/sync-git.sh
-	sudo install -m 0755 scripts/sync-state.sh /opt/atelier/bin/sync-state.sh
-	sudo install -m 0755 scripts/sync-runs.sh /opt/atelier/bin/sync-runs.sh
-	sudo systemctl daemon-reload
-	sudo systemctl enable atelier.service
-	sudo systemctl enable --now atelier-sync-docs.timer
-	sudo systemctl enable --now atelier-sync-store.timer
-	sudo systemctl enable --now atelier-sync-git.timer
-	sudo systemctl enable --now atelier-sync-state.timer
-	sudo systemctl enable --now atelier-sync-runs.timer
+# Build + rsync + restart a single app on Medion.
+deploy-app:
+	@if [ -z "$(SLUG)" ]; then echo "error: SLUG=<x> required (e.g. make deploy-app SLUG=files)" >&2; exit 1; fi
+	bash scripts/deploy-app.sh $(SLUG)
 
 logs:
-	journalctl -u atelier -f
+	ssh $(MEDION) 'sudo journalctl -u atelier -f'
 
 test:
 	cargo test --workspace

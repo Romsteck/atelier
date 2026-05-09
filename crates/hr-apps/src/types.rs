@@ -181,8 +181,11 @@ impl Application {
     }
 
     /// Root directory for this app's source, build artifacts and DB.
+    /// Resolved from `ATELIER_APPS_RUNTIME_ROOT` (default `/var/lib/atelier/apps`).
     pub fn app_dir(&self) -> PathBuf {
-        PathBuf::from(format!("/opt/homeroute/apps/{}", self.slug))
+        let root = std::env::var("ATELIER_APPS_RUNTIME_ROOT")
+            .unwrap_or_else(|_| "/var/lib/atelier/apps".to_string());
+        PathBuf::from(root).join(&self.slug)
     }
 
     /// Path to the managed SQLite database for this app.
