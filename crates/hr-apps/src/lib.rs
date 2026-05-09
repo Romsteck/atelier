@@ -14,6 +14,6 @@ pub use hr_db::engine::SyncResult;
 pub use hr_db::schema::{ColumnDefinition, DatabaseSchema, RelationDefinition, TableDefinition};
 pub use hr_db::query::{Filter, FilterOp, Pagination};
 pub use port_registry::PortRegistry;
-pub use registry::{generate_flow_token, AppRegistry};
+pub use registry::{default_callback_url, generate_flow_token, AppRegistry};
 pub use supervisor::{AppSupervisor, ProcessStatus};
 pub use types::*;

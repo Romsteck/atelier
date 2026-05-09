@@ -192,7 +192,7 @@ async fn regenerate_flow_token(
     };
 
     let token = hr_apps::generate_flow_token();
-    let url = format!("http://127.0.0.1:{}", app.port);
+    let url = hr_apps::default_callback_url(&app);
 
     app.flow_callback_token = Some(token.clone());
     app.flow_callback_url = Some(url.clone());
