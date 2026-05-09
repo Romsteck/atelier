@@ -1,0 +1,22 @@
+[package]
+name = "hr-dv-codegen"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hr-dv-codegen"
+path = "src/main.rs"
+
+[dependencies]
+hr-dataverse = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }

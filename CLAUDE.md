@@ -2,16 +2,16 @@
 
 ## Statut migration (2026-05-09)
 
-> ✅ **Phase 9 cutover terminé** — apps migrées de Medion vers CloudMaster, hr-orchestrator (Medion) stopped + disabled. Atelier supervise désormais 6 running apps + 4 stopped via `hr-apps::AppSupervisor`.
+> ✅ **Phase 9 cutover + 9.5 cleanup terminés** — apps migrées de Medion vers CloudMaster, hr-orchestrator slim sur Medion (network-only), code applicatif (10 crates) déplacé dans `crates/hr-XXX` localement.
 >
-> Détails complets et travaux différés : [memory/project_atelier_cutover_done.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_atelier_cutover_done.md)
+> Détails : [memory/project_atelier_cutover_done.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_atelier_cutover_done.md), [memory/project_homeroute_post_cleanup.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_homeroute_post_cleanup.md)
 >
 > Plan d'extraction complet (copie locale) : [docs/plan-extraction.md](docs/plan-extraction.md)
 
 ### Restant à faire (différé)
 
-- **9.5 cleanup homeroute repo** — décision de scope ouverte (minimal vs move-into-atelier vs slim-orchestrator vs leave-alone)
 - **9.2 finition write endpoints Atelier** — list/get/env/control/status implémentés. Manquent : create/update/delete/build/deploy/exec/update_env/regenerate_context/logs/todos. Boutons Studio/DbExplorer correspondants → 404 silencieux.
+- **Refacto homeroute-core** — découpler `hr-common`/`hr-ipc`/`hr-docs`/`hr-acme` qu'Atelier path-dep encore vers `/nvme/homeroute/crates/shared/` et `/edge/`.
 
 ## Plan suivant — `hr-flowd` daemon multi-stack
 
@@ -94,9 +94,9 @@ Atelier tourne sur la même machine que la dev (CloudMaster) — pas de rsync cr
 - **TOUJOURS** logger structuré (cf. `.claude/rules/logging.md`)
 - **JAMAIS** d'attribution Claude dans les commits
 
-## Path-deps vers homeroute
+## Path-deps vers homeroute (résiduel)
 
-Atelier consomme aujourd'hui ces crates de homeroute via path-dep (refacto en repo séparé `homeroute-core` = travail futur) :
+Atelier consomme encore ces crates partagées de homeroute (refacto `homeroute-core` = travail futur) :
 
 ```toml
 hr-common = { path = "/nvme/homeroute/crates/shared/hr-common" }
@@ -105,6 +105,8 @@ hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
 ```
 
 Ne jamais modifier ces crates depuis Atelier — leur source de vérité reste dans `/nvme/homeroute/`. Si un changement est nécessaire, le faire dans homeroute, valider que homeroute build, puis re-build Atelier.
+
+Les **10 crates applicatives** (`hr-apps`, `hr-db`, `hr-git`, `hr-flow`, `hr-flow-macros`, `hr-dataverse`, `hr-dataverse-migrate`, `hr-dvexpr`, `hr-dv-codegen`) ont été déplacées dans Atelier (`crates/hr-XXX`) le 2026-05-09 — modifiables localement sans coordination homeroute.
 
 ## Workflow d'agent
 

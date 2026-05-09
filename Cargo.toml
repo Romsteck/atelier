@@ -3,6 +3,15 @@ resolver = "2"
 members = [
     "crates/atelier",
     "crates/atelier-api",
+    "crates/hr-apps",
+    "crates/hr-dataverse",
+    "crates/hr-dataverse-migrate",
+    "crates/hr-db",
+    "crates/hr-dv-codegen",
+    "crates/hr-dvexpr",
+    "crates/hr-flow",
+    "crates/hr-flow-macros",
+    "crates/hr-git",
 ]
 
 [workspace.package]
@@ -22,6 +31,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 
 # Logging
 tracing = "0.1"
@@ -37,22 +47,36 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+rand = "0.9"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+futures-util = "0.3"
 
-# Path-deps vers homeroute (à terme : repo `homeroute-core` séparé)
+# HTTP client
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "stream"] }
+
+# Path-deps shared homeroute (à terme : repo `homeroute-core` séparé)
 # La source de vérité reste /nvme/homeroute/crates/shared/. Ne pas modifier ces crates depuis Atelier.
-hr-common    = { path = "/nvme/homeroute/crates/shared/hr-common" }
-hr-ipc       = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
-hr-docs      = { path = "/nvme/homeroute/crates/shared/hr-docs" }
-hr-git       = { path = "/nvme/homeroute/crates/orchestrator/hr-git" }
-hr-dataverse = { path = "/nvme/homeroute/crates/orchestrator/hr-dataverse" }
-hr-dvexpr    = { path = "/nvme/homeroute/crates/orchestrator/hr-dvexpr" }
-hr-flow      = { path = "/nvme/homeroute/crates/orchestrator/hr-flow" }
-hr-apps      = { path = "/nvme/homeroute/crates/orchestrator/hr-apps" }
-hr-db        = { path = "/nvme/homeroute/crates/orchestrator/hr-db" }
+hr-common = { path = "/nvme/homeroute/crates/shared/hr-common" }
+hr-ipc    = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
+hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
+
+# Crates internes Atelier (déplacés depuis homeroute le 2026-05-09)
+hr-apps              = { path = "crates/hr-apps" }
+hr-dataverse         = { path = "crates/hr-dataverse" }
+hr-dataverse-migrate = { path = "crates/hr-dataverse-migrate" }
+hr-db                = { path = "crates/hr-db" }
+hr-dv-codegen        = { path = "crates/hr-dv-codegen" }
+hr-dvexpr            = { path = "crates/hr-dvexpr" }
+hr-flow              = { path = "crates/hr-flow" }
+hr-flow-macros       = { path = "crates/hr-flow-macros" }
+hr-git               = { path = "crates/hr-git" }
 
 # Postgres + sqlx — voir commentaire dans homeroute Cargo.toml
 sqlx-core    = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json", "chrono", "uuid", "migrate"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chrono", "uuid", "json", "migrate", "bigdecimal"] }
+async-graphql = { version = "7.0", default-features = false, features = ["dynamic-schema", "dataloader", "chrono", "uuid"] }
 
 # Crates internes Atelier
 atelier-api = { path = "crates/atelier-api" }

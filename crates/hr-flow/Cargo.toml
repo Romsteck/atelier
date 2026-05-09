@@ -1,0 +1,37 @@
+[package]
+name = "hr-flow"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+async-trait = "0.1"
+
+# Postgres driver — runs/steps live in the app's postgres-dataverse db
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }
+
+# Expression evaluation reused for {{ ... }} substitution and step conditions
+hr-dvexpr = { workspace = true }
+
+# Identity threaded through dataverse calls
+hr-common = { workspace = true }
+
+# Dataverse access for the managed `dataverse` connector
+hr-dataverse = { workspace = true }
+
+# Proc-macros (re-exported so consumers only need `use hr_flow::flow_action;`)
+hr-flow-macros = { workspace = true }
+
+# HTTP client for the managed `http` connector
+reqwest = { workspace = true }
+
+[dev-dependencies]
+futures-util = { workspace = true }
