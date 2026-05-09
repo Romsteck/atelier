@@ -1,17 +1,18 @@
 # 🚧 Migration en attente — `hr-flowd` daemon multi-stack
 
-> **À enchaîner après le cutover Phase 9 d'Atelier (déconnexion de homeroute).**
+> **Cutover Phase 9 terminé le 2026-05-09. La transformation hr-flowd reste explicitement reportée — à reprendre quand 9.5 cleanup sera décidé et l'écosystème stable.**
 
 📄 Plan complet : [/home/romain/.claude/plans/peaceful-spinning-mountain.md](/home/romain/.claude/plans/peaceful-spinning-mountain.md)
 
-## Statut actuel (mis à jour 2026-05-08)
+## Statut actuel (mis à jour 2026-05-09)
 
 - **Phase 5 d'Atelier livrée en viewer read-only uniquement** (commit `2fb1056`).
   Routes `/api/apps/:slug/flows*` + `/api/flows/_stats` reproduites depuis
   homeroute, sans couplage au runtime `hr-flow` (uniquement `parse_flow_toml`,
   fonction pure).
+- **Cutover Phase 9 terminé** (commits `5f980cb` + `719169e`) : apps migrées
+  vers CloudMaster, hr-orchestrator stoppé sur Medion.
 - **La transformation hr-flowd est explicitement reportée** par l'utilisateur.
-  À reprendre une fois le cutover terminé et stable.
 
 ## Quoi (résumé)
 

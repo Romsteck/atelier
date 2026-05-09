@@ -1,16 +1,25 @@
 # Atelier — Plateforme applicative HomeRoute
 
-## Plan en cours / Plan suivant
+## Statut migration (2026-05-09)
 
-> 🚧 **Migration en cours** : Atelier est en cours d'extraction depuis `/nvme/homeroute/`.
-> Plan complet : [/home/romain/.claude/plans/purring-gathering-hopper.md](/home/romain/.claude/plans/purring-gathering-hopper.md)
+> ✅ **Phase 9 cutover terminé** — apps migrées de Medion vers CloudMaster, hr-orchestrator (Medion) stopped + disabled. Atelier supervise désormais 6 running apps + 4 stopped via `hr-apps::AppSupervisor`.
 >
-> 📌 **Plan suivant (post-cutover, OBLIGATOIRE à enchaîner)** :
-> [/home/romain/.claude/plans/peaceful-spinning-mountain.md](/home/romain/.claude/plans/peaceful-spinning-mountain.md)
+> Détails complets et travaux différés : [memory/project_atelier_cutover_done.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_atelier_cutover_done.md)
 >
-> Une fois la migration terminée (cutover Phase 9 du plan en cours), enchaîner sur ce second plan : transformer `hr-flow` (lib Rust embeddable, donc inutilisable côté NextJS) en daemon partagé `hr-flowd` accessible via callbacks HTTP par toutes les apps quelle que soit leur stack.
->
-> ⚠️ **Pendant la migration de hr-flow vers Atelier (Phase 5/6 du plan en cours)** : ne pas refactorer `hr-flow` de façon qui rendrait l'extraction du daemon plus difficile. Pas de couplage fort à `ApiState` ou au runtime des apps.
+> Plan d'extraction complet (référence) : [/home/romain/.claude/plans/purring-gathering-hopper.md](/home/romain/.claude/plans/purring-gathering-hopper.md)
+
+### Restant à faire (différé)
+
+- **9.5 cleanup homeroute repo** — décision de scope ouverte (minimal vs move-into-atelier vs slim-orchestrator vs leave-alone)
+- **9.2 finition write endpoints Atelier** — list/get/env/control/status implémentés. Manquent : create/update/delete/build/deploy/exec/update_env/regenerate_context/logs/todos. Boutons Studio/DbExplorer correspondants → 404 silencieux.
+
+## Plan suivant — `hr-flowd` daemon multi-stack
+
+📌 [/home/romain/.claude/plans/peaceful-spinning-mountain.md](/home/romain/.claude/plans/peaceful-spinning-mountain.md)
+
+Transformer `hr-flow` (lib Rust embeddable, donc inutilisable côté NextJS) en daemon partagé `hr-flowd` accessible via callbacks HTTP par toutes les apps quelle que soit leur stack. **Explicitement reporté** par l'utilisateur ; à reprendre quand le cutover sera stable et 9.5 décidé.
+
+⚠️ **Pendant les évolutions de `hr-flow` ici** : ne pas refactorer de façon qui rendrait l'extraction du daemon plus difficile. Pas de nouveau couplage fort à `ApiState` ou au runtime des apps. Cf. [memory/project_atelier_hrflowd_pending.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_atelier_hrflowd_pending.md).
 
 ---
 
@@ -29,27 +38,34 @@ Plateforme applicative extraite de HomeRoute. Contient :
 
 Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME, monitoring hosts (ces concerns restent dans homeroute sur Medion).
 
-## Architecture (cible)
+## Architecture (atteinte 2026-05-09)
 
 ```
 Internet → Cloudflare → Medion (10.0.0.254)
-                          └─ hr-edge (homeroute) — proxy + ACME + auth + tunnel
-                                └─ app.mynetwk.biz → CloudMaster:4100 (Atelier)
+                          ├─ hr-edge (proxy + ACME + auth + tunnel)
+                          │   ├─ {slug}.mynetwk.biz → 10.0.0.10:port-app (CloudMaster)
+                          │   ├─ proxy.mynetwk.biz   → Medion:4000 (homeroute network API)
+                          │   └─ app.mynetwk.biz     → 10.0.0.10:4100 (Atelier)
+                          ├─ hr-netcore (DNS, DHCP, adblock, ipv6)
+                          └─ homeroute (4000) network API + Postgres (5432)
+
 CloudMaster (10.0.0.10)
-  └─ atelier (4100 HTTP, /run/atelier.sock IPC) — ce service
-  └─ hr-studio.service (8443) — code-server pour le Studio
+  ├─ atelier.service (4100) — supervisor + apps API + frontend
+  ├─ hr-app-{slug}.service (transient, 3001-3010) — apps spawn par Atelier
+  └─ hr-studio.service (8443) — code-server (Studio iframe)
 ```
 
 ## Stockage
 
 | Données | Chemin |
 |---------|--------|
-| Sources des apps | `/opt/homeroute/apps/{slug}/src/` (déjà sur CloudMaster) |
-| Runtime Atelier | `/opt/atelier/` (binaire) |
-| DB Atelier (SQLite) | `/var/lib/atelier/orchestrator.db` |
-| Docs index FTS5 | `/var/lib/atelier/docs-index.sqlite` |
-| .env | `/opt/atelier/.env` |
-| Postgres-dataverse | externe (LAN, à confirmer Phase 7) |
+| Sources des apps + runtime | `/opt/homeroute/apps/{slug}/{src,bin,.env,db.sqlite,runs}` (CloudMaster local) |
+| Atelier registry canonical | `/opt/atelier/data/{apps.json, port-registry.json}` |
+| Atelier runtime | `/opt/atelier/{bin,web/dist}` |
+| Docs FTS5 + sync mirror | `/var/lib/atelier/{docs, docs-index.sqlite}` |
+| Atelier env | `/opt/atelier/.env` (contient ATELIER_DV_ADMIN_URL + ATELIER_APPS_RUNTIME_ROOT) |
+| Postgres-dataverse | Medion 10.0.0.254:5432 (LAN, accédé par apps + Atelier) |
+| dataverse-secrets.json | `/var/lib/atelier/state/dataverse-secrets.json` (snapshot pré-cutover) |
 
 ## Ports & sockets
 
