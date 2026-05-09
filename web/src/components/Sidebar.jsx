@@ -18,12 +18,6 @@ const navGroups = [
       { to: '/flows-stats', icon: Workflow, label: 'Flow Stats' },
     ],
   },
-  {
-    label: 'Reseau',
-    items: [
-      { external: true, href: 'https://proxy.mynetwk.biz', icon: ExternalLink, label: 'HomeRoute Dashboard' },
-    ],
-  },
 ];
 
 function Sidebar({ onClose }) {

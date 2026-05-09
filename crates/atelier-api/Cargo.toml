@@ -17,6 +17,8 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
 
 hr-common    = { workspace = true }
 hr-docs      = { workspace = true }

@@ -25,17 +25,16 @@ const STACKS = [
   { value: 'axum', label: 'Rust Only' },
 ];
 
-// Allowlist of slugs that ship with the hr-flow engine. Keeping it client-side
-// for the pilot — once flow-build rolls out wider this becomes an app flag
-// surfaced by the API.
-const FLOWS_ENABLED_SLUGS = new Set(['wallet']);
-
+// Phase 4 livrée (2026-05-09) : le daemon hr-flowd est partagé, donc toute
+// app HomeRoute est éligible aux flux indépendamment de la stack. Plus de
+// gating client-side ; le tab Flows s'affiche pour toutes les apps. Les
+// apps qui n'ont pas encore de TOML voient simplement un état vide.
 const TABS = [
   { id: 'code', label: 'Code', icon: Code2 },
   { id: 'db', label: 'DB', icon: Database, requiresDb: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'docs', label: 'Docs', icon: BookOpen },
-  { id: 'flows', label: 'Flows', icon: Workflow, requiresFlows: true },
+  { id: 'flows', label: 'Flows', icon: Workflow },
   { id: 'env', label: 'Env', icon: KeyRound },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -83,11 +82,6 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
             >
               <span className={`w-[7px] h-[7px] rounded-full shrink-0 ${statusDot(state)}`} />
               <span className="flex-1 truncate">{app.name}</span>
-              {FLOWS_ENABLED_SLUGS.has(app.slug) && (
-                <span className="text-[9px] uppercase tracking-wider text-gray-500" title="Flows pilot">
-                  Flows
-                </span>
-              )}
               <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                 {isRunning ? (
                   <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded" title="Stop">
@@ -432,7 +426,6 @@ export default function Studio() {
   const currentApp = app || apps.find(a => a.slug === selectedSlug);
   const visibleTabs = TABS.filter(t => {
     if (t.requiresDb && !currentApp?.has_db) return false;
-    if (t.requiresFlows && !FLOWS_ENABLED_SLUGS.has(currentApp?.slug || '')) return false;
     return true;
   });
 

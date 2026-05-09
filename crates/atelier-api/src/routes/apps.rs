@@ -34,6 +34,7 @@ pub fn router() -> Router<ApiState> {
         .route("/{slug}/env", get(get_app_env))
         .route("/{slug}/control", post(control_app))
         .route("/{slug}/status", get(app_status))
+        .route("/{slug}/regenerate_flow_token", post(regenerate_flow_token))
 }
 
 fn validate_slug(slug: &str) -> Result<(), axum::response::Response> {
@@ -160,4 +161,67 @@ async fn app_status(State(state): State<ApiState>, Path(slug): Path<String>) -> 
         }
         None => Json(json!({"success": true, "data": null})).into_response(),
     }
+}
+
+/// `POST /api/apps/{slug}/regenerate_flow_token`
+///
+/// Generates a fresh 32-byte hex token for callbacks daemon ↔ app and writes
+/// it back into `apps.json` (`flow_callback_url` + `flow_callback_token`).
+/// Sets `flow_callback_url=http://127.0.0.1:<port>` from the app's port.
+///
+/// Returns the new token in the response body so the caller can persist it
+/// in the app's `.env` (e.g. `HR_FLOW_TOKEN=...`). After this the daemon
+/// registry must be reloaded — `POST /api/flows/_admin/reload?slug=<slug>`
+/// (handled separately).
+async fn regenerate_flow_token(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    use rand::RngCore;
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let mut app = match state.app_registry.get(&slug).await {
+        Some(a) => a,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"success": false, "error": format!("app '{slug}' not found")})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let token = hex::encode(bytes);
+    let url = format!("http://127.0.0.1:{}", app.port);
+
+    app.flow_callback_token = Some(token.clone());
+    app.flow_callback_url = Some(url.clone());
+
+    if let Err(e) = state.app_registry.upsert(app).await {
+        warn!(slug = %slug, error = %e, "regenerate_flow_token: persist failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": format!("persist apps.json: {e}")})),
+        )
+            .into_response();
+    }
+
+    info!(slug = %slug, "regenerate_flow_token: token rotated");
+    Json(json!({
+        "success": true,
+        "data": {
+            "slug": slug,
+            "flow_callback_url": url,
+            "flow_callback_token": token,
+            "next_steps": [
+                "Pose HR_FLOW_TOKEN=<token> dans le .env canonique de l'app (CloudMaster)",
+                "POST /api/flows/_admin/reload?slug=<slug> pour recharger le registry du daemon",
+                "make deploy-app SLUG=<slug> pour rsync le .env mis à jour vers Medion"
+            ]
+        }
+    }))
+    .into_response()
 }
