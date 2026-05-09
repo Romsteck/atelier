@@ -6,7 +6,7 @@
 >
 > Détails complets et travaux différés : [memory/project_atelier_cutover_done.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_atelier_cutover_done.md)
 >
-> Plan d'extraction complet (référence) : [/home/romain/.claude/plans/purring-gathering-hopper.md](/home/romain/.claude/plans/purring-gathering-hopper.md)
+> Plan d'extraction complet (copie locale) : [docs/plan-extraction.md](docs/plan-extraction.md)
 
 ### Restant à faire (différé)
 
@@ -15,7 +15,7 @@
 
 ## Plan suivant — `hr-flowd` daemon multi-stack
 
-📌 [/home/romain/.claude/plans/peaceful-spinning-mountain.md](/home/romain/.claude/plans/peaceful-spinning-mountain.md)
+📌 **Plan complet dans le repo** : [docs/plan-hr-flowd.md](docs/plan-hr-flowd.md) (copie locale, source originale `/home/romain/.claude/plans/peaceful-spinning-mountain.md`)
 
 Transformer `hr-flow` (lib Rust embeddable, donc inutilisable côté NextJS) en daemon partagé `hr-flowd` accessible via callbacks HTTP par toutes les apps quelle que soit leur stack. **Explicitement reporté** par l'utilisateur ; à reprendre quand le cutover sera stable et 9.5 décidé.
 

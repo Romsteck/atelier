@@ -2,7 +2,8 @@
 
 > **Cutover Phase 9 terminé le 2026-05-09. La transformation hr-flowd reste explicitement reportée — à reprendre quand 9.5 cleanup sera décidé et l'écosystème stable.**
 
-📄 Plan complet : [/home/romain/.claude/plans/peaceful-spinning-mountain.md](/home/romain/.claude/plans/peaceful-spinning-mountain.md)
+📄 Plan complet (copie locale dans le repo) : [/nvme/atelier/docs/plan-hr-flowd.md](/nvme/atelier/docs/plan-hr-flowd.md)
+📄 Source originale : [/home/romain/.claude/plans/peaceful-spinning-mountain.md](/home/romain/.claude/plans/peaceful-spinning-mountain.md)
 
 ## Statut actuel (mis à jour 2026-05-09)
 
