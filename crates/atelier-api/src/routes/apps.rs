@@ -177,7 +177,6 @@ async fn regenerate_flow_token(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
-    use rand::RngCore;
     if let Err(r) = validate_slug(&slug) {
         return r;
     }
@@ -192,9 +191,7 @@ async fn regenerate_flow_token(
         }
     };
 
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let token = hex::encode(bytes);
+    let token = hr_apps::generate_flow_token();
     let url = format!("http://127.0.0.1:{}", app.port);
 
     app.flow_callback_token = Some(token.clone());

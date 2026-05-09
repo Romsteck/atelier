@@ -63,8 +63,26 @@ impl AppRegistry {
     }
 
     /// Insert a new app or replace an existing one with the same slug.
+    ///
+    /// Defensively provisions the flow callback fields when missing so every
+    /// app is daemon-ready by default (Phase 4+, hr-flowd shared daemon) :
+    /// - `flow_callback_token` : 32-byte hex generated via `rand::rng()`
+    /// - `flow_callback_url`   : `http://127.0.0.1:<port>` once the port is
+    ///   assigned (port==0 keeps the URL absent — token alone won't reach
+    ///   the daemon registry until the port is set on a follow-up upsert).
+    ///
+    /// This makes future apps flow-ready without an explicit
+    /// `regenerate_flow_token` call. The endpoint remains useful for
+    /// rotating an existing token.
     pub async fn upsert(&self, mut app: Application) -> Result<()> {
         app.updated_at = Utc::now();
+        if app.flow_callback_token.is_none() {
+            app.flow_callback_token = Some(generate_flow_token());
+            info!(slug = %app.slug, "AppRegistry: flow_callback_token auto-generated");
+        }
+        if app.flow_callback_url.is_none() && app.port != 0 {
+            app.flow_callback_url = Some(format!("http://127.0.0.1:{}", app.port));
+        }
         let mut apps = self.apps.write().await;
         let action = if let Some(pos) = apps.iter().position(|a| a.slug == app.slug) {
             apps[pos] = app.clone();
@@ -109,6 +127,16 @@ impl AppRegistry {
     }
 }
 
+/// Generate a fresh 32-byte hex token suitable for `flow_callback_token`.
+/// Public so the Atelier API endpoint can rotate without re-implementing
+/// the same crypto.
+pub fn generate_flow_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +159,32 @@ mod tests {
 
         assert!(reg2.remove("trader").await.unwrap());
         assert!(reg2.get("trader").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_auto_provisions_flow_callback_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("apps.json");
+        let reg = AppRegistry::load_from(path).await.unwrap();
+
+        // Token only (port=0 → no URL yet)
+        let mut app = Application::new("foo".into(), "Foo".into(), AppStack::AxumVite);
+        assert!(app.flow_callback_token.is_none());
+        assert!(app.flow_callback_url.is_none());
+        reg.upsert(app.clone()).await.unwrap();
+        let stored = reg.get("foo").await.unwrap();
+        assert!(stored.flow_callback_token.is_some());
+        assert_eq!(stored.flow_callback_token.as_ref().unwrap().len(), 64); // 32 bytes hex
+        assert!(stored.flow_callback_url.is_none());
+
+        // Re-upsert with port → URL gets filled, token preserved (was already set)
+        app = stored;
+        app.port = 3009;
+        reg.upsert(app).await.unwrap();
+        let stored2 = reg.get("foo").await.unwrap();
+        assert_eq!(
+            stored2.flow_callback_url.as_deref(),
+            Some("http://127.0.0.1:3009")
+        );
     }
 }
