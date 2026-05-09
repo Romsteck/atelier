@@ -28,7 +28,6 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::routes::apps::Application;
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
@@ -75,18 +74,9 @@ fn validate_table_name(table: &str) -> Result<(), Response> {
     }
 }
 
-fn read_apps(state: &ApiState) -> Result<Vec<Application>, String> {
-    let path = state.apps_state_dir.join("apps.json");
-    let bytes = std::fs::read(&path).map_err(|e| format!("read apps.json: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("parse apps.json: {e}"))
-}
-
-fn db_backend_for(state: &ApiState, slug: &str) -> Option<String> {
-    read_apps(state)
-        .ok()?
-        .into_iter()
-        .find(|a| a.slug == slug)
-        .and_then(|a| a.db_backend)
+async fn db_backend_for(state: &ApiState, slug: &str) -> Option<String> {
+    let app = state.app_registry.get(slug).await?;
+    Some(format!("{:?}", app.db_backend).to_lowercase().replace('_', "-"))
 }
 
 fn legacy_sqlite_response(slug: &str) -> Response {
@@ -105,9 +95,9 @@ fn legacy_sqlite_response(slug: &str) -> Response {
         .into_response()
 }
 
-fn require_pg(state: &ApiState, slug: &str) -> Result<(), Response> {
-    match db_backend_for(state, slug).as_deref() {
-        Some("postgres-dataverse") => Ok(()),
+async fn require_pg(state: &ApiState, slug: &str) -> Result<(), Response> {
+    match db_backend_for(state, slug).await.as_deref() {
+        Some("postgres-dataverse") | Some("postgresdataverse") => Ok(()),
         Some(_) | None => Err(legacy_sqlite_response(slug)),
     }
 }
@@ -132,7 +122,7 @@ async fn list_tables(
     if let Err(r) = validate_slug(&slug) {
         return r;
     }
-    if let Err(r) = require_pg(&state, &slug) {
+    if let Err(r) = require_pg(&state, &slug).await {
         return r;
     }
     let dv = match state.dv.as_ref() {
@@ -176,7 +166,7 @@ async fn describe_table(
     if let Err(r) = validate_table_name(&table) {
         return r;
     }
-    if let Err(r) = require_pg(&state, &slug) {
+    if let Err(r) = require_pg(&state, &slug).await {
         return r;
     }
     let dv = match state.dv.as_ref() {
@@ -327,7 +317,7 @@ async fn query_rows(
     if let Err(r) = validate_table_name(&table) {
         return r;
     }
-    if let Err(r) = require_pg(&state, &slug) {
+    if let Err(r) = require_pg(&state, &slug).await {
         return r;
     }
     let dv = match state.dv.as_ref() {
