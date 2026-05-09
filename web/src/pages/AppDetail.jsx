@@ -61,8 +61,8 @@ function statusBadge(state) {
 
 function OverviewTab({ app, status, busy, onControl }) {
   const isRunning = (status?.state || app.state || '').toLowerCase() === 'running';
-  const domain = app.domain || `${app.slug}.mynetwk.biz`;
-  const url = `https://${domain}`;
+  // Path-routed via Atelier under /apps/{slug}/.
+  const url = `/apps/${app.slug}/`;
 
   return (
     <div className="space-y-4">
@@ -651,8 +651,8 @@ export default function AppDetail() {
 
   if (!app) return null;
 
-  const domain = app.domain || `${slug}.mynetwk.biz`;
-  const url = `https://${domain}`;
+  // Path-routed via Atelier under /apps/{slug}/.
+  const url = `/apps/${slug}/`;
   const visibleTabs = TABS.filter((t) => !t.requiresDb || app.has_db);
 
   return (
@@ -690,7 +690,7 @@ export default function AppDetail() {
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300"
               >
-                {domain}
+                {url}
                 <ExternalLink className="w-3 h-3" />
               </a>
             </div>

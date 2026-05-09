@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod apps_db;
+pub mod apps_proxy;
 pub mod docs;
 pub mod dv;
 pub mod flows;

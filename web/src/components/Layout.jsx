@@ -92,7 +92,9 @@ function StudioHeaderInfo() {
 
   const state = (status?.state || currentApp.state || 'stopped').toLowerCase();
   const isRunning = state === 'running';
-  const domain = currentApp.domain || `${currentApp.slug}.mynetwk.biz`;
+  // Apps are path-routed via Atelier under /apps/{slug}/. Open links use the
+  // relative URL so the link works regardless of which subdomain hits us.
+  const appPath = `/apps/${currentApp.slug}/`;
   const uptime = status?.uptime_secs != null
     ? `${Math.floor(status.uptime_secs / 60)}m ${status.uptime_secs % 60}s`
     : '-';
@@ -107,13 +109,13 @@ function StudioHeaderInfo() {
         <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400">{currentApp.stack}</span>
       </div>
       <a
-        href={`https://${domain}`}
+        href={appPath}
         target="_blank"
         rel="noopener noreferrer"
         className="hidden md:flex items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 truncate max-w-[200px]"
-        title={domain}
+        title={`Ouvrir ${currentApp.slug} (${appPath})`}
       >
-        <span className="truncate">{domain}</span>
+        <span className="truncate">{appPath}</span>
         <ExternalLink className="w-3 h-3 shrink-0" />
       </a>
       <div className="hidden lg:flex items-center gap-3 text-[11px] text-gray-400 shrink-0">
@@ -216,7 +218,7 @@ function LayoutInner({ children }) {
             >
               <Menu className="w-6 h-6" />
             </button>
-            <h1 className="lg:hidden text-lg font-bold shrink-0">HomeRoute</h1>
+            <h1 className="lg:hidden text-lg font-bold shrink-0">Atelier</h1>
             {isStudio ? (
               <StudioHeaderInfo />
             ) : (

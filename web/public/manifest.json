@@ -1,6 +1,6 @@
 {
-  "name": "HomeRoute",
-  "short_name": "HomeRoute",
+  "name": "Atelier",
+  "short_name": "Atelier",
   "start_url": "/",
   "display": "standalone",
   "theme_color": "#0f172a",
