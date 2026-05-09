@@ -98,6 +98,13 @@ async fn main() -> Result<()> {
         "hr-apps supervisor wired (Phase 9 prep)"
     );
 
+    // Adopt existing transient units for apps marked Running. À chaque boot
+    // d'Atelier, on raccroche les processus déjà supervisés par systemd
+    // (sinon /api/apps/.../status renvoie null jusqu'au prochain control).
+    if let Err(err) = supervisor.start_all_running().await {
+        warn!(?err, "supervisor.start_all_running failed");
+    }
+
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
