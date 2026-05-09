@@ -19,6 +19,10 @@ const DEFAULT_APPS_STATE_DIR: &str = "/var/lib/atelier/state";
 const DEFAULT_APPS_SRC_ROOT: &str = "/opt/homeroute/apps";
 const DEFAULT_APPS_RUNTIME_ROOT: &str = "/var/lib/atelier/apps";
 const DEFAULT_WEB_DIST: &str = "/opt/atelier/web/dist";
+/// Données canoniques d'Atelier post-cutover (Atelier owns these files).
+const DEFAULT_APPS_DATA_DIR: &str = "/opt/atelier/data";
+const DEFAULT_BASE_DOMAIN: &str = "mynetwk.biz";
+const DEFAULT_MCP_ENDPOINT: &str = "http://127.0.0.1:4100/mcp";
 /// Hôte des Postgres apps (Medion). Le secret synchronisé contient `127.0.0.1`
 /// (point de vue de Medion) — Atelier le swap vers cet hôte au registre des DSN.
 const DEFAULT_DV_HOST: &str = "10.0.0.254";
@@ -36,6 +40,9 @@ async fn main() -> Result<()> {
     let apps_state_dir = PathBuf::from(std::env::var("ATELIER_APPS_STATE_DIR").unwrap_or_else(|_| DEFAULT_APPS_STATE_DIR.to_string()));
     let apps_src_root = PathBuf::from(std::env::var("ATELIER_APPS_SRC_ROOT").unwrap_or_else(|_| DEFAULT_APPS_SRC_ROOT.to_string()));
     let apps_runtime_root = PathBuf::from(std::env::var("ATELIER_APPS_RUNTIME_ROOT").unwrap_or_else(|_| DEFAULT_APPS_RUNTIME_ROOT.to_string()));
+    let apps_data_dir = PathBuf::from(std::env::var("ATELIER_APPS_DATA_DIR").unwrap_or_else(|_| DEFAULT_APPS_DATA_DIR.to_string()));
+    let base_domain = std::env::var("ATELIER_BASE_DOMAIN").unwrap_or_else(|_| DEFAULT_BASE_DOMAIN.to_string());
+    let mcp_endpoint = std::env::var("ATELIER_MCP_ENDPOINT").unwrap_or_else(|_| DEFAULT_MCP_ENDPOINT.to_string());
     let web_dist = PathBuf::from(std::env::var("ATELIER_WEB_DIST").unwrap_or_else(|_| DEFAULT_WEB_DIST.to_string()));
 
     info!(
@@ -56,6 +63,41 @@ async fn main() -> Result<()> {
     let git = Arc::new(hr_git::GitService::with_repos_dir(git_repos_dir));
     let dv = init_dv(&apps_state_dir).await;
     let task_store = open_task_store(&apps_state_dir);
+
+    // Phase 9 — Apps supervisor wiring. Atelier devient le canonical owner des
+    // registries (apps.json, port-registry.json) sous apps_data_dir. Au premier
+    // boot, on seed depuis le mirror synced.
+    seed_apps_data(&apps_data_dir, &apps_state_dir);
+    let events = Arc::new(hr_common::events::EventBus::new());
+    let app_registry = hr_apps::AppRegistry::load_from(apps_data_dir.join("apps.json"))
+        .await
+        .expect("Failed to load app registry");
+    let port_registry = hr_apps::PortRegistry::load_from(
+        apps_data_dir.join("port-registry.json"),
+        3001,
+    )
+    .await
+    .expect("Failed to load port registry");
+    let supervisor = Arc::new(hr_apps::AppSupervisor::new(
+        app_registry.clone(),
+        port_registry.clone(),
+        events.app_state.clone(),
+    ));
+    let db_manager = Arc::new(hr_apps::db_manager::DbManager::new(apps_src_root.clone()));
+    let todos_manager = Arc::new(hr_apps::todos::TodosManager::new(
+        apps_src_root.clone(),
+        events.clone(),
+    ));
+    let context_generator = Arc::new(hr_apps::context::ContextGenerator::new(
+        apps_src_root.clone(),
+        base_domain.clone(),
+        mcp_endpoint.clone(),
+    ));
+    info!(
+        apps = app_registry.list().await.len(),
+        "hr-apps supervisor wired (Phase 9 prep)"
+    );
+
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
@@ -66,6 +108,13 @@ async fn main() -> Result<()> {
         task_store,
         apps_src_root,
         apps_runtime_root,
+        events,
+        app_registry,
+        port_registry,
+        supervisor,
+        db_manager,
+        todos_manager,
+        context_generator,
     );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
@@ -108,6 +157,30 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(true)
         .init();
+}
+
+/// Seed `/opt/atelier/data/{apps,port-registry}.json` from the read-only mirror
+/// `/var/lib/atelier/state/` if Atelier's canonical writer copy is missing.
+/// Idempotent : ne touche pas aux fichiers existants.
+fn seed_apps_data(data_dir: &PathBuf, state_dir: &PathBuf) {
+    if let Err(err) = std::fs::create_dir_all(data_dir) {
+        warn!(?err, path = %data_dir.display(), "failed to create apps data dir");
+        return;
+    }
+    for file in ["apps.json", "port-registry.json"] {
+        let dst = data_dir.join(file);
+        if dst.exists() {
+            continue;
+        }
+        let src = state_dir.join(file);
+        if !src.exists() {
+            continue;
+        }
+        match std::fs::copy(&src, &dst) {
+            Ok(n) => info!(bytes = n, src = %src.display(), dst = %dst.display(), "seeded apps data"),
+            Err(err) => warn!(?err, src = %src.display(), "seed apps data failed"),
+        }
+    }
 }
 
 fn open_task_store(state_dir: &PathBuf) -> Arc<hr_common::task_store::TaskStore> {

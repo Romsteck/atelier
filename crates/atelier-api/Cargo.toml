@@ -23,4 +23,5 @@ rusqlite     = { workspace = true }
 hr-git       = { workspace = true }
 hr-dataverse = { workspace = true }
 hr-flow      = { workspace = true }
+hr-apps      = { workspace = true }
 sqlx-postgres = { workspace = true }

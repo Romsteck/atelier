@@ -22,3 +22,4 @@ hr-common    = { workspace = true }
 hr-docs      = { workspace = true }
 hr-git       = { workspace = true }
 hr-dataverse = { workspace = true }
+hr-apps      = { workspace = true }

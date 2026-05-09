@@ -47,6 +47,8 @@ hr-git       = { path = "/nvme/homeroute/crates/orchestrator/hr-git" }
 hr-dataverse = { path = "/nvme/homeroute/crates/orchestrator/hr-dataverse" }
 hr-dvexpr    = { path = "/nvme/homeroute/crates/orchestrator/hr-dvexpr" }
 hr-flow      = { path = "/nvme/homeroute/crates/orchestrator/hr-flow" }
+hr-apps      = { path = "/nvme/homeroute/crates/orchestrator/hr-apps" }
+hr-db        = { path = "/nvme/homeroute/crates/orchestrator/hr-db" }
 
 # Postgres + sqlx — voir commentaire dans homeroute Cargo.toml
 sqlx-core    = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json", "chrono", "uuid", "migrate"] }
