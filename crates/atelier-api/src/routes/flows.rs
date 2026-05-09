@@ -16,29 +16,121 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, instrument};
 
+use crate::clients::{flowd::FlowdError, FlowdClient};
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/apps/{slug}/flows", get(list_definitions))
         .route("/apps/{slug}/flows/{name}", get(get_definition))
+        .route("/apps/{slug}/flows/{name}/run", post(run_flow))
         .route("/apps/{slug}/flows/_stats", get(get_app_stats))
         .route("/apps/{slug}/flows/_runs", get(list_runs))
         .route("/apps/{slug}/flows/_runs/{run_id}", get(get_run))
+        .route(
+            "/apps/{slug}/flows/_runs/{run_id}/replay",
+            post(replay_run),
+        )
         .route(
             "/apps/{slug}/flows/_runs/{run_id}/steps/{record_id}",
             get(get_run_step),
         )
         .route("/flows/_stats", get(get_global_stats))
+        .route("/flows/_admin/reload", post(reload_daemon_registry))
+}
+
+#[derive(Debug, Deserialize)]
+struct RunBody {
+    #[serde(default)]
+    input: Value,
+}
+
+#[instrument(skip(_state, body), fields(slug = %slug, name = %name))]
+async fn run_flow(
+    State(_state): State<ApiState>,
+    Path((slug, name)): Path<(String, String)>,
+    Json(body): Json<RunBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !valid_slug(&slug) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid slug"));
+    }
+    let client = FlowdClient::from_env()
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("flowd unavailable: {e}")))?;
+    let wire = client
+        .run(&slug, &name, body.input)
+        .await
+        .map_err(|e| flowd_error_to_http(e))?;
+    Ok(Json(json!({ "success": true, "run": wire })))
+}
+
+#[instrument(skip(_state), fields(slug = %slug, run_id = %run_id))]
+async fn replay_run(
+    State(_state): State<ApiState>,
+    Path((slug, run_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !valid_slug(&slug) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid slug"));
+    }
+    let client = FlowdClient::from_env()
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("flowd unavailable: {e}")))?;
+    let wire = client
+        .replay(&slug, &run_id)
+        .await
+        .map_err(|e| flowd_error_to_http(e))?;
+    Ok(Json(json!({ "success": true, "run": wire })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReloadQuery {
+    #[serde(default)]
+    slug: Option<String>,
+}
+
+#[instrument(skip(_state))]
+async fn reload_daemon_registry(
+    State(_state): State<ApiState>,
+    Query(q): Query<ReloadQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let client = FlowdClient::from_env()
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("flowd unavailable: {e}")))?;
+    let report = client
+        .reload(q.slug.as_deref())
+        .await
+        .map_err(|e| flowd_error_to_http(e))?;
+    Ok(Json(json!({
+        "success": true,
+        "apps_loaded": report.apps_loaded,
+        "flows_loaded": report.flows_loaded,
+    })))
+}
+
+fn flowd_error_to_http(e: FlowdError) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, msg) = match &e {
+        FlowdError::MissingToken => (StatusCode::SERVICE_UNAVAILABLE, "flowd token missing"),
+        FlowdError::Transport(_) => (StatusCode::BAD_GATEWAY, "flowd transport"),
+        FlowdError::Upstream { status, .. } => {
+            // Forward 4xx but cap 5xx as 502 (we don't want to leak internal status codes raw).
+            if status.is_client_error() {
+                (*status, "flowd client error")
+            } else {
+                (StatusCode::BAD_GATEWAY, "flowd upstream error")
+            }
+        }
+        FlowdError::Parse(_) => (StatusCode::BAD_GATEWAY, "flowd response parse"),
+    };
+    (
+        status,
+        Json(json!({ "success": false, "error": msg, "detail": e.to_string() })),
+    )
 }
 
 fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {

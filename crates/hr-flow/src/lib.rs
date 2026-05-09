@@ -11,17 +11,21 @@ pub mod connector;
 pub mod connectors_managed;
 pub mod definition;
 pub mod engine;
+pub mod engine_trait;
 pub mod error;
 pub mod executor;
 pub mod expr;
 pub mod persist;
+pub mod remote_engine;
 
 pub use connector::Connector;
 pub use definition::{parse_flow_toml, FlowDef, StepDef, StepKind};
 pub use engine::{FlowEngine, FlowEngineBuilder, RunError, RunResult, RunStatus};
+pub use engine_trait::{engine_from_env, Backend, EmbeddedEngine, Engine};
 pub use error::{FlowError, FlowResult};
 pub use executor::StepRecord;
 pub use persist::{JsonRunStore, RunDoc, RunErrorDoc, RunStore};
+pub use remote_engine::RemoteEngine;
 
 pub use connectors_managed::http::HttpConnector;
 

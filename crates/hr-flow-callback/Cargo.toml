@@ -1,0 +1,20 @@
+[package]
+name = "hr-flow-callback"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+
+# Async helpers + panic catch
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+tracing = { workspace = true }
+
+hr-flow = { workspace = true }

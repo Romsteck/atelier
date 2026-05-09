@@ -1,4 +1,4 @@
-.PHONY: all atelier web deploy deploy-medion deploy-app logs clean test help
+.PHONY: all atelier web flowd deploy deploy-medion deploy-app deploy-flowd logs logs-flowd clean test help
 
 # Atelier vit désormais sur Medion. Les sources des apps restent sur
 # CloudMaster (édition via code-server). Le Makefile build localement et
@@ -8,6 +8,7 @@ MEDION ?= romain@10.0.0.254
 ATELIER_API ?= http://10.0.0.254:4100
 
 ATELIER_BIN_LOCAL := target/release/atelier
+ATELIER_FLOWD_BIN_LOCAL := target/release/atelier-flowd
 WEB_DIST_LOCAL := web/dist
 
 help:
@@ -16,7 +17,10 @@ help:
 	@echo "  web                build frontend (web/dist) (local)"
 	@echo "  deploy             build all + push binary + web/dist to Medion + restart atelier.service"
 	@echo "  deploy-app SLUG=x  build + rsync app x to Medion + restart via API"
-	@echo "  logs               tail journalctl on Medion"
+	@echo "  flowd              cargo build --release -p hr-flow-daemon (local)"
+	@echo "  deploy-flowd       build + push atelier-flowd binary + unit to Medion + restart hr-flowd.service"
+	@echo "  logs               tail journalctl atelier on Medion"
+	@echo "  logs-flowd         tail journalctl hr-flowd on Medion"
 	@echo "  test               cargo test --workspace"
 	@echo "  clean              cargo clean"
 	@echo ""
@@ -52,6 +56,16 @@ deploy-app:
 
 logs:
 	ssh $(MEDION) 'sudo journalctl -u atelier -f'
+
+flowd:
+	cargo build --release -p hr-flow-daemon
+
+# Push atelier-flowd binary + unit to Medion + restart hr-flowd.service.
+deploy-flowd: flowd
+	bash scripts/deploy-flowd.sh
+
+logs-flowd:
+	ssh $(MEDION) 'sudo journalctl -u hr-flowd -f'
 
 test:
 	cargo test --workspace

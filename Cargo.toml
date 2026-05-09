@@ -10,6 +10,8 @@ members = [
     "crates/hr-dv-codegen",
     "crates/hr-dvexpr",
     "crates/hr-flow",
+    "crates/hr-flow-callback",
+    "crates/hr-flow-daemon",
     "crates/hr-flow-macros",
     "crates/hr-git",
 ]
@@ -52,6 +54,14 @@ base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
 futures-util = "0.3"
+futures = "0.3"
+
+# Lock-free shared state for the flow daemon (RCU registry + per-run handles)
+arc-swap = "1.7"
+dashmap = "6"
+num_cpus = "1.16"
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
 
 # HTTP client
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "stream"] }
@@ -73,6 +83,8 @@ hr-db                = { path = "crates/hr-db" }
 hr-dv-codegen        = { path = "crates/hr-dv-codegen" }
 hr-dvexpr            = { path = "crates/hr-dvexpr" }
 hr-flow              = { path = "crates/hr-flow" }
+hr-flow-callback     = { path = "crates/hr-flow-callback" }
+hr-flow-daemon       = { path = "crates/hr-flow-daemon" }
 hr-flow-macros       = { path = "crates/hr-flow-macros" }
 hr-git               = { path = "crates/hr-git" }
 
