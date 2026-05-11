@@ -260,12 +260,18 @@ async fn run_step_inner(
             Ok(serde_json::json!({ "branch": chosen, "output": last }))
         }
         StepKind::CondSelect { when, default } => {
+            // First matching arm wins. Resolve the chosen value through the
+            // outer `outcome` so push_record + step_outputs.insert run as for
+            // any other primitive — an early `return` here would bypass
+            // those and break `flow.output_step` resolution.
+            let mut matched: Option<&Value> = None;
             for arm in when {
                 if eval_bool(&arm.cond, state)? {
-                    return substitute(&arm.value, state);
+                    matched = Some(&arm.value);
+                    break;
                 }
             }
-            match default {
+            match matched.or(default.as_ref()) {
                 Some(v) => substitute(v, state),
                 None => Ok(Value::Null),
             }

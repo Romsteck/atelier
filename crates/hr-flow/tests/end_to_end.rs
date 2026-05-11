@@ -635,3 +635,60 @@ async fn cond_select_picks_first_matching_arm() {
     let other = engine.run("pick_value", json!({ "kind": "Z" })).await.unwrap();
     assert_eq!(other.output, Some(json!("fallback")));
 }
+
+/// Regression: a `cond_select` whose chosen arm matches must register its
+/// output in `state.step_outputs` so downstream siblings can read
+/// `{{ steps.<id>.output }}`. Earlier code used `return substitute(...)`
+/// inside the arm loop, which short-circuited `run_step_inner` before
+/// `push_record` + `step_outputs.insert` ran — every downstream consumer
+/// then failed with `step X has no output yet`.
+#[tokio::test]
+async fn cond_select_output_readable_from_sibling() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    let flow = parse_flow_toml(r#"
+        name = "sibling_reads_cond_select"
+
+        [[steps]]
+        id = "pick"
+        kind = "cond_select"
+        default = "fallback"
+
+        [[steps.when]]
+        cond = "{{ input.kind }} == 'A'"
+        value = "value_A"
+
+        [[steps.when]]
+        cond = "{{ input.kind }} == 'B'"
+        value = "value_B"
+
+        [[steps]]
+        id = "use_pick"
+        kind = "compose"
+        value = "picked={{ steps.pick.output }}"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("sibling_reads_cond_select", json!({ "kind": "A" })).await.unwrap();
+    assert_eq!(r.status, RunStatus::Success);
+    assert_eq!(r.output, Some(json!("picked=value_A")));
+
+    // Timeline must contain a record for the cond_select step itself —
+    // without it, post-mortem inspection of failed runs would be blind to
+    // the chosen value.
+    let run = engine.store().load(&r.run_id).await.unwrap();
+    assert!(
+        run.steps.iter().any(|s| s.step_id == "pick"),
+        "expected `pick` step record in persisted timeline, got: {:?}",
+        run.steps.iter().map(|s| &s.step_id).collect::<Vec<_>>()
+    );
+
+    // Fallback path must also remain readable from siblings.
+    let r2 = engine.run("sibling_reads_cond_select", json!({ "kind": "Z" })).await.unwrap();
+    assert_eq!(r2.status, RunStatus::Success);
+    assert_eq!(r2.output, Some(json!("picked=fallback")));
+}
