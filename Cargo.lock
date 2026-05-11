@@ -245,6 +245,7 @@ dependencies = [
  "hr-docs",
  "hr-flow",
  "hr-git",
+ "hr-ipc",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1259,6 +1260,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hr-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hr-common",
  "serde",
  "serde_json",
  "tokio",

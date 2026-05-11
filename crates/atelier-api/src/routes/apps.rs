@@ -10,10 +10,12 @@
 //! - GET    /api/apps/{slug}/env
 //! - POST   /api/apps/{slug}/control  body {action: start|stop|restart}
 //! - GET    /api/apps/{slug}/status   process state (pid, uptime, port)
+//! - POST   /api/apps/{slug}/ship     body {timeout_secs?: u64} (wrapper MCP `app.ship`)
 //!
 //! TODO Phase 9.2 suite : create / update / delete / build / deploy / exec /
 //! env update / regenerate-context / logs / todos.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, State};
@@ -25,6 +27,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
+use crate::mcp::apps_ops::AppsContext;
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
@@ -34,6 +37,7 @@ pub fn router() -> Router<ApiState> {
         .route("/{slug}/env", get(get_app_env))
         .route("/{slug}/control", post(control_app))
         .route("/{slug}/status", get(app_status))
+        .route("/{slug}/ship", post(ship_app))
         .route("/{slug}/regenerate_flow_token", post(regenerate_flow_token))
 }
 
@@ -160,6 +164,68 @@ async fn app_status(State(state): State<ApiState>, Path(slug): Path<String>) -> 
             .into_response()
         }
         None => Json(json!({"success": true, "data": null})).into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ShipBody {
+    timeout_secs: Option<u64>,
+}
+
+/// `POST /api/apps/{slug}/ship`
+///
+/// Thin HTTP wrapper around the MCP `app.ship` op. Stops the supervised
+/// process, rsyncs pre-built artefacts from CloudMaster (`/opt/homeroute/apps/<slug>/src/`)
+/// to Medion (`/var/lib/atelier/apps/<slug>/src/`), and restarts.
+///
+/// Body: `{"timeout_secs": u64}` (optional, clamped 60..=7200, default 900).
+async fn ship_app(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    body: Option<Json<ShipBody>>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let timeout_secs = body.and_then(|Json(b)| b.timeout_secs);
+    info!(slug = %slug, timeout_secs = ?timeout_secs, "AppShip");
+
+    let (app_build_tx, _) = tokio::sync::broadcast::channel(256);
+    let ctx = AppsContext {
+        supervisor: (*state.supervisor).clone(),
+        db_manager: (*state.db_manager).clone(),
+        dataverse_manager: state.dv.clone(),
+        todos: (*state.todos_manager).clone(),
+        context_generator: state.context_generator.clone(),
+        edge: None,
+        git: state.git.clone(),
+        base_domain: state.context_generator.base_domain.clone(),
+        build_locks: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        app_build_tx,
+    };
+
+    let resp = ctx.ship(slug.clone(), timeout_secs).await;
+    if resp.ok {
+        Json(json!({
+            "success": true,
+            "data": resp.data.unwrap_or(json!({"ok": true})),
+        }))
+        .into_response()
+    } else {
+        let err_msg = resp.error.unwrap_or_else(|| "unknown error".to_string());
+        let status = if err_msg.starts_with("BUILD_BUSY") {
+            StatusCode::CONFLICT
+        } else if err_msg.starts_with("app not found") {
+            StatusCode::NOT_FOUND
+        } else if err_msg.starts_with("invalid slug") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        warn!(slug = %slug, error = %err_msg, "AppShip failed");
+        (status, Json(json!({"success": false, "error": err_msg}))).into_response()
     }
 }
 

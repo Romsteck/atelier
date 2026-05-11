@@ -1,4 +1,7 @@
+#![recursion_limit = "512"]
+
 pub mod clients;
+pub mod mcp;
 pub mod routes;
 pub mod state;
 
@@ -16,6 +19,10 @@ pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
     let mut app = Router::new()
         .nest("/api", api_router())
         .nest("/apps", routes::apps_proxy::router())
+        // MCP (Model Context Protocol) JSON-RPC endpoint — POST /mcp[?project=<slug>].
+        // Mounted at the top level (not under /api) to match the legacy
+        // homeroute layout the apps' `.mcp.json` files still target.
+        .nest("/mcp", routes::mcp::router())
         // Forward `/_next/*` and `/static/*` to the NextJS fallback app (default `www`).
         // See `routes::apps_proxy::next_fallback_handler` doc for the why.
         .route(

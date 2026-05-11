@@ -704,9 +704,9 @@ fn render_app_build_script(app: &Application) -> String {
     let template = r#"#!/usr/bin/env bash
 # Build local de l'app `__SLUG__` (sources et toolchain sur CloudMaster).
 # Émet des events au Studio (panel per-app live) via /api/apps/__SLUG__/build-event.
-# Géré par HomeRoute — ne pas éditer (régénéré à chaque AppUpdate).
+# Géré par Atelier — ne pas éditer (régénéré à chaque AppUpdate).
 set -euo pipefail
-API_BASE="${API_BASE:-http://10.0.0.254:4000}"
+API_BASE="${API_BASE:-http://10.0.0.254:4100}"
 SLUG="__SLUG__"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -746,9 +746,9 @@ fn render_app_deploy_script(app: &Application) -> String {
     let template = r#"#!/usr/bin/env bash
 # Deploy de l'app `__SLUG__` : envoie les artefacts pre-buildés vers Medion + restart.
 # Pré-requis : avoir lancé `bash .claude/skills/app-build/build.sh` au préalable.
-# Géré par HomeRoute — ne pas éditer.
+# Géré par Atelier — ne pas éditer.
 set -euo pipefail
-API_BASE="${API_BASE:-http://10.0.0.254:4000}"
+API_BASE="${API_BASE:-http://10.0.0.254:4100}"
 TIMEOUT_SECS="${1:-900}"
 curl -sS --max-time "$TIMEOUT_SECS" -X POST \
   "$API_BASE/api/apps/__SLUG__/ship" \

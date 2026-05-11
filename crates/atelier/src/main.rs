@@ -22,7 +22,12 @@ const DEFAULT_WEB_DIST: &str = "/opt/atelier/web/dist";
 /// Données canoniques d'Atelier post-cutover (Atelier owns these files).
 const DEFAULT_APPS_DATA_DIR: &str = "/opt/atelier/data";
 const DEFAULT_BASE_DOMAIN: &str = "mynetwk.biz";
-const DEFAULT_MCP_ENDPOINT: &str = "http://127.0.0.1:4100/mcp";
+/// Default MCP endpoint pour les agents inside-app. Direct IP:port pour
+/// rester équivalent au legacy `http://10.0.0.254:4001/mcp` — hr-edge
+/// exige une auth cookie sur `atelier.mynetwk.biz` qui collisionne avec le
+/// Bearer-token MCP. Le Bearer (header `Authorization`) reste l'unique
+/// gardien de la surface MCP.
+const DEFAULT_MCP_ENDPOINT: &str = "http://10.0.0.254:4100/mcp";
 /// Hôte des Postgres apps (Medion). Le secret synchronisé contient `127.0.0.1`
 /// (point de vue de Medion) — Atelier le swap vers cet hôte au registre des DSN.
 const DEFAULT_DV_HOST: &str = "10.0.0.254";
