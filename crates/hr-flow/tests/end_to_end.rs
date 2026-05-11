@@ -692,3 +692,56 @@ async fn cond_select_output_readable_from_sibling() {
     assert_eq!(r2.status, RunStatus::Success);
     assert_eq!(r2.output, Some(json!("picked=fallback")));
 }
+
+/// Regression: a step that fails its own type validation (e.g. `for_each`
+/// over a non-array, `length`/`parse_json` wrong input type) must still
+/// produce a `failed` record in the persisted timeline. Earlier the inner
+/// match arms used `?` and `return Err(...)`, both of which exited
+/// `run_step_inner` before `push_record` ran — the failing step then
+/// vanished from the timeline and the only diagnostic was the propagated
+/// FlowError at the top-level run.
+#[tokio::test]
+async fn step_validation_error_lands_in_persisted_timeline() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    let flow = parse_flow_toml(r#"
+        name = "type_err"
+
+        [[steps]]
+        id = "produce_int"
+        kind = "compose"
+        value = 42
+
+        [[steps]]
+        id = "expand"
+        kind = "for_each"
+        as = "x"
+        over = "steps.produce_int.output"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("type_err", json!({})).await.unwrap();
+    assert_eq!(r.status, RunStatus::Failed);
+    let err = r.error.as_ref().expect("expected FlowError on failed run");
+    assert_eq!(err.step_id, "expand");
+    assert!(
+        err.message.contains("for_each") && err.message.contains("array"),
+        "expected for_each type message, got: {}",
+        err.message
+    );
+
+    let run = engine.store().load(&r.run_id).await.unwrap();
+    assert!(
+        run.steps.iter().any(|s| s.step_id == "expand" && s.status == "failed"),
+        "expected `expand` failed-record in timeline, got: {:?}",
+        run.steps.iter().map(|s| (&s.step_id, &s.status)).collect::<Vec<_>>()
+    );
+    assert!(
+        run.steps.iter().any(|s| s.step_id == "produce_int" && s.status == "success"),
+        "the previous step must still appear as success"
+    );
+}

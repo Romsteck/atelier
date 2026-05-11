@@ -202,7 +202,15 @@ async fn run_step_inner(
         }
     };
 
-    let outcome: FlowResult<Value> = match &step.kind {
+    // Wrap the per-kind dispatch in an async block so `?` and explicit
+    // `return Err(...)` inside arms short-circuit to `outcome` rather than
+    // exiting `run_step_inner` directly. Without this, any type-validation
+    // error (`for_each` over non-array, `length`/`parse_json` wrong type,
+    // failing `eval_bool`/`substitute` mid-arm) bypassed `push_record` +
+    // `step_outputs.insert` below, leaving holes in the persisted timeline
+    // and a misleading "step X has no output yet" downstream symptom.
+    let outcome: FlowResult<Value> = async {
+        match &step.kind {
         StepKind::Connector { connector, op } => {
             run_connector(ctx, connector, op, &resolved_params).await
         }
@@ -446,7 +454,8 @@ async fn run_step_inner(
         other => Err(FlowError::Internal(format!(
             "step kind `{}` not yet implemented", step_kind_label(other),
         ))),
-    };
+        }
+    }.await;
 
     let (output_opt, error_msg) = match outcome {
         Ok(v) => (Some(v), None),
