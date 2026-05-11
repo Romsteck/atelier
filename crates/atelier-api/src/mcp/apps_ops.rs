@@ -45,7 +45,7 @@ pub const SSH_KEY: &str = "/opt/homeroute/data/build/ssh/id_ed25519";
 /// the `origin` remote of each app's working tree on CloudMaster — code-server
 /// vit là-bas depuis le split DEV/PROD, donc `127.0.0.1:4000` n'atteint plus
 /// le hr-git Smart-HTTP. Override via `HR_GIT_API_BASE`.
-pub const GIT_API_BASE: &str = "http://10.0.0.254:4000";
+pub const GIT_API_BASE: &str = "http://10.0.0.254:4100";
 /// Cap stdout/stderr capture per pipeline stage to ~1 MB.
 const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 

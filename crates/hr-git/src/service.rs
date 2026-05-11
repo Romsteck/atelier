@@ -27,8 +27,8 @@ impl GitService {
     }
 
     /// Build a service rooted at a custom bare-repos directory.
-    /// Used by Atelier (CloudMaster) which reads a rsync'd mirror of the
-    /// homeroute repos under /var/lib/atelier/git/repos.
+    /// Used by Atelier (Medion, post-rapatriement 2026-05-09) qui pointe en
+    /// direct vers `/opt/homeroute/data/git/repos` via `ATELIER_GIT_REPOS_DIR`.
     pub fn with_repos_dir(repos_dir: impl Into<PathBuf>) -> Self {
         Self {
             repos_dir: repos_dir.into(),
@@ -530,7 +530,7 @@ nohup bash -c 'GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=n
 # Pipeline trigger — notify orchestrator on push to main/master
 while read oldrev newrev refname; do
   if [ "$refname" = "refs/heads/main" ] || [ "$refname" = "refs/heads/master" ]; then
-    curl -s -X POST http://10.0.0.254:4001/hooks/git-push \
+    curl -s -X POST http://127.0.0.1:4100/api/hooks/git-push \
       -H "Content-Type: application/json" \
       -d "{{\\"slug\\":\\"{slug}\\",\\"ref\\":\\"$refname\\",\\"commit\\":\\"$newrev\\"}}" &>/dev/null &
   fi

@@ -6,6 +6,7 @@ pub mod dv;
 pub mod flows;
 pub mod git;
 pub mod health;
+pub mod hooks;
 pub mod mcp;
 pub mod store;
 pub mod tasks;

@@ -60,6 +60,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/docs", routes::docs::router())
         .nest("/store", routes::store::router())
         .nest("/git", routes::git::router())
+        .nest("/hooks", routes::hooks::router())
         .nest("/apps", routes::apps::router())
         .nest("/apps", routes::apps_db::router())
         .nest("/dv", routes::dv::router())
