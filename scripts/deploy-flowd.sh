@@ -15,7 +15,10 @@
 set -euo pipefail
 
 MEDION="${ATELIER_MEDION:-romain@10.0.0.254}"
-HEALTH_URL="${HR_FLOWD_HEALTH:-http://10.0.0.254:4002/v1/health}"
+# hr-flowd binds to 127.0.0.1:4002 on Medion (not exposed to the LAN), so the
+# healthcheck must hit it from inside the host via SSH. Override `HR_FLOWD_HEALTH`
+# to a fully-qualified URL only if you've made flowd listen on a routable iface.
+HR_FLOWD_HEALTH="${HR_FLOWD_HEALTH:-http://127.0.0.1:4002/v1/health}"
 BIN_LOCAL="target/release/atelier-flowd"
 UNIT_LOCAL="systemd/hr-flowd.service"
 
@@ -47,9 +50,9 @@ ssh "$MEDION" '
   sudo systemctl restart hr-flowd.service
 '
 
-echo "→ healthcheck $HEALTH_URL"
+echo "→ healthcheck $HR_FLOWD_HEALTH (via $MEDION)"
 for i in 1 2 3 4 5; do
-  if curl -fsS "$HEALTH_URL" | tee /dev/stderr | jq -e '.ok == true' >/dev/null 2>&1; then
+  if ssh "$MEDION" "curl -fsS '$HR_FLOWD_HEALTH'" | tee /dev/stderr | jq -e '.ok == true' >/dev/null 2>&1; then
     echo "→ hr-flowd is up"
     exit 0
   fi
