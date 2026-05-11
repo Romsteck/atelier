@@ -24,6 +24,13 @@ pub struct FlowDef {
     #[serde(default)]
     pub input: Option<serde_json::Value>,
 
+    /// When set, the run's final output is the output of the named step
+    /// rather than the last top-level step. Lets flows that end in a control
+    /// primitive (e.g. `if`, which wraps its result in `{branch, output}`)
+    /// surface the inner value without an extra `compose` terminal step.
+    #[serde(default)]
+    pub output_step: Option<String>,
+
     #[serde(default, rename = "steps")]
     pub steps: Vec<StepDef>,
 }
@@ -84,6 +91,16 @@ pub enum StepKind {
     Switch {
         on: String,
     },
+    /// `cond_select` primitive: evaluates a list of `when` arms (first
+    /// matching `cond` wins) and returns its `value` directly — no
+    /// `{branch, output}` wrapper. Ergonomic alternative to a terminal `if`
+    /// when the flow's job is "pick a value out of N cases".
+    CondSelect {
+        #[serde(default)]
+        when: Vec<CondSelectArm>,
+        #[serde(default)]
+        default: Option<serde_json::Value>,
+    },
     /// `for_each` primitive: iterates over `over`, exposing each item as
     /// `as` (default `iter`).
     ForEach {
@@ -130,6 +147,14 @@ pub enum StepKind {
     Take { from: String, count: u32 },
     /// Length of an array, string or object. `null` resolves to 0.
     Length { from: String },
+}
+
+/// One arm of a `cond_select` step. `value` follows the same substitution
+/// rules as `compose.value`: bare JSON literal or `{{ … }}` placeholder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CondSelectArm {
+    pub cond: String,
+    pub value: serde_json::Value,
 }
 
 fn default_iter_var() -> String { "iter".into() }

@@ -49,6 +49,7 @@ reqwest = { workspace = true }
 # Internal Atelier crates
 hr-flow = { workspace = true }
 hr-apps = { workspace = true }
+hr-dataverse = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -15,9 +15,6 @@
 //! - [`provisioning`] — `CREATE DATABASE`/`CREATE ROLE` per app.
 //! - [`manager::DataverseManager`] — owns the admin pool, caches
 //!   per-app engines, persists secrets.
-//!
-//! GraphQL execution lives under the `graphql` module (Phase B of the
-//! refactor — currently a stub).
 
 /// Internal re-exports to mimic the `sqlx` meta-crate facade — see the
 /// workspace `Cargo.toml` comment for the dependency-graph rationale.
@@ -49,7 +46,6 @@ pub mod query;
 pub mod crud;
 pub mod audit;
 pub mod dv_io;
-pub mod graphql;
 
 // Re-exports for the most common API surface so callers can use
 // `hr_dataverse::DataverseEngine` directly.

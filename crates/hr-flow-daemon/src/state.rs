@@ -61,6 +61,11 @@ pub struct DaemonState {
     /// other outbound HTTP from the daemon.
     pub http: Client,
 
+    /// Dataverse manager — when set, the `dataverse` connector is wired
+    /// natively in the engine factory (no callback to the app). `None` when
+    /// `ATELIER_DV_ADMIN_URL` is not configured.
+    pub dv: Option<std::sync::Arc<hr_dataverse::DataverseManager>>,
+
     pub started_at: DateTime<Utc>,
 }
 

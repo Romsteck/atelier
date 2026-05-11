@@ -92,6 +92,7 @@ pub async fn dispatch_run(
         apps_runtime_root: &state.apps_runtime_root,
         http,
         callback_timeout_ms,
+        dv: state.dv.clone(),
     })?;
 
     let cancel = CancellationToken::new();

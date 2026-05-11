@@ -353,7 +353,9 @@ impl<'a> Parser<'a> {
                 }
                 Ok(v)
             }
-            Some(b'"') => self.parse_string(),
+            Some(c @ (b'"' | b'\'')) => self.parse_string(c),
+            Some(b'{') => self.parse_object(),
+            Some(b'[') => self.parse_array(),
             Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => self.parse_ident_or_call(),
             other => Err(FlowError::Expression(format!(
@@ -402,10 +404,93 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_string(&mut self) -> FlowResult<Value> {
+    /// Parse a JSON object literal `{"key": value, ...}`.
+    ///
+    /// Used to consume the JSON serialisation that `substitute_for_expr`
+    /// injects when a placeholder resolves to an Object — without this the
+    /// downstream tokenizer rejects the leading `{`. Strict-JSON: keys must
+    /// be double-quoted strings, values recurse through `parse_atom` (no
+    /// trailing commas, no comments).
+    fn parse_object(&mut self) -> FlowResult<Value> {
+        self.pos += 1; // opening `{`
+        let mut map = serde_json::Map::new();
+        self.skip_ws();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(Value::Object(map));
+        }
+        loop {
+            self.skip_ws();
+            let key = match self.peek() {
+                Some(c @ (b'"' | b'\'')) => match self.parse_string(c)? {
+                    Value::String(s) => s,
+                    _ => unreachable!("parse_string always returns Value::String"),
+                },
+                _ => {
+                    return Err(FlowError::Expression(format!(
+                        "expected string key in object at byte {}",
+                        self.pos
+                    )));
+                }
+            };
+            self.skip_ws();
+            if !self.eat(b":") {
+                return Err(FlowError::Expression(format!(
+                    "expected `:` after key `{key}` at byte {}",
+                    self.pos
+                )));
+            }
+            self.skip_ws();
+            let value = self.parse_atom()?;
+            map.insert(key, value);
+            self.skip_ws();
+            if self.eat(b",") {
+                continue;
+            }
+            if self.eat(b"}") {
+                break;
+            }
+            return Err(FlowError::Expression(format!(
+                "expected `,` or `}}` in object at byte {}",
+                self.pos
+            )));
+        }
+        Ok(Value::Object(map))
+    }
+
+    /// Parse a JSON array literal `[v1, v2, ...]`. Same rationale as
+    /// `parse_object` — covers the substitution of Array placeholders.
+    fn parse_array(&mut self) -> FlowResult<Value> {
+        self.pos += 1; // opening `[`
+        let mut arr = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Ok(Value::Array(arr));
+        }
+        loop {
+            self.skip_ws();
+            let value = self.parse_atom()?;
+            arr.push(value);
+            self.skip_ws();
+            if self.eat(b",") {
+                continue;
+            }
+            if self.eat(b"]") {
+                break;
+            }
+            return Err(FlowError::Expression(format!(
+                "expected `,` or `]` in array at byte {}",
+                self.pos
+            )));
+        }
+        Ok(Value::Array(arr))
+    }
+
+    fn parse_string(&mut self, delim: u8) -> FlowResult<Value> {
         self.pos += 1; // opening quote
         let start = self.pos;
-        while self.pos < self.src.len() && self.src[self.pos] != b'"' {
+        while self.pos < self.src.len() && self.src[self.pos] != delim {
             self.pos += 1;
         }
         if self.pos >= self.src.len() {
@@ -609,5 +694,65 @@ mod tests {
     #[test]
     fn eval_bool_negation_parens() {
         assert!(eval_bool("!(1 == 2)", &ctx()).unwrap());
+    }
+
+    #[test]
+    fn eval_bool_single_quote_string() {
+        // 3a — String literals accept both `"..."` and `'...'` so users can
+        // pick whichever doesn't clash with their TOML quoting.
+        assert!(eval_bool("'abc' == 'abc'", &ctx()).unwrap());
+        assert!(eval_bool("'abc' == \"abc\"", &ctx()).unwrap());
+        assert!(!eval_bool("'abc' == 'def'", &ctx()).unwrap());
+        // Empty literal — the canonical motivating case from the www flows.
+        assert!(eval_bool("'' == ''", &ctx()).unwrap());
+        assert!(eval_bool("'hello' != ''", &ctx()).unwrap());
+    }
+
+    #[test]
+    fn eval_bool_object_literal_vs_null() {
+        // 3b — substitute_for_expr injects `{...}` JSON when a placeholder
+        // resolves to an Object; the parser must consume that literal so
+        // `{{ X }} != null` works for arbitrary JSON values, not just scalars.
+        let mut steps = HashMap::new();
+        steps.insert("row".into(), json!({ "id": 1, "label": "x" }));
+        steps.insert("none".into(), Value::Null);
+        let c = TestCtx {
+            input: Value::Null,
+            vars: HashMap::new(),
+            steps,
+            iter: HashMap::new(),
+        };
+        assert!(eval_bool("{{ steps.row.output }} != null", &c).unwrap());
+        assert!(!eval_bool("{{ steps.row.output }} == null", &c).unwrap());
+        assert!(eval_bool("{{ steps.none.output }} == null", &c).unwrap());
+        assert!(!eval_bool("{{ steps.none.output }} != null", &c).unwrap());
+    }
+
+    #[test]
+    fn eval_bool_array_literal_vs_null() {
+        // 3b cousin — same story for arrays.
+        let mut steps = HashMap::new();
+        steps.insert("rows".into(), json!([1, 2, 3]));
+        steps.insert("empty".into(), json!([]));
+        let c = TestCtx {
+            input: Value::Null,
+            vars: HashMap::new(),
+            steps,
+            iter: HashMap::new(),
+        };
+        assert!(eval_bool("{{ steps.rows.output }} != null", &c).unwrap());
+        assert!(eval_bool("{{ steps.empty.output }} != null", &c).unwrap());
+    }
+
+    #[test]
+    fn parse_object_and_array_literals_directly() {
+        // The parser must also accept hand-written object/array literals so
+        // future expression sugar (e.g. comparing two objects for equality)
+        // composes cleanly.
+        assert!(eval_bool("{\"a\": 1} == {\"a\": 1}", &ctx()).unwrap());
+        assert!(!eval_bool("{\"a\": 1} == {\"a\": 2}", &ctx()).unwrap());
+        assert!(eval_bool("[1, 2] == [1, 2]", &ctx()).unwrap());
+        assert!(eval_bool("{} != null", &ctx()).unwrap());
+        assert!(eval_bool("[] != null", &ctx()).unwrap());
     }
 }

@@ -107,6 +107,8 @@ async fn run() -> Result<()> {
         "registry loaded"
     );
 
+    let dv = init_dv().await;
+
     let state = Arc::new(DaemonState {
         registry: ArcSwap::from_pointee(registry),
         runs: DashMap::new(),
@@ -121,6 +123,7 @@ async fn run() -> Result<()> {
         run_timeout_ms,
         callback_timeout_ms,
         http,
+        dv,
         started_at: Utc::now(),
     });
 
@@ -141,6 +144,68 @@ async fn run() -> Result<()> {
 
     info!("atelier-flowd stopped");
     Ok(())
+}
+
+/// Initialise the per-daemon `DataverseManager` from env. Mirrors Atelier's
+/// `init_dv`: requires `ATELIER_DV_ADMIN_URL` + a readable
+/// `${ATELIER_STATE_DIR}/dataverse-secrets.json`. Failures degrade to
+/// `None` (the `dataverse` connector then falls back to remote callback).
+async fn init_dv() -> Option<Arc<hr_dataverse::DataverseManager>> {
+    let admin_dsn = match std::env::var("ATELIER_DV_ADMIN_URL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            warn!("ATELIER_DV_ADMIN_URL absent — dataverse connector désactivé côté daemon");
+            return None;
+        }
+    };
+    let state_dir: PathBuf = std::env::var("ATELIER_STATE_DIR")
+        .unwrap_or_else(|_| "/var/lib/atelier/state".to_string())
+        .into();
+    let secrets_path = state_dir.join("dataverse-secrets.json");
+    if !secrets_path.exists() {
+        warn!(
+            path = %secrets_path.display(),
+            "dataverse-secrets.json absent — dataverse connector désactivé"
+        );
+        return None;
+    }
+
+    let mgr = match hr_dataverse::DataverseManager::connect_admin(
+        admin_dsn,
+        hr_dataverse::ProvisioningConfig::default(),
+        Some(secrets_path.clone()),
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(err) => {
+            warn!(?err, "DataverseManager init failed — dataverse connector désactivé");
+            return None;
+        }
+    };
+
+    // Same DSN swap as Atelier: 127.0.0.1 → ATELIER_DV_HOST so the daemon
+    // can reach the postgres-dataverse host across the loopback boundary.
+    let dv_host = std::env::var("ATELIER_DV_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    if let Ok(bytes) = std::fs::read(&secrets_path) {
+        if let Ok(secrets) =
+            serde_json::from_slice::<hr_dataverse::SecretsFile>(&bytes)
+        {
+            for (slug, sec) in secrets.apps.iter() {
+                let swapped = sec
+                    .dsn
+                    .replace("127.0.0.1", &dv_host)
+                    .replace("@localhost:", &format!("@{dv_host}:"));
+                mgr.set_dsn_override(slug.clone(), swapped).await;
+            }
+            info!(
+                count = secrets.apps.len(),
+                dv_host = %dv_host,
+                "dataverse connector enabled — per-app DSN overrides applied"
+            );
+        }
+    }
+    Some(Arc::new(mgr))
 }
 
 fn spawn_sighup_reload(state: Arc<hr_flow_daemon::DaemonState>) {

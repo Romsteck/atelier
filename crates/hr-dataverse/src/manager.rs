@@ -255,44 +255,6 @@ impl DataverseManager {
         Ok(result)
     }
 
-    /// Execute an arbitrary GraphQL request (query or mutation) against
-    /// the app's dynamic schema. The schema is built lazily and cached
-    /// per `_dv_meta.schema_version`.
-    ///
-    /// Returns the full async-graphql response serialised as JSON, with
-    /// the canonical `{ "data": …, "errors": [...] }` shape.
-    pub async fn graphql_execute(
-        &self,
-        slug: &str,
-        query: &str,
-        variables: Option<serde_json::Value>,
-        operation_name: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        let engine = self.engine_for(slug).await?;
-        let schema = engine.graphql_schema().await?;
-
-        let mut req = async_graphql::Request::new(query);
-        if let Some(vars) = variables {
-            req = req.variables(async_graphql::Variables::from_json(vars));
-        }
-        if let Some(op) = operation_name {
-            req = req.operation_name(op);
-        }
-
-        let response = schema.execute(req).await;
-        serde_json::to_value(response)
-            .map_err(|e| DataverseError::internal(format!("response serialise: {}", e)))
-    }
-
-    /// Return the SDL representation of the app's GraphQL schema. Useful
-    /// for the `db.introspect` MCP tool: an agent coding inside an app
-    /// can fetch the SDL to discover the data model in a single call.
-    pub async fn introspect_sdl(&self, slug: &str) -> Result<String> {
-        let engine = self.engine_for(slug).await?;
-        let schema = engine.graphql_schema().await?;
-        Ok(schema.sdl())
-    }
-
     /// Read the current `AppSecret` for `slug`.
     pub fn read_secret(&self, slug: &str) -> Result<Option<AppSecret>> {
         let Some(path) = &self.secrets_path else {

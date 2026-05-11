@@ -9,8 +9,9 @@
 //! mais exposés sous le nom hr-api utilisé par le frontend Studio + DbExplorer.
 //!
 //! Mutations (`create_table`, `drop_table`, `add_column`, `remove_column`,
-//! `create_relation`, `query` SQL brut, `execute`, `graphql`, `introspect`,
-//! `schema/sync`) ne sont pas portées et restent côté homeroute.
+//! `create_relation`, `query` SQL brut, `execute`, `schema/sync`) ne sont
+//! pas portées ici — utiliser les MCP `dv_*` (write ops) ou les routes
+//! REST `/api/dv/{slug}/{table}` (gateway officielle).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

@@ -113,7 +113,22 @@ pub async fn execute(input: ExecutorInput<'_>) -> (FlowResult<Value>, Vec<StepRe
             }
         }
     }
-    if result.is_ok() { result = Ok(last_output); }
+    if result.is_ok() {
+        result = match input.flow.output_step.as_deref() {
+            Some(id) => state
+                .step_outputs
+                .get(id)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    Err(FlowError::InvalidDefinition(format!(
+                        "flow `{}` declares output_step = \"{id}\" but no step with that id ran",
+                        input.flow.name
+                    )))
+                }),
+            None => Ok(last_output),
+        };
+    }
 
     (result, state.records)
 }
@@ -243,6 +258,17 @@ async fn run_step_inner(
                 ).await?;
             }
             Ok(serde_json::json!({ "branch": chosen, "output": last }))
+        }
+        StepKind::CondSelect { when, default } => {
+            for arm in when {
+                if eval_bool(&arm.cond, state)? {
+                    return substitute(&arm.value, state);
+                }
+            }
+            match default {
+                Some(v) => substitute(v, state),
+                None => Ok(Value::Null),
+            }
         }
         StepKind::ForEach { over, r#as, concurrency: _ } => {
             // Expression `over` is a path like `steps.X.output`; wrap in
@@ -552,6 +578,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Action { .. } => "action",
         StepKind::If { .. } => "if",
         StepKind::Switch { .. } => "switch",
+        StepKind::CondSelect { .. } => "cond_select",
         StepKind::ForEach { .. } => "for_each",
         StepKind::While { .. } => "while",
         StepKind::Scope => "scope",

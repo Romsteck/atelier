@@ -506,3 +506,132 @@ async fn p1_null_literal_in_compose() {
     assert!(out["reset_field"].is_null());
     assert_eq!(out["flag"], json!(true));
 }
+
+#[tokio::test]
+async fn output_step_overrides_last_top_level() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    // Without `output_step`, this flow's output would be the wrapper
+    // `{branch, output: ...}` from the trailing `if`. With it, we surface
+    // the inner step's output directly — no terminal compose needed.
+    let flow = parse_flow_toml(r#"
+        name = "pick_inner"
+        output_step = "value_then"
+
+        [[steps]]
+        id = "branch"
+        kind = "if"
+        cond = "{{ input.flag }}"
+
+        [[steps]]
+        id = "value_then"
+        parent = "branch"
+        parent_branch = "then"
+        kind = "compose"
+        value = "from_then"
+
+        [[steps]]
+        id = "value_else"
+        parent = "branch"
+        parent_branch = "else"
+        kind = "compose"
+        value = "from_else"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("pick_inner", json!({ "flag": true })).await.unwrap();
+    assert_eq!(r.status, RunStatus::Success);
+    assert_eq!(r.output, Some(json!("from_then")));
+}
+
+#[tokio::test]
+async fn output_step_missing_id_errors() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    let flow = parse_flow_toml(r#"
+        name = "bad_output_step"
+        output_step = "does_not_exist"
+
+        [[steps]]
+        id = "noop"
+        kind = "compose"
+        value = "x"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("bad_output_step", json!({})).await.unwrap();
+    assert_eq!(r.status, RunStatus::Failed);
+    let err = r.error.expect("error required when status is Failed");
+    let msg = err.message.as_str();
+    assert!(
+        msg.contains("does_not_exist") || msg.contains("output_step"),
+        "expected error to mention the missing id, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn cond_select_picks_first_matching_arm() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    let flow = parse_flow_toml(r#"
+        name = "pick_value"
+
+        [[steps]]
+        id = "fetch_a"
+        kind = "compose"
+        value = "value_A"
+
+        [[steps]]
+        id = "fetch_b"
+        kind = "compose"
+        value = "value_B"
+
+        [[steps]]
+        id = "fetch_c"
+        kind = "compose"
+        value = "value_C"
+
+        [[steps]]
+        id = "pick"
+        kind = "cond_select"
+        default = "fallback"
+        needs = ["fetch_a", "fetch_b", "fetch_c"]
+
+        [[steps.when]]
+        cond = "{{ input.kind }} == 'A'"
+        value = "{{ steps.fetch_a.output }}"
+
+        [[steps.when]]
+        cond = "{{ input.kind }} == 'B'"
+        value = "{{ steps.fetch_b.output }}"
+
+        [[steps.when]]
+        cond = "{{ input.kind }} == 'C'"
+        value = "{{ steps.fetch_c.output }}"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let a = engine.run("pick_value", json!({ "kind": "A" })).await.unwrap();
+    assert_eq!(a.output, Some(json!("value_A")));
+
+    let b_run = engine.run("pick_value", json!({ "kind": "B" })).await.unwrap();
+    assert_eq!(b_run.output, Some(json!("value_B")));
+
+    let c = engine.run("pick_value", json!({ "kind": "C" })).await.unwrap();
+    assert_eq!(c.output, Some(json!("value_C")));
+
+    let other = engine.run("pick_value", json!({ "kind": "Z" })).await.unwrap();
+    assert_eq!(other.output, Some(json!("fallback")));
+}

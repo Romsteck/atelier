@@ -854,7 +854,8 @@ impl AppsContext {
         if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
             return IpcResponse::err(
                 "raw SQL is not supported on the postgres-dataverse backend — \
-                 use db.graphql for queries and db.insert/update/delete for mutations",
+                 use MCP `dv_list`/`dv_get`/`dv_insert`/`dv_update`/... or the \
+                 REST gateway at /api/dv/{slug}/{table}",
             );
         }
         match self.db_manager.query(&slug, &sql, params).await {
@@ -916,11 +917,10 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            // Translate the legacy {column, op, value} filter shape to a
-            // GraphQL query against the dataverse-managed Postgres. Same
-            // wire response shape (columns / rows / total) so DbExplorer
-            // doesn't need to know which backend it's hitting.
-            return query_rows_via_graphql(
+            // Translate the legacy {column, op, value} filter shape into
+            // a dvexpr `$filter` and run it through `build_list_sql` —
+            // same SQL path as MCP `dv_list` / REST `/api/dv/{slug}/...`.
+            return query_rows_via_dv_sql(
                 self.dataverse_manager.as_ref(),
                 &slug,
                 &table,
@@ -1155,51 +1155,6 @@ impl AppsContext {
         match self.db_manager.create_relation(&slug, rel).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("create_relation: {e}")),
-        }
-    }
-
-    // ── Postgres-Dataverse-only methods ─────────────────────────────
-
-    /// Execute an arbitrary GraphQL query/mutation. Returns the canonical
-    /// `{ data, errors }` JSON envelope. Errors out for non-PG backends.
-    pub async fn db_graphql(
-        &self,
-        slug: String,
-        query: String,
-        variables: Option<serde_json::Value>,
-        operation_name: Option<String>,
-    ) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        // All apps with a DB are on postgres-dataverse since the
-        // legacy SQLite stack was retired. The backend check is now a
-        // no-op (kept as a defensive matches!() in case the enum is
-        // ever extended again).
-        let Some(mgr) = self.dataverse_manager.as_ref() else {
-            return IpcResponse::err("postgres-dataverse backend is not configured");
-        };
-        match mgr
-            .graphql_execute(&slug, &query, variables, operation_name.as_deref())
-            .await
-        {
-            Ok(v) => IpcResponse::ok_data(v),
-            Err(e) => IpcResponse::err(format!("graphql: {e}")),
-        }
-    }
-
-    /// Return the SDL of the app's GraphQL schema. Useful for agents that
-    /// need the data model in a single shot.
-    pub async fn db_introspect(&self, slug: String) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        let Some(mgr) = self.dataverse_manager.as_ref() else {
-            return IpcResponse::err("postgres-dataverse backend is not configured");
-        };
-        match mgr.introspect_sdl(&slug).await {
-            Ok(sdl) => IpcResponse::ok_data(serde_json::json!({ "sdl": sdl })),
-            Err(e) => IpcResponse::err(format!("introspect: {e}")),
         }
     }
 
@@ -2424,7 +2379,11 @@ async fn upsert_env_var(path: &std::path::Path, key: &str, value: &str) -> std::
 /// query against the per-app dataverse Postgres, then re-shape the
 /// response into the same `AppDbQueryResult { columns, rows, total }`
 /// envelope so DbExplorer doesn't need a frontend branch.
-async fn query_rows_via_graphql(
+///
+/// Wires through the same `build_list_sql` + `run_list` path used by the
+/// REST gateway and MCP `dv_list`, after translating the DbExplorer's
+/// legacy filter shape into a dvexpr `$filter` string.
+async fn query_rows_via_dv_sql(
     manager: Option<&Arc<hr_dataverse::DataverseManager>>,
     slug: &str,
     table: &str,
@@ -2434,7 +2393,9 @@ async fn query_rows_via_graphql(
     order_by: Option<&str>,
     order_desc: bool,
 ) -> IpcResponse {
-    use hr_dataverse::graphql::naming;
+    use hr_common::Identity;
+    use hr_dataverse::dv_io::run_list;
+    use hr_dataverse::query::{build_list_sql, Direction, ListQuery, OrderBy};
 
     let Some(mgr) = manager else {
         return IpcResponse::err("postgres-dataverse backend not configured");
@@ -2451,109 +2412,40 @@ async fn query_rows_via_graphql(
         return IpcResponse::err(format!("table '{}' not found", table));
     };
 
-    // Build the SELECT field list (camelCase) — every user column +
-    // implicit id/createdAt/updatedAt. Lookup columns currently
-    // surface as Int (the FK); object expansion is deferred (no
-    // DataLoader yet in the schema builder).
-    let mut gql_fields: Vec<String> =
-        vec!["id".into(), "createdAt".into(), "updatedAt".into()];
-    for c in &table_def.columns {
-        // Skip MultiChoice/Json from the projection only when they would
-        // conflict with our row-mapping; for V1 we include them since
-        // the GraphQL builder declares them.
-        gql_fields.push(naming::camel_case(&c.name));
-    }
-    let field_list = gql_fields.join(" ");
-
-    // Translate filters[] to a Hasura-style `where` JSON.
-    let where_value = translate_legacy_filters(legacy_filters);
-    let lim = limit.unwrap_or(100).min(1000);
-    let off = offset.unwrap_or(0);
-
-    // Build the GraphQL query string. Variables travel separately
-    // for the `where` (its shape depends on the table).
-    let table_field = naming::camel_case(&table_def.name);
-    let where_input = naming::input_where(&table_def.name);
-    let order_input = naming::input_order_by(&table_def.name);
-
-    let count_field = naming::field_count(&table_def.name);
-    let query = format!(
-        "query Rows($where: {where_input}, $orderBy: [{order_input}!], $limit: Int, $offset: Int) {{\n  \
-         {table_field}(where: $where, orderBy: $orderBy, limit: $limit, offset: $offset) {{ {field_list} }}\n  \
-         {count_field}(where: $where)\n}}",
-        where_input = where_input,
-        order_input = order_input,
-        table_field = table_field,
-        field_list = field_list,
-        count_field = count_field,
-    );
-
-    // Build orderBy variable.
-    let order_by_var = if let Some(col) = order_by {
-        let c_camel = naming::camel_case(col);
-        let dir = if order_desc { "DESC" } else { "ASC" };
-        serde_json::json!([{ c_camel: dir }])
-    } else {
-        serde_json::Value::Null
-    };
-
-    let variables = serde_json::json!({
-        "where": where_value,
-        "orderBy": if order_by.is_some() { order_by_var } else { serde_json::Value::Null },
-        "limit": lim,
-        "offset": off,
-    });
-
-    let response = match mgr
-        .graphql_execute(slug, &query, Some(variables), Some("Rows"))
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return IpcResponse::err(format!("graphql: {e}")),
-    };
-
-    // Parse `{ data: { <table>: [...rows], <table>Count: N }, errors: [...] }`
-    if let Some(errors) = response.get("errors") {
-        if let Some(arr) = errors.as_array() {
-            if !arr.is_empty() {
-                let msg = arr
-                    .iter()
-                    .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return IpcResponse::err(format!("graphql errors: {msg}"));
-            }
-        }
-    }
-    let data = match response.get("data") {
-        Some(d) => d,
-        None => return IpcResponse::err("graphql response missing data"),
-    };
-    let rows_camel = data.get(&table_field).and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let total = data
-        .get(&count_field)
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| rows_camel.len() as i64);
-
-    // Convert each row's keys from camelCase → snake_case (the legacy
-    // wire shape DbExplorer expects).
-    let rows_snake: Vec<serde_json::Value> = rows_camel
-        .iter()
-        .map(|row| {
-            let Some(obj) = row.as_object() else { return row.clone(); };
-            let mut out = serde_json::Map::new();
-            for (k, v) in obj {
-                out.insert(naming::snake_case(k), v.clone());
-            }
-            serde_json::Value::Object(out)
+    let filter_str = translate_legacy_filters_to_dvexpr(legacy_filters);
+    let orderby = order_by
+        .map(|col| {
+            vec![OrderBy {
+                column: col.to_string(),
+                direction: if order_desc { Direction::Desc } else { Direction::Asc },
+            }]
         })
-        .collect();
+        .unwrap_or_default();
 
-    let columns: Vec<String> = if let Some(first) = rows_snake.first().and_then(|v| v.as_object()) {
+    let lq = ListQuery {
+        filter: filter_str,
+        select: Vec::new(),
+        orderby,
+        top: Some(limit.unwrap_or(100).min(1000) as u32),
+        skip: Some(offset.unwrap_or(0) as u32),
+        count: true,
+        include_deleted: false,
+    };
+
+    let identity = Identity::system();
+    let compiled = match build_list_sql(table_def, &lq, &identity) {
+        Ok(c) => c,
+        Err(e) => return IpcResponse::err(format!("$filter: {e}")),
+    };
+
+    let rows = match run_list(engine.pool(), table_def, &compiled).await {
+        Ok(r) => r,
+        Err(e) => return IpcResponse::err(format!("dv_list: {e}")),
+    };
+
+    let columns: Vec<String> = if let Some(first) = rows.first().and_then(|v| v.as_object()) {
         first.keys().cloned().collect()
     } else {
-        // Empty result — synthesise the column list from the schema
-        // so DbExplorer can render headers.
         let mut c: Vec<String> = vec!["id".into(), "created_at".into(), "updated_at".into()];
         for col in &table_def.columns {
             c.push(col.name.clone());
@@ -2561,66 +2453,69 @@ async fn query_rows_via_graphql(
         c
     };
 
+    let total = rows.len() as u64;
     IpcResponse::ok_data(AppDbQueryResult {
         columns,
-        rows: rows_snake,
-        total: total.max(0) as u64,
+        rows,
+        total,
     })
 }
 
-/// Translate the legacy `[{column, op, value?}]` filter shape into the
-/// Hasura `{column: {_op: value}}` shape that the dataverse GraphQL
-/// builder expects. Multiple filters on the same column are AND-ed
-/// (same column → keys merge).
-fn translate_legacy_filters(legacy: &[serde_json::Value]) -> serde_json::Value {
-    use hr_dataverse::graphql::naming;
-    let mut out: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+/// Translate the legacy `[{column, op, value?}]` filter shape into a
+/// dvexpr `$filter` string suitable for `ListQuery.filter`. Unknown ops
+/// are dropped silently (safe default). Returns `None` when there is
+/// nothing to filter on — the caller skips the filter slot entirely.
+fn translate_legacy_filters_to_dvexpr(legacy: &[serde_json::Value]) -> Option<String> {
+    let mut clauses: Vec<String> = Vec::new();
     for f in legacy {
         let Some(col) = f.get("column").and_then(|v| v.as_str()) else { continue };
         let Some(op) = f.get("op").and_then(|v| v.as_str()) else { continue };
-        let value = f.get("value").cloned();
-        let camel = naming::camel_case(col);
+        let value_json = f.get("value");
+        let lit = || render_dvexpr_literal(value_json);
+        let clause = match op {
+            "eq" => format!("{col} == {}", lit()),
+            "ne" => format!("{col} != {}", lit()),
+            "gt" => format!("{col} > {}", lit()),
+            "gte" => format!("{col} >= {}", lit()),
+            "lt" => format!("{col} < {}", lit()),
+            "lte" => format!("{col} <= {}", lit()),
+            "is_null" => format!("{col} == null"),
+            "is_not_null" => format!("{col} != null"),
+            // `like` / `in` not yet plumbed in dvexpr — degrade to `==`
+            // so DbExplorer still returns something useful.
+            "like" | "in" => format!("{col} == {}", lit()),
+            _ => continue,
+        };
+        clauses.push(clause);
+    }
+    if clauses.is_empty() {
+        None
+    } else {
+        Some(clauses.join(" && "))
+    }
+}
 
-        let entry = out
-            .entry(camel.clone())
-            .or_insert(serde_json::Value::Object(serde_json::Map::new()));
-        let map = entry.as_object_mut().expect("just inserted");
-
-        match op {
-            "eq" => {
-                map.insert("_eq".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "ne" => {
-                map.insert("_ne".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "gt" => {
-                map.insert("_gt".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "gte" => {
-                map.insert("_gte".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "lt" => {
-                map.insert("_lt".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "lte" => {
-                map.insert("_lte".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "like" => {
-                map.insert("_like".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "in" => {
-                map.insert("_in".into(), value.unwrap_or(serde_json::Value::Null));
-            }
-            "is_null" => {
-                map.insert("_isNull".into(), serde_json::Value::Bool(true));
-            }
-            "is_not_null" => {
-                map.insert("_isNull".into(), serde_json::Value::Bool(false));
-            }
-            _ => {} // unknown op silently dropped (safe default)
+/// Render a JSON value as a dvexpr literal (string → `"..."` escaped,
+/// number/bool inline, null/missing → `null`).
+fn render_dvexpr_literal(v: Option<&serde_json::Value>) -> String {
+    match v {
+        None | Some(serde_json::Value::Null) => "null".to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::String(s)) => {
+            // Minimal escape: `"` and `\`. Newlines/tabs left as-is — dvexpr
+            // accepts them inside double-quoted literals.
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        }
+        Some(other) => {
+            // Arrays/objects don't have a literal form in dvexpr — degrade
+            // to their JSON serialisation as a string literal so the
+            // comparison at least doesn't blow up the parser.
+            let escaped = other.to_string().replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
         }
     }
-    serde_json::Value::Object(out)
 }
 
 fn db_backend_to_str(b: &DbBackend) -> &'static str {

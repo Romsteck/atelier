@@ -410,8 +410,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
     matches!(
         name,
         "status" | "start" | "stop" | "restart" | "exec" | "logs"
-            | "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec"
-            | "db_graphql" | "db_introspect"
+            | "db_tables" | "db_schema" | "db_query" | "db_exec"
             | "db_overview" | "db_count_rows"
             | "db_get_schema" | "db_sync_schema"
             | "db_create_table" | "db_drop_table"
@@ -437,10 +436,7 @@ fn tool_definitions_project() -> Value {
         { "name": "db_tables", "description": "List all tables in the application's SQLite database.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
-        { "name": "db_find", "description": "Query table rows with structured filters, sort, pagination and relation expand. No SQL required.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "filters": { "type": "array", "description": "List of {column, op, value?}. op: eq|ne|gt|lt|gte|lte|like|in|is_null|is_not_null" }, "limit": { "type": "integer", "default": 100 }, "offset": { "type": "integer", "default": 0 }, "order_by": { "type": "string" }, "order_desc": { "type": "boolean", "default": false }, "expand": { "type": "array", "items": { "type": "string" }, "description": "Foreign-key relations to hydrate" } }, "required": ["table"] } },
-        { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database. Legacy SQLite backend only — apps on postgres-dataverse must use db_graphql.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
-        { "name": "db_graphql", "description": "Execute a GraphQL query/mutation against the app's managed schema (postgres-dataverse backend). Returns {data, errors}. Prefer this over db_query/db_exec on dataverse-backed apps.", "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "variables": { "type": "object" }, "operationName": { "type": "string" } }, "required": ["query"] } },
-        { "name": "db_introspect", "description": "Return the SDL of the app's GraphQL schema in one shot (postgres-dataverse backend). Single-call alternative to crafting `__schema` queries.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database. Legacy SQLite backend only — apps on postgres-dataverse must use REST `/api/dv/{slug}/{table}` or MCP `dv_*` tools.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_overview", "description": "Compact overview of the database: table list with column count + row count for each.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_count_rows", "description": "Count rows in a single table.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_get_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON. Read-only.", "inputSchema": { "type": "object", "properties": {} } },
@@ -543,7 +539,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db.tables" | "db.list_tables" => tool_db_tables(id, &arguments, state).await,
         "db.describe" | "db.describe_table" => tool_db_describe(id, &arguments, state).await,
         "db.query" | "db.query_data" => tool_db_query(id, &arguments, state).await,
-        "db.find" => tool_db_find(id, &arguments, state).await,
         "db.execute" | "db.insert_data" | "db.update_data" | "db.delete_data" => tool_db_execute(id, &arguments, state).await,
         "db.overview" => tool_db_overview(id, &arguments, state).await,
         "db.count_rows" => tool_db_count_rows(id, &arguments, state).await,
@@ -554,8 +549,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db.add_column" => tool_db_add_column(id, &arguments, state).await,
         "db.remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db.create_relation" => tool_db_create_relation(id, &arguments, state).await,
-        "db.graphql" => tool_db_graphql(id, &arguments, state).await,
-        "db.introspect" => tool_db_introspect(id, &arguments, state).await,
         // ── Project-scoped simplified names (used when ?project=slug) ──
         "status" => tool_app_status(id, &arguments, state).await,
         "start" => {
@@ -578,7 +571,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_tables" => tool_db_tables(id, &arguments, state).await,
         "db_schema" => tool_db_describe(id, &arguments, state).await,
         "db_query" => tool_db_query(id, &arguments, state).await,
-        "db_find" => tool_db_find(id, &arguments, state).await,
         "db_exec" => tool_db_execute(id, &arguments, state).await,
         "db_get_schema" => tool_db_get_schema(id, &arguments, state).await,
         "db_sync_schema" => tool_db_sync_schema(id, &arguments, state).await,
@@ -587,8 +579,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_add_column" => tool_db_add_column(id, &arguments, state).await,
         "db_remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
-        "db_graphql" => tool_db_graphql(id, &arguments, state).await,
-        "db_introspect" => tool_db_introspect(id, &arguments, state).await,
         "docs_overview" => tool_docs_overview(id, &arguments).await,
         "docs_list_entries" => tool_docs_list_entries(id, &arguments).await,
         "docs_get" => tool_docs_get(id, &arguments).await,
@@ -1423,29 +1413,6 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
-            "name": "db.graphql",
-            "description": "Execute a GraphQL query or mutation against the app's managed schema (postgres-dataverse backend only). Returns the canonical {data, errors} envelope.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string" },
-                    "query": { "type": "string", "description": "GraphQL query or mutation text" },
-                    "variables": { "type": "object", "description": "Variables map for the query (optional)" },
-                    "operationName": { "type": "string", "description": "Operation name when the query has multiple operations (optional)" }
-                },
-                "required": ["slug", "query"]
-            }
-        },
-        {
-            "name": "db.introspect",
-            "description": "Return the SDL (Schema Definition Language) of the app's GraphQL schema in one shot — preferred over crafting `__schema` queries when an agent needs to discover the data model. Postgres-dataverse backend only.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string" } },
-                "required": ["slug"]
-            }
-        },
-        {
             "name": "studio.refresh_context",
             "description": "Regenerate Claude Code context files (CLAUDE.md, .claude/) for a specific app.",
             "inputSchema": {
@@ -1966,57 +1933,6 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
     )
 }
 
-// ── db.find (structured query: filters, sort, pagination, expand) ─
-
-#[tracing::instrument(skip(state, args))]
-async fn tool_db_find(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
-    let filters: Vec<Value> = args
-        .get("filters")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let limit = args.get("limit").and_then(|v| v.as_u64());
-    let offset = args.get("offset").and_then(|v| v.as_u64());
-    let order_by = args
-        .get("order_by")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let order_desc = args.get("order_desc").and_then(|v| v.as_bool());
-    let expand: Vec<String> = args
-        .get("expand")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    ipc_resp_to_mcp(
-        id,
-        ctx.db_query_rows(
-            slug.to_string(),
-            table.to_string(),
-            filters,
-            limit,
-            offset,
-            order_by,
-            order_desc,
-            expand,
-        )
-        .await,
-    )
-}
-
 /// Convert an `IpcResponse` into a JSON-RPC response Value.
 fn ipc_resp_to_mcp(id: Value, resp: hr_ipc::types::IpcResponse) -> Value {
     if resp.ok {
@@ -2214,49 +2130,11 @@ async fn tool_db_create_relation(id: Value, args: &Value, state: &McpState) -> V
     )
 }
 
-// ── db.graphql (postgres-dataverse only) ─────────────────────────────
-
-async fn tool_db_graphql(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing query".into());
-    };
-    let variables = args.get("variables").cloned();
-    let operation_name = args
-        .get("operationName")
-        .or_else(|| args.get("operation_name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    ipc_resp_to_mcp(
-        id,
-        ctx.db_graphql(slug.to_string(), query.to_string(), variables, operation_name)
-            .await,
-    )
-}
-
-// db.migrate / db.commit_migration / db.rollback_migration were
-// removed in Phase E once every app finished its move to
-// postgres-dataverse. The MCP tool surface was pruned at the same time
-// — see tool listing in the dispatcher.
-
-// ── db.introspect (postgres-dataverse only) ──────────────────────────
-
-async fn tool_db_introspect(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    ipc_resp_to_mcp(id, ctx.db_introspect(slug.to_string()).await)
-}
+// db.graphql / db.introspect / db.find / db.migrate / db.commit_migration /
+// db.rollback_migration were removed once every app finished its move to
+// postgres-dataverse. Agents use MCP `dv_*` tools, apps use REST
+// `/api/dv/{slug}/{table}`, flows use the `dataverse` connector — there is
+// no GraphQL surface anymore.
 
 // ── studio.refresh_context ───────────────────────────────────────────
 

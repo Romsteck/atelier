@@ -130,6 +130,9 @@ impl ContextGenerator {
         let src_skills_dir = src_claude_dir.join("skills");
         fs::create_dir_all(&src_rules_dir)?;
         fs::create_dir_all(&src_skills_dir)?;
+        apply_rules_dir_perms(&src_claude_dir);
+        apply_rules_dir_perms(&src_rules_dir);
+        apply_rules_dir_perms(&src_skills_dir);
 
         // Step 3 — Project-scoped MCP config + settings, au seul niveau src/.
         let project_mcp = format!("{}?project={}", self.mcp_endpoint, app.slug);
@@ -186,11 +189,13 @@ impl ContextGenerator {
         // Step 6 — Skills.
         let app_build_dir = src_skills_dir.join("app-build");
         fs::create_dir_all(&app_build_dir)?;
+        apply_rules_dir_perms(&app_build_dir);
         log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
         log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
 
         let app_deploy_dir = src_skills_dir.join("app-deploy");
         fs::create_dir_all(&app_deploy_dir)?;
+        apply_rules_dir_perms(&app_deploy_dir);
         log_write(&app.slug, &app_deploy_dir.join("SKILL.md"), &render_app_deploy_skill(app))?;
         log_write(&app.slug, &app_deploy_dir.join("deploy.sh"), &render_app_deploy_script(app))?;
 
@@ -201,6 +206,7 @@ impl ContextGenerator {
         for (name, content) in render_extra_skills(app) {
             let skill_dir = src_skills_dir.join(name);
             fs::create_dir_all(&skill_dir)?;
+            apply_rules_dir_perms(&skill_dir);
             log_write(&app.slug, &skill_dir.join("SKILL.md"), &content)?;
         }
         for legacy_name in ALL_EXTRA_SKILL_NAMES {
@@ -479,10 +485,16 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `app.logs` — tail recent logs for an app\n\
          - `app.delete` — remove an application (mutation, not auto-approved)\n\
          \n\
-         ## Database (`db.*`)\n\
+         ## Database (`db.*` schema-ops + `dv.*` runtime)\n\
          - `db.tables` — list tables for `{slug}` (or any app)\n\
          - `db.schema` — describe a table\n\
-         - `db.query` — read or mutate via SQL (mutating SQL is not auto-approved)\n\
+         - `dv.schema` — full Dataverse schema (tables, columns, relations)\n\
+         - `dv.list` — read rows ($filter/$select/$expand/$orderby/$top/$skip/$count)\n\
+         - `dv.get` — single row by id\n\
+         - `dv.insert`, `dv.update`, `dv.soft_delete`, `dv.restore` — writes (not auto-approved, audit logged)\n\
+         - `dv.audit_list` — who changed what/when\n\
+         - Schema mutations (`db.create_table`, `db.add_column`, `db.create_relation`, `db.drop_table`, `db.remove_column`) — not auto-approved\n\
+         - **No GraphQL, no raw SQL.** See `.claude/rules/db.md`.\n\
          \n\
          ## Todos (`todos_*`) — visibles dans le panneau droit du Studio\n\
          - `todos_list` — lister les todos (filtre optionnel par `status` : `pending` ou `in_progress`)\n\
@@ -1544,18 +1556,19 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
                 "mcp__homeroute__app_logs",
                 "mcp__homeroute__db_tables",
                 "mcp__homeroute__db_schema",
-                "mcp__homeroute__db_query",
                 "mcp__homeroute__db_get_schema",
                 "mcp__homeroute__db_sync_schema",
                 "mcp__homeroute__db_overview",
                 "mcp__homeroute__db_count_rows",
-                "mcp__homeroute__db_find",
-                "mcp__homeroute__db_introspect",
-                "mcp__homeroute__db_graphql",
-                // Schema mutations (db_create_table / db_add_column / etc.)
-                // are intentionally NOT in the auto-approve list — agents
-                // get a confirmation prompt before each call. They are
-                // discoverable via tools/list (see mcp.rs).
+                "mcp__homeroute__dv_schema",
+                "mcp__homeroute__dv_list",
+                "mcp__homeroute__dv_get",
+                "mcp__homeroute__dv_audit_list",
+                // Dataverse write ops (dv_insert / dv_update / dv_soft_delete /
+                // dv_restore) and schema mutations (db_create_table /
+                // db_add_column / etc.) are intentionally NOT in the
+                // auto-approve list — agents get a confirmation prompt before
+                // each call. They are discoverable via tools/list (see mcp.rs).
                 "mcp__homeroute__docs_overview",
                 "mcp__homeroute__docs_list_entries",
                 "mcp__homeroute__docs_get",
@@ -1582,6 +1595,61 @@ fn render_mcp_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> String 
     serde_json::to_string_pretty(&mcp).expect("mcp JSON serializes")
 }
 
+/// Resolve the rules-files group GID (default `hr-studio`, overridable via
+/// `ATELIER_RULES_GROUP`). The code-server runs as `hr-studio`; making
+/// regenerated rules group-writable for that gid lets agents edit them
+/// without sudo. Returns `None` if the group doesn't exist on the host
+/// or `getent` is unavailable — callers degrade to a `warn!` and continue.
+fn resolve_rules_group_gid() -> Option<u32> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<u32>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let group = std::env::var("ATELIER_RULES_GROUP")
+            .unwrap_or_else(|_| "hr-studio".to_string());
+        let output = std::process::Command::new("getent")
+            .arg("group")
+            .arg(&group)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let line = String::from_utf8(output.stdout).ok()?;
+        // Format `hr-studio:x:1001:...` — 3rd colon-field is the gid.
+        line.split(':').nth(2)?.trim().parse::<u32>().ok()
+    })
+}
+
+/// Apply ACL-friendly perms to a freshly-created rules dir: setgid +
+/// group-writable so children inherit the group and are editable. Best-
+/// effort `chgrp` to the resolved rules group. All failures degrade to a
+/// `warn!` — the regeneration must not fail because of permission tweaks.
+fn apply_rules_dir_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o2775)) {
+        warn!(path = %path.display(), err = %e, "set_permissions dir failed");
+    }
+    if let Some(gid) = resolve_rules_group_gid() {
+        if let Err(e) = std::os::unix::fs::chown(path, None, Some(gid)) {
+            warn!(path = %path.display(), gid, err = %e, "chown dir failed");
+        }
+    }
+}
+
+/// Apply group-writable perms (0o664) + best-effort `chgrp` to a freshly-
+/// written rules file. Same fail-soft contract as `apply_rules_dir_perms`.
+fn apply_rules_file_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o664)) {
+        warn!(path = %path.display(), err = %e, "set_permissions file failed");
+    }
+    if let Some(gid) = resolve_rules_group_gid() {
+        if let Err(e) = std::os::unix::fs::chown(path, None, Some(gid)) {
+            warn!(path = %path.display(), gid, err = %e, "chown file failed");
+        }
+    }
+}
+
 /// Write `content` to `path` only if the existing content differs.
 /// Returns `true` if the file was actually written.
 fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
@@ -1594,6 +1662,7 @@ fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, content)?;
+    apply_rules_file_perms(path);
     Ok(true)
 }
 
@@ -1841,7 +1910,66 @@ Si **un seul** de ces points manque, l'app n'est pas intégrée. Réfère-toi au
 - IDs de step en `snake_case`, descriptifs (`fetch_user`, pas `step1`).
 - Une expression `{{{{ ... }}}}` qui occupe toute la string préserve le type natif (array, number, etc.). Mixée à du texte, elle est coercée en string.
 - Variables d'itération : référencées par `@<nom>` (par défaut `@iter`). Dispo seulement à l'intérieur d'un `for_each`.
-- Conditions (`if.cond`, `while.cond`) : sous-langage `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parens. Les `{{{{ ... }}}}` y sont substituées d'abord.
+- Conditions (`if.cond`, `while.cond`, `cond_select.when.cond`) : sous-langage `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parens. Les `{{{{ ... }}}}` y sont substituées d'abord.
+- **Strings dans les expressions** : `'...'` ET `"..."` acceptés. Pratique pour ne pas se battre avec les guillemets TOML — wrap la cond en `'...'` côté TOML, et utilise `"..."` pour les literals à l'intérieur (ou l'inverse).
+- **`Object != null` / `Array != null`** fonctionne directement : `cond = '{{{{ steps.X.output }}}} != null'` est vrai dès que `steps.X.output` est un objet/array non-null. Pas besoin de tester un champ scalaire (`output.id != null`) pour contourner.
+
+## Aiguillage et sélection de valeur (`if` vs `cond_select`)
+
+Deux primitives, deux intentions :
+
+- **`if`** : « j'exécute des steps **différents** selon une condition ». Output = `{{ "branch": "then" | "else", "output": <last_child_output> }}` — l'enveloppe permet d'inspecter quelle branche a été prise.
+- **`cond_select`** : « je **choisis une valeur** parmi N cas ». Output = directement la valeur de la branche prise (pas d'enveloppe). Plus court qu'un `if` quand les branches ne font que renvoyer une valeur déjà calculée.
+
+### `cond_select` — exemple
+
+```toml
+[[steps]]
+id = "fetch_a"
+kind = "connector"
+connector = "dataverse"
+op = "get_by_natural_key"
+params = {{ table = "items", key = "kind", value = "A" }}
+
+[[steps]]
+id = "fetch_b"
+kind = "connector"
+connector = "dataverse"
+op = "get_by_natural_key"
+params = {{ table = "items", key = "kind", value = "B" }}
+
+[[steps]]
+id = "pick"
+kind = "cond_select"
+default = "null"
+needs = ["fetch_a", "fetch_b"]
+
+[[steps.when]]
+cond = "{{{{ input.kind }}}} == 'A'"
+value = "{{{{ steps.fetch_a.output }}}}"
+
+[[steps.when]]
+cond = "{{{{ input.kind }}}} == 'B'"
+value = "{{{{ steps.fetch_b.output }}}}"
+```
+
+### Output du flow — quand le dernier step est un `if`
+
+Trois options :
+
+1. **`output_step` au niveau FlowDef** (préféré) — désigne explicitement le step dont l'output devient l'output du flow :
+   ```toml
+   name = "do_thing"
+   output_step = "branch_result"
+   ```
+2. **Step terminal `compose`** qui déballe le wrapper :
+   ```toml
+   [[steps]]
+   id = "final"
+   kind = "compose"
+   value = "{{{{ steps.branch.output.output }}}}"
+   ```
+3. **Wrapper côté app** qui lit `.output.output` — moins propre, à éviter pour les nouveaux flux.
 
 ## Tools MCP disponibles
 
@@ -1952,7 +2080,7 @@ fn render_db_section(app: &crate::types::Application, db_tables: &Option<Vec<Str
             "PostgreSQL Dataverse (`app_{slug}`).\n\
              {tables}\n\
              - Connexion : `DATABASE_URL` injecté dans ton env runtime\n\
-             - Tools MCP : `db_graphql` (queries/mutations), `db_introspect` (SDL)\n\
+             - Surfaces : REST OData `/api/dv/{slug}/<table>` (app), connecteur `dataverse` (flows), tools MCP `dv_*` (agent)\n\
              - Voir `.claude/rules/db.md` pour les règles d'usage.\n",
             slug = app.slug,
             tables = tables_block,
@@ -1966,43 +2094,110 @@ fn render_db_md(app: &crate::types::Application) -> String {
 
 fn render_db_md_dataverse(app: &crate::types::Application) -> String {
     format!(
-        "# Base de données — PostgreSQL + Dataverse-like + GraphQL\n\
+        "# Base de données — PostgreSQL + Dataverse\n\
          \n\
-         Cette app (`{slug}`) utilise la stack **HomeRoute Dataverse** :\n\
+         Cette app (`{slug}`) utilise la stack **Atelier Dataverse** :\n\
          \n\
          - **PostgreSQL 18** sur Medion :5432, base dédiée `app_{slug}` (rôle\n\
            `app_{slug}` aux droits limités à cette base)\n\
          - **Connexion runtime** : `DATABASE_URL` est injectée dans l'env du\n\
            process par `hr-apps`. Tu peux utiliser sqlx, tokio-postgres, prisma,\n\
            etc. selon la stack de l'app.\n\
-         - **API GraphQL managée** : endpoint `/api/apps/{slug}/db/graphql` (POST)\n\
-           pour les opérations Dataverse — schéma généré dynamiquement depuis\n\
-           les métadonnées `_dv_*`. Endpoint introspection : `GET /api/apps/{slug}/db/introspect`.\n\
-         - **Schema-ops** : tools MCP `db_create_table`, `db_add_column`,\n\
-           `db_create_relation`, `db_drop_table`, `db_remove_column` (inchangés depuis le legacy) — \n\
-           ils créent les tables avec trigger `updated_at`, FK natives, types Dataverse riches.\n\
          \n\
-         ## Comment requêter (côté app et côté agent)\n\
+         Trois surfaces officielles pour parler à la base, selon le contexte :\n\
+         **REST OData-style** (app runtime), **connecteur `dataverse`** (flows hr-flow),\n\
+         **MCP `dv_*`** (agent / debug). Pas de GraphQL.\n\
          \n\
-         - **Lecture** : query GraphQL avec filtres style Hasura\n\
-           ({{ email: {{ _ilike: \"%@%\" }} }})\n\
-         - **Mutations** : `insert<Table>`, `update<Table>`, `delete<Table>`\n\
-         - **Découverte du schéma** : appelle `db_introspect` (renvoie le SDL en\n\
-           un seul shot) — préférable à un `__schema` query manuel.\n\
+         ## Côté app runtime — REST OData-style\n\
          \n\
-         ## Tools MCP `db_*` à privilégier\n\
+         Routes exposées sous `/api/dv/{slug}/{{table}}` (authentifié par bearer\n\
+         token de l'app) :\n\
          \n\
-         - `db_introspect` — voir le schéma GraphQL en SDL\n\
-         - `db_graphql` — exécuter une query/mutation GraphQL arbitraire\n\
-         - `db_find` — sucre syntaxique (where/orderBy/limit/offset/expand → query GraphQL)\n\
-         - `db_tables`, `db_schema`, `db_get_schema` — métadonnées Dataverse\n\
-         - `db_create_table`, `db_add_column`, `db_create_relation` — schema-ops\n\
+         | Verbe | Endpoint | Headers | Effet |\n\
+         |---|---|---|---|\n\
+         | `GET` | `/api/dv/{slug}/{{table}}` | `Authorization: Bearer $HR_DV_TOKEN` | list (200, `{{rows, count?}}`) |\n\
+         | `GET` | `/api/dv/{slug}/{{table}}/{{id}}` | idem | single row (200, `ETag` = version) |\n\
+         | `POST` | `/api/dv/{slug}/{{table}}` | idem + body JSON | insert (201, row) |\n\
+         | `PATCH` | `/api/dv/{slug}/{{table}}/{{id}}` | `+ If-Match: <version>` | update (200, row) |\n\
+         | `DELETE` | `/api/dv/{slug}/{{table}}/{{id}}` | `+ If-Match: <version>` | soft-delete (200) |\n\
+         | `POST` | `/api/dv/{slug}/{{table}}/$restore/{{id}}` | `+ If-Match: <version>` | restore (200, row) |\n\
+         \n\
+         **`If-Match` obligatoire** pour update/delete/restore — sinon 400 (optimistic lock).\n\
+         \n\
+         Query params (sur GET) : `$filter`, `$select`, `$orderby`, `$top`, `$skip`,\n\
+         `$count`, `$includeDeleted`, `$expand`. Le `$filter` est parsé en\n\
+         **dvexpr** (dialect propriétaire) : `==`, `!=`, `<`, `>`, `<=`, `>=`,\n\
+         `&&`, `||`, `contains(...)`, `startswith(...)`, `endswith(...)`.\n\
+         Exemple : `?$filter=active == true && contains(email, \"@example.com\")`.\n\
+         \n\
+         ## Côté flows hr-flow — connecteur `dataverse`\n\
+         \n\
+         Pour faire des appels DB depuis un flow TOML, **n'utilise pas le\n\
+         connecteur `http`** vers les routes REST ci-dessus — utilise le\n\
+         connecteur natif `dataverse` (plus court, typé, audit automatique) :\n\
+         \n\
+         ```toml\n\
+         [[steps]]\n\
+         id = \"get_page\"\n\
+         kind = \"connector\"\n\
+         connector = \"dataverse\"\n\
+         op = \"get_by_natural_key\"\n\
+         params = {{ table = \"legal_pages\", key = \"slug\", value = \"{{{{ input.slug }}}}\" }}\n\
+         \n\
+         [[steps]]\n\
+         id = \"create_page\"\n\
+         kind = \"connector\"\n\
+         connector = \"dataverse\"\n\
+         op = \"insert\"\n\
+         params = {{ table = \"legal_pages\", data = {{ slug = \"{{{{ input.slug }}}}\", body = \"\" }} }}\n\
+         ```\n\
+         \n\
+         Operations supportées :\n\
+         \n\
+         | Op | Params | Output |\n\
+         |---|---|---|\n\
+         | `list` | `{{ table, filter?, select?, orderby?, top?, skip?, count?, include_deleted?, expand? }}` | `{{ rows: [...], count?: u64 }}` |\n\
+         | `get` | `{{ table, id }}` | `row` ou `null` |\n\
+         | `get_by_natural_key` | `{{ table, key, value }}` | `row` ou `null` |\n\
+         | `insert` | `{{ table, data }}` | `row` (avec `id`/`version` générés) |\n\
+         | `update` | `{{ table, id, version, data }}` | `row` (mis à jour) |\n\
+         | `soft_delete` | `{{ table, id, version }}` | `{{ id, version }}` |\n\
+         | `restore` | `{{ table, id, version }}` | `row` |\n\
+         | `schema` | `{{ table? }}` | schéma tables/colonnes/relations |\n\
+         | `audit_list` | `{{ table?, id?, top?, skip? }}` | `{{ rows: [...] }}` |\n\
+         \n\
+         Les writes (`insert`, `update`, `soft_delete`, `restore`) loggent\n\
+         automatiquement dans la table d'audit avec l'identity `flow:<name>#<run_id>`.\n\
+         \n\
+         ## Côté agent — MCP tools `dv_*`\n\
+         \n\
+         Pour explorer/debug depuis l'IDE :\n\
+         \n\
+         - `dv_schema` — introspect tables, colonnes, relations\n\
+         - `dv_list` — read avec `$filter`/`$select`/`$expand`/`$orderby`/`$top`/`$skip`/`$count`\n\
+         - `dv_get` — single row read\n\
+         - `dv_insert` — insert + audit\n\
+         - `dv_update` — patch + optimistic lock + audit\n\
+         - `dv_soft_delete` — soft delete + audit\n\
+         - `dv_restore` — restore soft-deleted row + audit\n\
+         - `dv_audit_list` — qui a changé quoi/quand sur la table\n\
+         \n\
+         ## Schema-ops (création/évolution de tables)\n\
+         \n\
+         - `db_create_table`, `db_add_column`, `db_create_relation`,\n\
+           `db_drop_table`, `db_remove_column` — outils MCP pour faire évoluer le\n\
+           schéma. Créent tables avec trigger `updated_at`, FK natives, types\n\
+           Dataverse riches.\n\
          \n\
          ## ❌ Ne PAS faire\n\
          \n\
-         - Pas de `db_query` / `db_exec` (SQL brut) — ils renvoient une erreur sur\n\
-           ce backend. Utilise `db_graphql`.\n\
-         - Pas d'ouverture directe d'un fichier `.db` — il n'y en a plus.\n\
+         - **Pas de GraphQL.** L'ancienne surface `db_graphql` / `db_introspect`\n\
+           a été supprimée. Utilise REST (app), connecteur `dataverse` (flows)\n\
+           ou MCP `dv_*` (agent).\n\
+         - **Pas de SQL brut** (`db_query` / `db_exec`) — n'existent pas.\n\
+         - **Pas d'appel `http` direct vers `/api/dv/...` depuis un flow** —\n\
+           utilise le connecteur `dataverse` natif.\n\
+         - **Pas d'ouverture directe d'un fichier `.db`** — il n'y en a plus.\n\
          \n\
          ## 🧹 Nettoyage post-migration\n\
          \n\
@@ -2014,7 +2209,10 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          \n\
          Si tu trouves dans la doc / `CLAUDE.md` de l'app des phrases du type\n\
          « migration Postgres en attente », **supprime-les aussi** — la migration a eu\n\
-         lieu et la règle « post-migration » que tu lis maintenant le confirme.\n",
+         lieu et la règle « post-migration » que tu lis maintenant le confirme.\n\
+         \n\
+         Idem pour les références à GraphQL (`db_graphql`, `db_introspect`,\n\
+         schéma SDL généré, queries Hasura-style) : ils n'existent plus.\n",
         slug = app.slug,
     )
 }

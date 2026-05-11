@@ -1,15 +1,15 @@
 //! Build a `FlowEngine` for a given (slug, flow_name) by wiring:
-//! - the managed connectors the daemon owns (`http`)
+//! - the managed connectors the daemon owns (`http`, `dataverse` when a
+//!   `DataverseManager` is configured)
 //! - a `RemoteConnector` for every other connector name referenced by the
 //!   flow's steps (forwards each `op` to the app's callback URL)
 //! - a remote-action closure for every `kind = "action"` step
 //! - a `JsonRunStore` rooted at `${runtime_root}/{slug}/runs/`
 //!
-//! Connectors `dataverse` / `homeroute` shipped in `hr-flow::connectors_managed`
-//! are stubs in v1 (always error). The daemon does NOT register them — a flow
-//! using them is treated as referring to an app-side custom connector and is
-//! routed via callback. This matches reality (Wallet's `dataverse` is a custom
-//! connector that wraps the gateway, not the engine's built-in stub).
+//! Connector `homeroute` shipped in `hr-flow::connectors_managed` is still
+//! a stub in v1 (always error). The daemon does NOT register it natively —
+//! a flow using it is treated as referring to an app-side custom connector
+//! and is routed via callback.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -19,6 +19,7 @@ use hr_flow::{
     definition::StepKind, FlowDef, FlowEngine, FlowEngineBuilder, FlowError, FlowResult,
     HttpConnector, JsonRunStore,
 };
+use hr_flow::connectors_managed::dataverse::DataverseConnector;
 use reqwest::Client;
 use tracing::{debug, warn};
 
@@ -26,7 +27,8 @@ use crate::callback::{remote_action, RemoteConnector};
 use crate::registry::{AppEntry, Registry};
 
 /// Names of connectors the daemon owns and registers natively.
-const MANAGED_LOCALLY: &[&str] = &["http"];
+/// `dataverse` is added at runtime only when a `DataverseManager` is wired.
+const MANAGED_LOCALLY: &[&str] = &["http", "dataverse"];
 
 pub struct EngineFactoryInput<'a> {
     pub slug: &'a str,
@@ -35,6 +37,11 @@ pub struct EngineFactoryInput<'a> {
     pub apps_runtime_root: &'a std::path::Path,
     pub http: Client,
     pub callback_timeout_ms: u64,
+    /// When `Some`, the `dataverse` connector is wired natively against
+    /// this manager. When `None`, the connector falls back to remote
+    /// callback (and a flow that uses it errors with `UnknownConnector`
+    /// if the app doesn't ship a callback handler).
+    pub dv: Option<Arc<hr_dataverse::DataverseManager>>,
 }
 
 pub fn build_engine_for_flow(args: EngineFactoryInput<'_>) -> FlowResult<FlowEngine> {
@@ -52,13 +59,28 @@ pub fn build_engine_for_flow(args: EngineFactoryInput<'_>) -> FlowResult<FlowEng
     let mut builder = FlowEngineBuilder::new();
     builder.with_store(store);
     builder.register_connector("http", Arc::new(HttpConnector::new()));
+    if let Some(dv) = args.dv.as_ref() {
+        builder.register_connector(
+            "dataverse",
+            Arc::new(DataverseConnector::new(dv.clone(), args.slug.to_string())),
+        );
+        debug!(slug = args.slug, "engine: native dataverse connector wired");
+    }
 
     // Discover connector + action names referenced by this flow.
     let (connectors, actions) = discover_step_handlers(args.flow);
 
     for connector_name in connectors {
         if MANAGED_LOCALLY.contains(&connector_name.as_str()) {
-            continue;
+            // `dataverse` is in MANAGED_LOCALLY but only wired above when
+            // `args.dv` is Some. When None, fall through to the remote
+            // callback path so an app that ships its own implementation
+            // can still serve the flow.
+            if connector_name == "dataverse" && args.dv.is_none() {
+                // Intentional fall-through — handled by remote callback.
+            } else {
+                continue;
+            }
         }
         match RemoteConnector::new(
             &connector_name,

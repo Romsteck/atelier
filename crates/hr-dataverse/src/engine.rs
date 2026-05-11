@@ -9,15 +9,11 @@
 //! GraphQL execution and row-level CRUD live in their own modules and take
 //! a borrow on this engine.
 
-use std::sync::Arc;
-
-use async_graphql::dynamic::Schema as GraphqlSchema;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use crate::sqlx::{self, PgPool};
 use crate::error::{DataverseError, Result};
-use crate::graphql::SchemaCache;
 use crate::migration::{
     add_column_sql, add_foreign_key_sql, create_active_index_sql, create_table_sql,
     create_updated_at_trigger_sql, drop_column_sql, drop_table_sql, quote_ident,
@@ -143,9 +139,6 @@ $$ LANGUAGE plpgsql;
 pub struct DataverseEngine {
     pool: PgPool,
     slug: String,
-    /// Cached `Arc<Schema>` keyed by `schema_version`. Rebuilt by
-    /// [`Self::graphql_schema`] when the version bumps.
-    graphql_cache: SchemaCache,
 }
 
 impl DataverseEngine {
@@ -153,30 +146,11 @@ impl DataverseEngine {
         Self {
             pool,
             slug: slug.into(),
-            graphql_cache: SchemaCache::new(),
         }
     }
 
     pub fn pool(&self) -> &PgPool { &self.pool }
     pub fn slug(&self) -> &str { &self.slug }
-
-    /// Return (and lazily build) the GraphQL schema for this app.
-    ///
-    /// The build inputs are this engine and a snapshot of the Dataverse
-    /// schema. The snapshot is captured at call time; concurrent schema
-    /// mutations that bump `schema_version` after the snapshot is taken
-    /// are picked up on the next call.
-    pub async fn graphql_schema(self: &Arc<Self>) -> Result<Arc<GraphqlSchema>> {
-        let version = self.schema_version().await?;
-        if let Some(sc) = self.graphql_cache.get(version).await {
-            return Ok(sc);
-        }
-        let snapshot = Arc::new(self.get_schema().await?);
-        let schema = crate::graphql::build_schema(self.clone(), snapshot)?;
-        let arc = Arc::new(schema);
-        self.graphql_cache.put(version, arc.clone()).await;
-        Ok(arc)
-    }
 
     /// Run `INIT_METADATA_SQL` against this engine's pool. Safe to call
     /// repeatedly (everything is `IF NOT EXISTS`). After bootstrap,
