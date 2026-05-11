@@ -25,6 +25,7 @@ hr-git       = { workspace = true }
 hr-dataverse = { workspace = true }
 hr-flow      = { workspace = true }
 hr-apps      = { workspace = true }
+sqlx-core    = { workspace = true }
 sqlx-postgres = { workspace = true }
 reqwest      = { workspace = true }
 tokio-tungstenite = { workspace = true }

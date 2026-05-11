@@ -1,31 +1,37 @@
-//! Dataverse Gateway read-only routes (Phase 7).
+//! Dataverse Gateway routes — full read + write surface.
 //!
-//! Atelier connecte en LAN aux mêmes Postgres apps que homeroute (10.0.0.254:5432)
-//! via les credentials synchronisés depuis `dataverse-secrets.json` (sync-state
-//! toutes les 2 min, 0600 sur disque).
+//! Atelier connecte en LAN aux Postgres apps via `state.dv: DataverseManager`.
+//! Le DataverseManager gère pool admin, secrets, schema introspection.
 //!
-//! Mutations restent côté homeroute (Medion) — les écritures passent par le
-//! gateway de proxy.mynetwk.biz qui possède le `DataverseManager` complet
-//! (audit, write triggers, schema-ops). Atelier expose uniquement :
-//! - GET /dv/{slug}/$schema
-//! - GET /dv/{slug}/{table}    (OData $filter/$select/$orderby/$top/$skip/$count)
-//! - GET /dv/{slug}/{table}/{id}
+//! Routes exposées :
+//! - GET    /dv/{slug}/$schema                          → schema introspection
+//! - GET    /dv/{slug}/{table}                          → list (OData $filter/$select/$orderby/$top/$skip/$count)
+//! - GET    /dv/{slug}/{table}/{id}                     → get single row
+//! - POST   /dv/{slug}/{table}                          → insert (returns the new row)
+//! - PATCH  /dv/{slug}/{table}/{id}  + If-Match: <ver>  → update (optimistic locking)
+//! - DELETE /dv/{slug}/{table}/{id}  + If-Match: <ver>  → soft-delete
+//! - POST   /dv/{slug}/{table}/$restore/{id} + If-Match → restore from soft-delete
+//!
+//! Toutes les mutations passent par `hr_dataverse::dv_io::run_mutation` qui
+//! exécute la mutation + l'insert d'audit dans la même transaction.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use hr_common::Identity;
 use hr_dataverse::{
     DatabaseSchema, TableDefinition,
-    crud::build_get,
-    dv_io::{run_count, run_get, run_list},
-    query::{ListQuery, build_count_sql, build_list_sql},
+    audit::{AuditOp, build_audit_insert},
+    crud::{build_get, build_insert, build_restore, build_soft_delete, build_update},
+    dv_io::{MutationOutcome, run_count, run_get, run_list, run_mutation},
+    query::{ListQuery, QueryParam, build_count_sql, build_list_sql},
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
-use tracing::{error, info};
+use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::state::ApiState;
@@ -33,8 +39,12 @@ use crate::state::ApiState;
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/{slug}/$schema", get(get_schema))
-        .route("/{slug}/{table}", get(list_rows))
-        .route("/{slug}/{table}/{id}", get(get_row))
+        .route("/{slug}/{table}", get(list_rows).post(insert_row))
+        .route(
+            "/{slug}/{table}/{id}",
+            get(get_row).patch(update_row).delete(soft_delete_row),
+        )
+        .route("/{slug}/{table}/$restore/{id}", post(restore_row))
 }
 
 // ── Identity / auth ────────────────────────────────────────────────────
@@ -133,6 +143,9 @@ fn code_label(code: StatusCode) -> &'static str {
         401 => "UNAUTHORIZED",
         403 => "FORBIDDEN",
         404 => "NOT_FOUND",
+        405 => "METHOD_NOT_ALLOWED",
+        409 => "CONFLICT",
+        412 => "PRECONDITION_FAILED",
         422 => "UNPROCESSABLE",
         503 => "SERVICE_UNAVAILABLE",
         _ => "INTERNAL",
@@ -160,6 +173,102 @@ fn parse_orderby(s: Option<&str>) -> Vec<Value> {
             Some(json!({"column": col, "direction": direction}))
         })
         .collect()
+}
+
+fn json_to_query_param(v: &Value) -> QueryParam {
+    match v {
+        Value::Null => QueryParam::Null,
+        Value::Bool(b) => QueryParam::Bool(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                QueryParam::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                QueryParam::Float(f)
+            } else {
+                QueryParam::Text(n.to_string())
+            }
+        }
+        Value::String(s) => QueryParam::Text(s.clone()),
+        _ => QueryParam::Text(v.to_string()),
+    }
+}
+
+fn parse_if_match(headers: &HeaderMap) -> Result<i32, Response> {
+    let raw = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            error_resp(
+                StatusCode::BAD_REQUEST,
+                "If-Match header is required (integer version)",
+            )
+        })?;
+    let trimmed = raw.trim().trim_matches('"');
+    trimmed.parse::<i32>().map_err(|_| {
+        error_resp(
+            StatusCode::BAD_REQUEST,
+            "If-Match header must be an integer version",
+        )
+    })
+}
+
+fn parse_id_value(id: String) -> Value {
+    // The id path segment can be int (i64) or uuid/string. We let the
+    // CRUD builder cast via the table's `id_cast` so we don't have to
+    // know the type here — just pass JSON.
+    if let Ok(n) = id.parse::<i64>() {
+        Value::Number(n.into())
+    } else {
+        Value::String(id)
+    }
+}
+
+/// Best-effort audit insert. Logged on failure but does not propagate
+/// the error — at the gateway boundary, an audit-only failure must not
+/// roll back a successful data mutation.
+async fn audit_after(
+    pool: &sqlx_postgres::PgPool,
+    table: &str,
+    after_row: &Value,
+    op: AuditOp,
+    identity: &Identity,
+    before_row: Option<&Value>,
+) {
+    let row_id = after_row
+        .get("id")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
+    let before_for_audit = match op {
+        AuditOp::Insert => None,
+        _ => before_row,
+    };
+    let after_for_audit = match op {
+        AuditOp::Delete => None,
+        _ => Some(after_row),
+    };
+
+    let compiled = build_audit_insert(
+        table,
+        &row_id,
+        op,
+        identity,
+        before_for_audit,
+        after_for_audit,
+    );
+
+    let args = match hr_dataverse::dv_io::bind_all(&compiled.params) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(table, ?op, error = %e, "audit bind failed — skipping audit row");
+            return;
+        }
+    };
+    if let Err(e) = sqlx_core::query::query_with(&compiled.sql, args)
+        .execute(pool)
+        .await
+    {
+        warn!(table, ?op, error = %e, "audit insert failed — proceeding");
+    }
 }
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -368,7 +477,7 @@ async fn get_row(
         }
     };
 
-    let id_value = Value::String(id);
+    let id_value = parse_id_value(id);
     let compiled = build_get(table_def, &id_value, params.include_deleted.unwrap_or(false));
     match run_get(engine.pool(), table_def, &compiled.sql, &compiled.params).await {
         Ok(Some(row)) => Json(row).into_response(),
@@ -376,3 +485,365 @@ async fn get_row(
         Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_get: {e}")),
     }
 }
+
+// ── Insert ─────────────────────────────────────────────────────────────
+
+async fn insert_row(
+    State(state): State<ApiState>,
+    Path((slug, table)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table(&table) {
+        return r;
+    }
+    let identity = match extract_identity(&headers, &state, &slug).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+
+    let payload_map: BTreeMap<String, Value> = match payload {
+        Value::Object(o) => o.into_iter().collect(),
+        _ => {
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                "insert payload must be a JSON object",
+            );
+        }
+    };
+
+    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let engine = match dv.engine_for(&slug).await {
+        Ok(e) => e,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+    };
+    let schema = match engine.get_schema().await {
+        Ok(s) => s,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_insert: {e}")),
+    };
+    let table_def = match find_table(&schema, &table) {
+        Some(t) => t,
+        None => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("table '{}' not found", table),
+            );
+        }
+    };
+
+    let mutation = match build_insert(table_def, &payload_map, &identity) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("dv_insert: {e}"),
+            );
+        }
+    };
+
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &Value::Null,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(engine.pool(), &table, &row, AuditOp::Insert, &identity, None).await;
+            info!(slug = %slug, table = %table, "DvInsert ok");
+            (StatusCode::CREATED, Json(row)).into_response()
+        }
+        Ok(other) => error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("dv_insert: unexpected {:?}", other),
+        ),
+        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_insert: {e}")),
+    }
+}
+
+// ── Update ─────────────────────────────────────────────────────────────
+
+async fn update_row(
+    State(state): State<ApiState>,
+    Path((slug, table, id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table(&table) {
+        return r;
+    }
+    let identity = match extract_identity(&headers, &state, &slug).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    let if_version = match parse_if_match(&headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let payload_map: BTreeMap<String, Value> = match payload {
+        Value::Object(o) => o.into_iter().collect(),
+        _ => {
+            return error_resp(
+                StatusCode::BAD_REQUEST,
+                "update payload must be a JSON object",
+            );
+        }
+    };
+
+    let id_value = parse_id_value(id);
+
+    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let engine = match dv.engine_for(&slug).await {
+        Ok(e) => e,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+    };
+    let schema = match engine.get_schema().await {
+        Ok(s) => s,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_update: {e}")),
+    };
+    let table_def = match find_table(&schema, &table) {
+        Some(t) => t,
+        None => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("table '{}' not found", table),
+            );
+        }
+    };
+
+    // Snapshot before — for audit diff.
+    let before = run_get(
+        engine.pool(),
+        table_def,
+        &build_get(table_def, &id_value, true).sql,
+        &[json_to_query_param(&id_value)],
+    )
+    .await
+    .ok()
+    .flatten();
+
+    let mutation = match build_update(table_def, &id_value, if_version, &payload_map, &identity) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("dv_update: {e}"),
+            );
+        }
+    };
+
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &id_value,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(
+                engine.pool(),
+                &table,
+                &row,
+                AuditOp::Update,
+                &identity,
+                before.as_ref(),
+            )
+            .await;
+            info!(slug = %slug, table = %table, "DvUpdate ok");
+            Json(row).into_response()
+        }
+        Ok(MutationOutcome::PreconditionFailed) => {
+            error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
+        }
+        Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_update: {e}")),
+    }
+}
+
+// ── Soft-delete ────────────────────────────────────────────────────────
+
+async fn soft_delete_row(
+    State(state): State<ApiState>,
+    Path((slug, table, id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table(&table) {
+        return r;
+    }
+    let identity = match extract_identity(&headers, &state, &slug).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    let if_version = match parse_if_match(&headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let id_value = parse_id_value(id);
+
+    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let engine = match dv.engine_for(&slug).await {
+        Ok(e) => e,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+    };
+    let schema = match engine.get_schema().await {
+        Ok(s) => s,
+        Err(e) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("dv_soft_delete: {e}"),
+            );
+        }
+    };
+    let table_def = match find_table(&schema, &table) {
+        Some(t) => t,
+        None => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("table '{}' not found", table),
+            );
+        }
+    };
+
+    let mutation = match build_soft_delete(table_def, &id_value, if_version, &identity) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("dv_soft_delete: {e}"),
+            );
+        }
+    };
+
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &id_value,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(engine.pool(), &table, &row, AuditOp::Delete, &identity, None).await;
+            info!(slug = %slug, table = %table, "DvSoftDelete ok");
+            Json(row).into_response()
+        }
+        Ok(MutationOutcome::PreconditionFailed) => {
+            error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
+        }
+        Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => error_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("dv_soft_delete: {e}"),
+        ),
+    }
+}
+
+// ── Restore ────────────────────────────────────────────────────────────
+
+async fn restore_row(
+    State(state): State<ApiState>,
+    Path((slug, table, id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table(&table) {
+        return r;
+    }
+    let identity = match extract_identity(&headers, &state, &slug).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    let if_version = match parse_if_match(&headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let id_value = parse_id_value(id);
+
+    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let engine = match dv.engine_for(&slug).await {
+        Ok(e) => e,
+        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+    };
+    let schema = match engine.get_schema().await {
+        Ok(s) => s,
+        Err(e) => {
+            return error_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("dv_restore: {e}"),
+            );
+        }
+    };
+    let table_def = match find_table(&schema, &table) {
+        Some(t) => t,
+        None => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("table '{}' not found", table),
+            );
+        }
+    };
+
+    let mutation = match build_restore(table_def, &id_value, if_version, &identity) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_resp(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("dv_restore: {e}"),
+            );
+        }
+    };
+
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &id_value,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(engine.pool(), &table, &row, AuditOp::Restore, &identity, None).await;
+            info!(slug = %slug, table = %table, "DvRestore ok");
+            Json(row).into_response()
+        }
+        Ok(MutationOutcome::PreconditionFailed) => {
+            error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
+        }
+        Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_restore: {e}")),
+    }
+}
+
+// Silence unused import warnings — `Map` is part of the JSON ergonomics
+// we may need later (e.g. for typed envelope building). Same for the
+// soft-delete restore module dependency chain.
+#[allow(dead_code)]
+fn _ergonomics(_: Map<String, Value>) {}
