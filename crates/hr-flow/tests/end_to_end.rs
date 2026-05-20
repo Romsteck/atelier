@@ -745,3 +745,122 @@ async fn step_validation_error_lands_in_persisted_timeline() {
         "the previous step must still appear as success"
     );
 }
+
+#[tokio::test]
+async fn while_loops_until_cond_false() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    // Increment a counter while it's less than 3 — exits cleanly after 3 iters.
+    let flow = parse_flow_toml(r#"
+        name = "count_to_three"
+
+        [[steps]]
+        id = "init"
+        kind = "set_var"
+        name = "counter"
+        value = 0
+
+        [[steps]]
+        id = "loop"
+        kind = "while"
+        cond = "{{ vars.counter }} < 3"
+        max_iterations = 100
+
+        [[steps]]
+        id = "tick"
+        parent = "loop"
+        kind = "increment_var"
+        name = "counter"
+        by = 1
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("count_to_three", json!({})).await.unwrap();
+    assert_eq!(r.status, RunStatus::Success, "expected success, got error: {:?}", r.error);
+
+    let run = engine.store().load(&r.run_id).await.unwrap();
+    // 1 init + 1 while header + 3 tick iterations recorded
+    let ticks = run.steps.iter().filter(|s| s.step_id == "tick").count();
+    assert_eq!(ticks, 3, "expected 3 tick records, got {ticks}");
+}
+
+#[tokio::test]
+async fn while_returns_empty_when_cond_initially_false() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    let flow = parse_flow_toml(r#"
+        name = "no_loop"
+
+        [[steps]]
+        id = "loop"
+        kind = "while"
+        cond = "false"
+        max_iterations = 10
+
+        [[steps]]
+        id = "never"
+        parent = "loop"
+        kind = "compose"
+        value = "should not run"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("no_loop", json!({})).await.unwrap();
+    assert_eq!(r.status, RunStatus::Success);
+
+    let run = engine.store().load(&r.run_id).await.unwrap();
+    assert!(
+        run.steps.iter().all(|s| s.step_id != "never"),
+        "child step should never have run"
+    );
+}
+
+#[tokio::test]
+async fn while_errors_at_max_iterations_to_prevent_runaway() {
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    // cond is always true — must trip max_iterations and surface a clear error.
+    let flow = parse_flow_toml(r#"
+        name = "runaway"
+
+        [[steps]]
+        id = "loop"
+        kind = "while"
+        cond = "true"
+        max_iterations = 5
+
+        [[steps]]
+        id = "noop"
+        parent = "loop"
+        kind = "compose"
+        value = "tick"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("runaway", json!({})).await.unwrap();
+    assert_eq!(r.status, RunStatus::Failed);
+    let err = r.error.as_ref().expect("expected error on runaway while");
+    assert_eq!(err.step_id, "loop");
+    assert!(
+        err.message.contains("max_iterations=5"),
+        "expected max_iterations diagnostic, got: {}",
+        err.message
+    );
+
+    // The 5 iterations that did run must appear in the timeline.
+    let run = engine.store().load(&r.run_id).await.unwrap();
+    let noop_count = run.steps.iter().filter(|s| s.step_id == "noop").count();
+    assert_eq!(noop_count, 5, "expected 5 noop records before the cap hit, got {noop_count}");
+}

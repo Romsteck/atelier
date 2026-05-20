@@ -451,6 +451,53 @@ async fn run_step_inner(
                 message: format!("parse_json: {e}"),
             })
         }
+        StepKind::While { cond, max_iterations } => {
+            // Loop body : children of this step (no parent_branch filter — `while`
+            // has only one branch). Each iteration re-evaluates `cond` against
+            // the current `state` (which may mutate via set_var / append_to_var
+            // / increment_var inside children). `iter_index` is exposed for
+            // the body via the standard iter frame, mirroring `for_each`.
+            let children: Vec<&StepDef> = ctx
+                .children_idx
+                .get(&Some(step.id.clone()))
+                .cloned()
+                .unwrap_or_default();
+
+            let mut iterations: Vec<Value> = Vec::new();
+            let mut idx: u32 = 0;
+            loop {
+                if idx >= *max_iterations {
+                    return Err(FlowError::StepFailed {
+                        step_id: step.id.clone(),
+                        message: format!(
+                            "while exceeded max_iterations={max_iterations} — likely runaway condition"
+                        ),
+                    });
+                }
+                if !eval_bool(cond, state)? {
+                    break;
+                }
+                state.iter_stack.push(make_iter_frame("iter", Value::Null, idx as usize));
+                let mut last = Value::Null;
+                let mut iter_err: Option<FlowError> = None;
+                for child in &children {
+                    match run_step(
+                        ctx, state, *child,
+                        Some(record_id.clone()),
+                        None,
+                        Some(idx),
+                    ).await {
+                        Ok(v) => last = v,
+                        Err(e) => { iter_err = Some(e); break; }
+                    }
+                }
+                state.iter_stack.pop();
+                if let Some(e) = iter_err { return Err(e); }
+                iterations.push(last);
+                idx += 1;
+            }
+            Ok(Value::Array(iterations))
+        }
         other => Err(FlowError::Internal(format!(
             "step kind `{}` not yet implemented", step_kind_label(other),
         ))),
