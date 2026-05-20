@@ -22,7 +22,7 @@ use hr_dataverse::query::{
 };
 use hr_dataverse::{DataverseManager, TableDefinition};
 use serde_json::{Map, Value, json};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::connector::Connector;
 use crate::error::{FlowError, FlowResult};
@@ -345,6 +345,7 @@ impl DataverseConnector {
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct ListParams {
     table: String,
     filter: Option<String>,
@@ -372,7 +373,26 @@ impl ListParams {
 
 fn parse_list_params(params: &Value) -> FlowResult<ListParams> {
     let table = required_string(params, "table")?;
-    let filter = params.get("filter").and_then(|v| v.as_str()).map(String::from);
+    // `filter` MUST be a string when present — silently dropping a non-string
+    // value (e.g., a template that resolved to null or an object) used to
+    // produce false-positives on `check_files_exist`-style flows : the query
+    // ran without filter, returned ALL rows, and the caller wrongly concluded
+    // the candidate existed. Reject loudly to surface the upstream bug
+    // (usually a missing `output` field or wrong path in the templated
+    // expression).
+    let filter = match params.get("filter") {
+        None => None,
+        Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => {
+            return Err(FlowError::Connector(format!(
+                "dataverse.list: `filter` must be a string (got {}). \
+                 Common cause: the templated expression resolved to a non-string \
+                 (object, array, or missing field). Verify the upstream step's output.",
+                value_type_name(other)
+            )));
+        }
+    };
     let select: Vec<String> = params
         .get("select")
         .and_then(|v| v.as_array())
@@ -384,7 +404,26 @@ fn parse_list_params(params: &Value) -> FlowResult<ListParams> {
     let count = params.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
     let include_deleted = params.get("include_deleted").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    debug!(
+        table = %table,
+        filter = ?filter,
+        top, skip, count, include_deleted,
+        select_count = select.len(),
+        "dataverse.list: parsed params"
+    );
+
     Ok(ListParams { table, filter, select, orderby, top, skip, count, include_deleted })
+}
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Accept `orderby` as either a single string `"created_at desc"` or an
@@ -534,5 +573,46 @@ async fn audit_best_effort(
         .await
     {
         warn!(table, ?op, error = %e, "audit insert failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_filter_must_be_string_or_absent() {
+        // None / absent → ok
+        let p = json!({ "table": "files" });
+        assert!(parse_list_params(&p).is_ok(), "absent filter is allowed");
+
+        // String → ok
+        let p = json!({ "table": "files", "filter": "name == 'x'" });
+        let out = parse_list_params(&p).expect("string filter parses");
+        assert_eq!(out.filter.as_deref(), Some("name == 'x'"));
+
+        // null → treated as absent (templates often resolve to null when
+        // the upstream field is missing — must not be a hard error there).
+        let p = json!({ "table": "files", "filter": null });
+        let out = parse_list_params(&p).expect("null filter is treated as absent");
+        assert!(out.filter.is_none());
+
+        // Object → loud error (used to be silently dropped before the fix,
+        // producing false-positives on `check_files_exist`-style flows)
+        let p = json!({ "table": "files", "filter": { "oops": "object" } });
+        let err = parse_list_params(&p).expect_err("object filter must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("filter") && msg.contains("string"),
+            "diagnostic must point at the filter/string mismatch, got: {msg}"
+        );
+
+        // Array → idem
+        let p = json!({ "table": "files", "filter": ["x", "y"] });
+        assert!(parse_list_params(&p).is_err(), "array filter must error");
+
+        // Number → idem
+        let p = json!({ "table": "files", "filter": 42 });
+        assert!(parse_list_params(&p).is_err(), "number filter must error");
     }
 }
