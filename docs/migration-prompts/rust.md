@@ -59,7 +59,7 @@ Repère dans `server/src/routes/` toutes les routes/handlers qui chaînent **≥
   ```
   HR_FLOW_TOKEN=<token>
   ```
-  Le token est généré par l'utilisateur (32 bytes hex) ; il doit ÉGALEMENT être ajouté à `apps.json` côté Medion sur l'entrée de l'app, sous `flow_callback_url` (`http://127.0.0.1:<port>`) et `flow_callback_token`. Vérifie avec `mcp__atelier__app.get_app(slug=...)` ou `mcp__homeroute__app.regenerate_flow_token(slug=...)` (selon le tool disponible).
+  Le token est généré par l'utilisateur (32 bytes hex) ; il doit ÉGALEMENT être ajouté à `apps.json` côté Medion sur l'entrée de l'app, sous `flow_callback_url` (`http://127.0.0.1:<port>`) et `flow_callback_token`. Vérifie avec `mcp__atelier__app.get_app(slug=...)` ou `mcp__studio__app.regenerate_flow_token(slug=...)` (selon le tool disponible).
 
 - Crée le dossier `flows/` à la racine `server/src/flows/` (relatif à cwd, qui est `<slug>/src/`).
 
@@ -74,7 +74,7 @@ Prends 1 ou 2 routes simples de la liste, transforme-les en flux TOML sous `serv
 - POST `http://127.0.0.1:4100/api/apps/<slug>/flows/<nom>/run` avec `{ "input": ... }`, OU
 - Utilise `hr_flow::RemoteEngine::from_env(slug)?.run(name, input).await` (depuis le code Rust de l'app).
 
-Build, déploie via `make deploy-app SLUG=<slug>`, teste via `mcp__homeroute__flow.run(slug=<slug>, name=<flow>, input=...)`.
+Build, déploie via `make deploy-app SLUG=<slug>`, teste via `mcp__studio__flow.run(slug=<slug>, name=<flow>, input=...)`.
 
 Itère sur le lot suivant. Garde la tâche réglée même si la route originelle n'est pas encore décommissionnée — la doctrine est de migrer progressivement, pas de big-bang.
 

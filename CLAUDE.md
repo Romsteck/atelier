@@ -146,6 +146,6 @@ Override possible via env vars `ATELIER_APP_UNIT_PREFIX` / `ATELIER_APP_SLICE` /
 À chaque fois que tu travailles dans Atelier :
 
 1. Lire `MEMORY.md` global (auto-chargé) et les rules dans `.claude/rules/`.
-2. Si la tâche concerne une app HomeRoute existante (`/opt/homeroute/apps/{slug}/` sur CloudMaster), suivre la doctrine **DOC-FIRST** : `mcp__homeroute__docs_overview` d'abord.
+2. Si la tâche concerne une app HomeRoute existante (`/opt/homeroute/apps/{slug}/` sur CloudMaster), suivre la doctrine **DOC-FIRST** : `mcp__studio__docs_overview` d'abord.
 3. Pour toute fonctionnalité ajoutée à Atelier : doc + tests e2e + logging structuré.
 4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier sur Medion (`https://app.mynetwk.biz/api/...` ou `ssh romain@10.0.0.254 "sudo journalctl -u atelier..."`). Pas d'accès direct à `/opt/homeroute/apps/` côté Medion (n'existe plus depuis le rapatriement).

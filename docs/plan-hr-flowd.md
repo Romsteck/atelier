@@ -228,7 +228,7 @@ Pour chaque app, l'agent app fait :
 5. Génération du `flow_callback_token` (au scaffold ou via tool MCP `app.regenerate_flow_token`), posé dans `.env`
 6. Enregistrement de l'app auprès du daemon (`apps.json` mis à jour avec `flow_callback_url` + `flow_callback_token` ; reload daemon via `_admin/reload`)
 7. Ajout `flows/` au `build_artefact` (sinon les TOML ne montent pas en prod)
-8. Premier flux migré + test via `mcp__homeroute__flow.run`
+8. Premier flux migré + test via `mcp__studio__flow.run`
 9. Migration par lot des autres routes orchestrées
 
 ### Phase 5b — Roll-out apps NextJS existantes (aptymus / calendar / forge / padel / www)
@@ -297,13 +297,13 @@ Vérif scaffold : créer une app test `_test-scaffold-flows` en NextJS → véri
 
 **Phase 5a (Rust apps)** :
 - `curl localhost:4002/v1/definitions?slug=files` (idem home/trader/myfrigo) → liste non vide après leur premier flux
-- `mcp__homeroute__flow.run(slug=files, name=<premier-flux>, input=...)` → status=success
+- `mcp__studio__flow.run(slug=files, name=<premier-flux>, input=...)` → status=success
 - `/flows-stats` page globale → les 4 apps Rust apparaissent dans le breakdown `per_app`
 - `grep -r "FlowEngineBuilder::new()" /opt/homeroute/apps/{files,home,trader,myfrigo}/` → 0 occurrence (toutes en callback direct, jamais embedded)
 
 **Phase 5b (NextJS apps)** :
 - Pour chaque NextJS migrée : `curl http://localhost:<port>/api/_flow/action/<name> -H "Authorization: Bearer <token>" -d '{"input": {...}}'` → réponse `{ output: ... }` valide
-- `mcp__homeroute__flow.run(slug=www, name=<flux>, input=...)` → run visible dans Studio Flows pour `www`
+- `mcp__studio__flow.run(slug=www, name=<flux>, input=...)` → run visible dans Studio Flows pour `www`
 - `grep -r "@homeroute/flow-action" /opt/homeroute/apps/{aptymus,calendar,forge,padel,www}/` → toutes les apps NextJS ont la dep
 - Page `/flows-stats` globale : les 5 NextJS apparaissent dans `per_app`, le breakdown `per_connector` montre les usages cross-stack
 
@@ -319,7 +319,7 @@ Vérif scaffold : créer une app test `_test-scaffold-flows` en NextJS → véri
   - `apps/_test-scaffold-flows/.env` contient `HR_FLOW_TOKEN`
   - `apps/_test-scaffold-flows/flows/hello.toml` existe
   - `apps/_test-scaffold-flows/app/api/_flow/[type]/[name]/route.ts` existe
-- `mcp__homeroute__flow.run(slug=_test-scaffold-flows, name=hello, input={"name": "test"})` → `{ greeting: "Hello test" }` sans aucune intervention
+- `mcp__studio__flow.run(slug=_test-scaffold-flows, name=hello, input={"name": "test"})` → `{ greeting: "Hello test" }` sans aucune intervention
 - Cleanup : `DELETE /api/apps/_test-scaffold-flows`
 - Refaire le test pour stack Rust+Vite et Rust pur
 
@@ -354,7 +354,7 @@ Bascule Wallet du mode embedded vers le mode callback (daemon hr-flowd).
 
 4. Supprime entièrement `flows/internal_routes.rs` ainsi que sa réf dans `flows/mod.rs`. Le daemon répond aux calls MCP désormais.
 
-5. Build, déploie via `make app-build SLUG=wallet`. Vérifie via `mcp__homeroute__flow.run(name="score_transaction", input={...})` que l'output et l'arbre de steps sont identiques à ceux observés en mode embedded (les `run_id` récents sont visibles dans Studio Flows).
+5. Build, déploie via `make app-build SLUG=wallet`. Vérifie via `mcp__studio__flow.run(name="score_transaction", input={...})` que l'output et l'arbre de steps sont identiques à ceux observés en mode embedded (les `run_id` récents sont visibles dans Studio Flows).
 
 6. Le daemon doit voir Wallet : `curl localhost:4002/v1/definitions?slug=wallet` retourne les 10 flows.
 
@@ -382,7 +382,7 @@ Procède en 4 étapes, dans l'ordre :
    - `main.rs` : merge du sous-router callback dans le router axum principal.
    - Crée le dossier `flows/` à la racine `server/src/flows/` (relatif au cwd du process).
    - Ajoute `flows/` au `build_artefact` de l'app (sinon les TOML ne montent pas en prod).
-   - Le `flow_callback_token` est généré par `apps.json` ; vérifie qu'il est dans ton `.env` (sinon : `mcp__homeroute__app.regenerate_flow_token(slug=<ton-slug>)`).
+   - Le `flow_callback_token` est généré par `apps.json` ; vérifie qu'il est dans ton `.env` (sinon : `mcp__studio__app.regenerate_flow_token(slug=<ton-slug>)`).
    - Build : `make app-build SLUG=<ton-slug>`.
 
 3. Migration par lot. Prends 1 ou 2 routes simples, transforme-les en flux TOML sous `server/src/flows/*.toml` (format plat, parent/parent_branch). Le handler garde un wrapper mince qui appelle `flow.run` via `RemoteEngine` (cf. skill flow-build pour le pattern). Build, déploie, teste via MCP `flow.run`. Lot suivant.
@@ -408,11 +408,11 @@ Procède en 4 étapes :
 2. Intégration. Une fois la liste validée :
    - Installe ou copie le package `@homeroute/flow-action` (selon le scaffold initial)
    - Crée `app/api/_flow/[type]/[name]/route.ts` (catchall) qui appelle `handleFlowCallback({ actions, connectors })`. Voir le sample dans le skill.
-   - Pose `HR_FLOW_TOKEN=<token>` dans `.env.local` (vérifie qu'il est dans `apps.json` ; sinon `mcp__homeroute__app.regenerate_flow_token`)
+   - Pose `HR_FLOW_TOKEN=<token>` dans `.env.local` (vérifie qu'il est dans `apps.json` ; sinon `mcp__studio__app.regenerate_flow_token`)
    - Crée le dossier `flows/` à la racine de l'app
    - Aucune toolchain Rust à installer
 
-3. Migration par lot. Pour chaque route candidate : crée `flows/<nom>.toml`, écris une action TS dans `lib/flow-actions/<nom>.ts`, importe-la dans le handler catchall, déploie, teste via `mcp__homeroute__flow.run`. Le handler Next d'origine garde un fetch vers l'API homeroute ou appelle directement le `RemoteEngine` côté Node (le skill détaille le pattern).
+3. Migration par lot. Pour chaque route candidate : crée `flows/<nom>.toml`, écris une action TS dans `lib/flow-actions/<nom>.ts`, importe-la dans le handler catchall, déploie, teste via `mcp__studio__flow.run`. Le handler Next d'origine garde un fetch vers l'API homeroute ou appelle directement le `RemoteEngine` côté Node (le skill détaille le pattern).
 
 4. Escalade plateforme identique : STOP + rapport + attendre correctif.
 
@@ -437,7 +437,7 @@ Après la phase 7, créer une nouvelle app HomeRoute la rend **immédiatement** 
 
 3. **Rule + skill poussés** : `flows-first.md` (always-on, sans la section "État de la migration" qui n'a plus de sens en steady-state) + skill `flow-build` adapté à la stack.
 
-4. **Premier `make app-build SLUG=<new>`** : l'app build et démarre. `mcp__homeroute__flow.run(slug=<new>, name="hello", input={"name": "world"})` retourne `{"greeting": "Hello world"}` immédiatement, sans aucune intervention manuelle.
+4. **Premier `make app-build SLUG=<new>`** : l'app build et démarre. `mcp__studio__flow.run(slug=<new>, name="hello", input={"name": "world"})` retourne `{"greeting": "Hello world"}` immédiatement, sans aucune intervention manuelle.
 
 5. **L'utilisateur peut alors ouvrir Studio** → tab Flows → l'app a déjà un flux `hello` listé et un run récent visible.
 

@@ -56,7 +56,7 @@ Repère dans `app/api/` toutes les routes Next qui chaînent **≥ 2 étapes** :
   ```
   HR_FLOW_TOKEN=<token>
   ```
-  Le token (32 bytes hex) est aussi à ajouter à `apps.json` côté Medion sur l'entrée de l'app, sous `flow_callback_url` (`http://127.0.0.1:<port>`) et `flow_callback_token`. Vérifie avec `mcp__atelier__app.get_app(slug=...)` ou `mcp__homeroute__app.regenerate_flow_token(slug=...)`.
+  Le token (32 bytes hex) est aussi à ajouter à `apps.json` côté Medion sur l'entrée de l'app, sous `flow_callback_url` (`http://127.0.0.1:<port>`) et `flow_callback_token`. Vérifie avec `mcp__atelier__app.get_app(slug=...)` ou `mcp__studio__app.regenerate_flow_token(slug=...)`.
 
 - Crée le dossier `flows/` à la racine de l'app (au même niveau que `app/`, `lib/`, `package.json`).
 
@@ -95,7 +95,7 @@ Pour chaque route Next candidate :
    ```
    (Tu peux aussi garder le handler intact pendant la phase de test et appeler le flux depuis un endpoint distinct.)
 
-4. Build, déploie, teste via `mcp__homeroute__flow.run(slug=<slug>, name=<nom>, input=...)`.
+4. Build, déploie, teste via `mcp__studio__flow.run(slug=<slug>, name=<nom>, input=...)`.
 
 5. Itère sur le lot suivant.
 

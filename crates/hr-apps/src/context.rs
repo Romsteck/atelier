@@ -347,7 +347,7 @@ impl ContextGenerator {
              public URL.\n\
              \n\
              ## MCP\n\
-             A single MCP server `homeroute` is configured at `{mcp_endpoint}` via \
+             A single MCP server `studio` is configured at `{mcp_endpoint}` via \
              `.claude/settings.json` and `.mcp.json`. Read-only tools (`app.list`, \
              `app.status`, `app.logs`, `db.tables`, `db.schema`, `db.query`, \
              `docs.overview`, `docs.list_entries`, `docs.get`, `docs.search`, \
@@ -460,7 +460,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
     format!(
         "# MCP tools — {name}\n\
          \n\
-         A single MCP server is configured: `homeroute`. Read-only tools are \
+         A single MCP server is configured: `studio`. Read-only tools are \
          auto-approved via `.claude/settings.json` — mutations require explicit \
          confirmation.\n\
          \n\
@@ -1311,10 +1311,10 @@ op = "chat"
 
 ## Outils
 
-- `mcp__homeroute__flow.list_definitions(slug=...)` / `flow.get_definition` — lecture des flux
-- `mcp__homeroute__flow.run(slug, name, input)` — déclencher un flux à la main
-- `mcp__homeroute__flow.list_runs` / `flow.get_run` — lecture de l'historique avec arbre des steps
-- `mcp__homeroute__flow.replay(slug, run_id)` — rejouer un run en l'état
+- `mcp__studio__flow.list_definitions(slug=...)` / `flow.get_definition` — lecture des flux
+- `mcp__studio__flow.run(slug, name, input)` — déclencher un flux à la main
+- `mcp__studio__flow.list_runs` / `flow.get_run` — lecture de l'historique avec arbre des steps
+- `mcp__studio__flow.replay(slug, run_id)` — rejouer un run en l'état
 - `POST http://127.0.0.1:4100/api/apps/<slug>/flows/<name>/run` — Atelier API write endpoint (depuis le code Rust de l'app)
 - Studio onglet **Flows** — visualisation lecture seule pour l'utilisateur
 
@@ -1463,10 +1463,10 @@ params = { amount = "{{ steps.fetch.output.amount }}" }
 
 ## Outils
 
-- `mcp__homeroute__flow.list_definitions(slug=...)` / `flow.get_definition` — lecture des flux
-- `mcp__homeroute__flow.run(slug, name, input)` — déclencher un flux à la main
-- `mcp__homeroute__flow.list_runs` / `flow.get_run` — lecture de l'historique avec arbre des steps
-- `mcp__homeroute__flow.replay(slug, run_id)` — rejouer un run en l'état
+- `mcp__studio__flow.list_definitions(slug=...)` / `flow.get_definition` — lecture des flux
+- `mcp__studio__flow.run(slug, name, input)` — déclencher un flux à la main
+- `mcp__studio__flow.list_runs` / `flow.get_run` — lecture de l'historique avec arbre des steps
+- `mcp__studio__flow.replay(slug, run_id)` — rejouer un run en l'état
 - `POST http://127.0.0.1:4100/api/apps/<slug>/flows/<name>/run` — Atelier API write endpoint (depuis le code TS de l'app, en interne)
 - Studio onglet **Flows** — visualisation lecture seule pour l'utilisateur
 
@@ -1546,40 +1546,15 @@ fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
 fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> String {
     let settings = serde_json::json!({
         "mcpServers": {
-            "homeroute": mcp_server_entry(mcp_endpoint, token),
+            "studio": mcp_server_entry(mcp_endpoint, token),
         },
-        "enabledMcpjsonServers": ["homeroute"],
+        "enabledMcpjsonServers": ["studio"],
         "permissions": {
-            "allow": [
-                "mcp__homeroute__app_list",
-                "mcp__homeroute__app_status",
-                "mcp__homeroute__app_logs",
-                "mcp__homeroute__db_tables",
-                "mcp__homeroute__db_schema",
-                "mcp__homeroute__db_get_schema",
-                "mcp__homeroute__db_sync_schema",
-                "mcp__homeroute__db_overview",
-                "mcp__homeroute__db_count_rows",
-                "mcp__homeroute__dv_schema",
-                "mcp__homeroute__dv_list",
-                "mcp__homeroute__dv_get",
-                "mcp__homeroute__dv_audit_list",
-                // Dataverse write ops (dv_insert / dv_update / dv_soft_delete /
-                // dv_restore) and schema mutations (db_create_table /
-                // db_add_column / etc.) are intentionally NOT in the
-                // auto-approve list — agents get a confirmation prompt before
-                // each call. They are discoverable via tools/list (see mcp.rs).
-                "mcp__homeroute__docs_overview",
-                "mcp__homeroute__docs_list_entries",
-                "mcp__homeroute__docs_get",
-                "mcp__homeroute__docs_search",
-                "mcp__homeroute__docs_completeness",
-                "mcp__homeroute__docs_diagram_get",
-                "mcp__homeroute__todos_list",
-                "mcp__homeroute__todos_create",
-                "mcp__homeroute__todos_update",
-                "mcp__homeroute__todos_delete",
-            ],
+            // Wildcard : tous les tools du serveur `studio` sont auto-approuvés
+            // (incluant les mutations dv_* et db_*). Décision utilisateur :
+            // l'agent travaillant dans le Studio doit pouvoir tout faire sans
+            // friction de prompt.
+            "allow": ["mcp__studio"],
             "deny": [],
         }
     });
@@ -1589,7 +1564,7 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
 fn render_mcp_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> String {
     let mcp = serde_json::json!({
         "mcpServers": {
-            "homeroute": mcp_server_entry(mcp_endpoint, token),
+            "studio": mcp_server_entry(mcp_endpoint, token),
         }
     });
     serde_json::to_string_pretty(&mcp).expect("mcp JSON serializes")
@@ -1620,10 +1595,72 @@ fn resolve_rules_group_gid() -> Option<u32> {
     })
 }
 
+/// Resolve the rules-files group NAME (default `hr-studio`, overridable via
+/// `ATELIER_RULES_GROUP`). Used by `setfacl` calls — we pass the name so
+/// `getfacl` output is readable. If the group doesn't exist locally,
+/// `setfacl` will fail silently (handled as warn) which is fine for the
+/// fail-soft contract.
+fn resolve_rules_group_name() -> String {
+    std::env::var("ATELIER_RULES_GROUP").unwrap_or_else(|_| "hr-studio".to_string())
+}
+
+/// Force an ACL on a freshly-written rules file so the agent group keeps
+/// `rwx` (via mask) even when a chmod-set group bit would otherwise clamp
+/// the mask. Best-effort: if `setfacl` is missing or the group doesn't
+/// exist, log and continue.
+fn apply_rules_acl_file(path: &Path) {
+    let group = resolve_rules_group_name();
+    let spec = format!("u::rw-,g::rw-,g:{group}:rw-,o::r--,m::rwx");
+    let output = std::process::Command::new("setfacl")
+        .arg("-m")
+        .arg(&spec)
+        .arg(path)
+        .output();
+    match output {
+        Ok(o) if !o.status.success() => {
+            warn!(
+                path = %path.display(),
+                stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                "setfacl file failed (non-fatal)"
+            );
+        }
+        Err(e) => {
+            warn!(path = %path.display(), err = %e, "setfacl file spawn failed (non-fatal)");
+        }
+        _ => {}
+    }
+}
+
+/// Force ACL + default ACL on a rules dir so files created inside inherit
+/// `g:<rules-group>:rwx` with `mask::rwx`. Same fail-soft contract.
+fn apply_rules_acl_dir(path: &Path) {
+    let group = resolve_rules_group_name();
+    let access = format!("u::rwx,g::rwx,g:{group}:rwx,o::rx,m::rwx");
+    let default = format!("u::rwx,g::rwx,g:{group}:rwx,o::rx,m::rwx");
+    let output = std::process::Command::new("setfacl")
+        .args(["-m", &access, "-d", "-m", &default])
+        .arg(path)
+        .output();
+    match output {
+        Ok(o) if !o.status.success() => {
+            warn!(
+                path = %path.display(),
+                stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                "setfacl dir failed (non-fatal)"
+            );
+        }
+        Err(e) => {
+            warn!(path = %path.display(), err = %e, "setfacl dir spawn failed (non-fatal)");
+        }
+        _ => {}
+    }
+}
+
 /// Apply ACL-friendly perms to a freshly-created rules dir: setgid +
 /// group-writable so children inherit the group and are editable. Best-
-/// effort `chgrp` to the resolved rules group. All failures degrade to a
-/// `warn!` — the regeneration must not fail because of permission tweaks.
+/// effort `chgrp` to the resolved rules group + explicit `setfacl` to
+/// guarantee the mask doesn't clamp the group entry. All failures degrade
+/// to a `warn!` — the regeneration must not fail because of permission tweaks.
 fn apply_rules_dir_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o2775)) {
@@ -1634,6 +1671,7 @@ fn apply_rules_dir_perms(path: &Path) {
             warn!(path = %path.display(), gid, err = %e, "chown dir failed");
         }
     }
+    apply_rules_acl_dir(path);
 }
 
 /// Apply group-writable perms (0o664) + best-effort `chgrp` to a freshly-
@@ -1648,6 +1686,7 @@ fn apply_rules_file_perms(path: &Path) {
             warn!(path = %path.display(), gid, err = %e, "chown file failed");
         }
     }
+    apply_rules_acl_file(path);
 }
 
 /// Write `content` to `path` only if the existing content differs.
@@ -1887,7 +1926,7 @@ Si **un seul** de ces points manque, l'app n'est pas intégrée. Réfère-toi au
    # … champs spécifiques selon kind
    ```
 2. **Inscription daemon** : après ajout d'un nouveau TOML, `POST http://127.0.0.1:4100/api/flows/_admin/reload` (Atelier API → daemon). Ou `make deploy-app SLUG=<slug>` qui rsync les TOML + relance — le scan filesystem du daemon les voit après reload.
-3. **Test rapide** : `mcp__homeroute__flow.run(slug="<app-slug>", name="<nom>", input={{...}})` → vérifie status + output. Le `slug` est auto-injecté par le MCP per-app — tu peux l'omettre la plupart du temps.
+3. **Test rapide** : `mcp__studio__flow.run(slug="<app-slug>", name="<nom>", input={{...}})` → vérifie status + output. Le `slug` est auto-injecté par le MCP per-app — tu peux l'omettre la plupart du temps.
 4. **Inspection** : `flow.get_run(slug, run_id)` pour voir l'arbre des steps avec input/output/durée par step.
 
 ### 2. Ajouter un connecteur custom
@@ -2290,7 +2329,7 @@ mod tests {
         );
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["homeroute"]["url"].as_str().unwrap(),
+            parsed["mcpServers"]["studio"]["url"].as_str().unwrap(),
             "http://127.0.0.1:4001/mcp?project=trader"
         );
         assert!(
@@ -2298,7 +2337,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|v| v.as_str() == Some("mcp__homeroute__app_list"))
+                .any(|v| v.as_str() == Some("mcp__studio"))
         );
 
         // app-info.md contient l'identité + autres apps + DB tables.

@@ -4,17 +4,17 @@ Pour toute tâche dans une app HomeRoute existante (sous `/opt/homeroute/apps/{s
 
 ## Workflow obligatoire
 
-1. **`mcp__homeroute__docs_overview(app_id=<slug>)`** — TOUJOURS EN PREMIER. Renvoie l'overview prose + index compact. Cadre la tâche en peu de tokens.
-2. **`mcp__homeroute__docs_search` ou `docs_list_entries`** — pour cibler l'entrée pertinente.
-3. **`mcp__homeroute__docs_get`** — lecture détaillée.
-4. **`mcp__homeroute__docs_diagram_get`** — si l'entrée a un diagramme mermaid.
+1. **`mcp__studio__docs_overview(app_id=<slug>)`** — TOUJOURS EN PREMIER. Renvoie l'overview prose + index compact. Cadre la tâche en peu de tokens.
+2. **`mcp__studio__docs_search` ou `docs_list_entries`** — pour cibler l'entrée pertinente.
+3. **`mcp__studio__docs_get`** — lecture détaillée.
+4. **`mcp__studio__docs_diagram_get`** — si l'entrée a un diagramme mermaid.
 5. **Exploration code** — UNIQUEMENT après les 4 étapes ci-dessus.
 6. **Modification** — applique les changements.
-7. **`mcp__homeroute__docs_update`** — mets à jour les entrées impactées.
-8. **`mcp__homeroute__docs_diagram_set`** — régénère le mermaid si le flux a changé.
-9. **`mcp__homeroute__docs_completeness`** — vérifie qu'il ne manque ni summary ni diagramme.
+7. **`mcp__studio__docs_update`** — mets à jour les entrées impactées.
+8. **`mcp__studio__docs_diagram_set`** — régénère le mermaid si le flux a changé.
+9. **`mcp__studio__docs_completeness`** — vérifie qu'il ne manque ni summary ni diagramme.
 
-> ⚠️ Pendant la phase de migration, le MCP `mcp__homeroute__docs_*` est encore servi par hr-orchestrator sur Medion. Une fois la Phase 2 terminée, Atelier expose `mcp__atelier__docs_*` avec le même contrat. Préférer le nouveau si disponible.
+> Le MCP `studio` (servi par Atelier sur Medion, port 4001) est exposé dans chaque workspace code-server via `.mcp.json` ; les tools `mcp__studio__docs_*` sont auto-approuvés en lecture.
 
 ## Pour les nouvelles features Atelier elles-mêmes
 
