@@ -484,7 +484,7 @@ impl AppsContext {
                 }
             }
             // 6. Cleanup Medion app_dir
-            let dir: PathBuf = PathBuf::from(format!("/opt/homeroute/apps/{}", slug));
+            let dir = app.app_dir();
             if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
                 warn!(slug = %slug, dir = %dir.display(), error = %e, "AppDelete: rm -rf failed");
             }
@@ -1290,14 +1290,7 @@ impl AppsContext {
             .build_command
             .clone()
             .unwrap_or_else(|| build_command.to_string());
-        let artefacts: Vec<String> = match app.build_artefact.as_deref() {
-            Some(custom) => custom
-                .lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            None => default_artefacts,
-        };
+        let artefacts = resolve_artefacts(&app, default_artefacts);
         if artefacts.is_empty() {
             return IpcResponse::err("no artefacts to rsync back (empty build_artefact)");
         }
@@ -1796,14 +1789,7 @@ impl AppsContext {
                 );
             }
         };
-        let artefacts: Vec<String> = match app.build_artefact.as_deref() {
-            Some(custom) => custom
-                .lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            None => default_artefacts,
-        };
+        let artefacts = resolve_artefacts(&app, default_artefacts);
         if artefacts.is_empty() {
             return IpcResponse::err("no artefacts to ship (empty build_artefact)");
         }
@@ -2045,6 +2031,32 @@ fn parse_artefact_spec(spec: &str) -> (&str, bool) {
         Some(rest) => (rest, true),
         None => (spec, false),
     }
+}
+
+/// Resolve the list of artefacts to rsync down for `build`/`ship`. Reads
+/// `app.build_artefact` if set (one path per line, `?` prefix = optional),
+/// else falls back to stack defaults. Apps with `flow_callback_url` set get
+/// `?flows` auto-appended so TOML flow definitions edited on CloudMaster
+/// descend to Medion alongside compiled outputs. Optional so apps without
+/// any flow file still ship cleanly.
+fn resolve_artefacts(app: &Application, defaults: Vec<String>) -> Vec<String> {
+    let mut artefacts: Vec<String> = match app.build_artefact.as_deref() {
+        Some(custom) => custom
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        None => defaults,
+    };
+    if app.flow_callback_url.is_some()
+        && !artefacts.iter().any(|a| {
+            let (path, _) = parse_artefact_spec(a);
+            path == "flows" || path == "src/flows"
+        })
+    {
+        artefacts.push("?flows".to_string());
+    }
+    artefacts
 }
 
 fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<String>)> {
@@ -2620,9 +2632,14 @@ async fn scaffold_on_cloudmaster(
         );
     }
 
+    // Owner stays `romain` (Studio editor identity). Group → `hr-studio` so
+    // the code-server agent (running as `hr-studio`) can edit. Fallback to
+    // `romain` group if `hr-studio` doesn't exist on the remote host.
+    // setfacl bundle below makes the agent permissions resilient against
+    // future `chmod` operations that would otherwise clamp the ACL mask.
     let chown_cmd = format!(
-        "chown -R romain:romain {}",
-        shell_quote(&remote_app_dir)
+        "chown -R romain:hr-studio {p} 2>/dev/null || chown -R romain:romain {p}",
+        p = shell_quote(&remote_app_dir)
     );
     let chown = run_capture(
         "ssh",
@@ -2640,9 +2657,11 @@ async fn scaffold_on_cloudmaster(
         warn!(
             slug = %slug,
             stderr = %truncate(&chown.stderr, 256),
-            "scaffold_on_cloudmaster: chown romain failed (non-fatal — build SSH may not be able to write)"
+            "scaffold_on_cloudmaster: chown failed (non-fatal — build SSH may not be able to write)"
         );
     }
+
+    apply_rules_acl_remote(&host, &key, &remote_src).await;
 
     if let Err(e) = bind_git_remote_on_cloudmaster(slug, &host, &key, &remote_src).await {
         warn!(slug = %slug, error = %e, "scaffold_on_cloudmaster: git remote bind failed (non-fatal)");
@@ -2776,6 +2795,8 @@ pub async fn regen_context_on_cloudmaster(
         );
     }
 
+    apply_rules_acl_remote(&host, &key, &remote_src).await;
+
     info!(
         slug = %slug,
         host = %host,
@@ -2783,6 +2804,55 @@ pub async fn regen_context_on_cloudmaster(
         "regen_context_on_cloudmaster: done"
     );
     Ok(())
+}
+
+/// Best-effort chown + setfacl on the agent context files on a remote host.
+/// rsync `-a` doesn't preserve ACLs by default, and post-rsync `chmod` would
+/// clamp the ACL mask via the group bits, so we explicitly fix both the
+/// owner/group AND set an explicit ACL mask=rwx + `hr-studio:rwx` entry so
+/// the agent can edit the regenerated context files. Failures are logged but
+/// non-fatal — Studio still works, just with stale perms.
+async fn apply_rules_acl_remote(host: &str, key: &str, remote_src: &str) {
+    let claude_dir = format!("{remote_src}/.claude");
+    let claude_md = format!("{remote_src}/CLAUDE.md");
+    let mcp_json = format!("{remote_src}/.mcp.json");
+    // - chown ag-readable: romain owns, hr-studio is editable group.
+    // - setfacl on .claude (recursive + default ACL) so any file the agent
+    //   adds inside also inherits hr-studio rwx.
+    // - setfacl on CLAUDE.md / .mcp.json individually (they're files, no
+    //   default ACL applies).
+    // The `|| true` clamps non-zero exit on hosts without setfacl/hr-studio.
+    let cmd = format!(
+        "set +e; \
+         chown -R romain:hr-studio {cd} {cm} {mj} 2>/dev/null || true; \
+         setfacl -R -m u::rwX,g::rwX,g:hr-studio:rwX,m::rwx {cd} 2>/dev/null || true; \
+         setfacl -R -d -m u::rwX,g::rwX,g:hr-studio:rwX,m::rwx {cd} 2>/dev/null || true; \
+         setfacl -m u::rw-,g::rw-,g:hr-studio:rw-,m::rwx {cm} {mj} 2>/dev/null || true; \
+         exit 0",
+        cd = shell_quote(&claude_dir),
+        cm = shell_quote(&claude_md),
+        mj = shell_quote(&mcp_json),
+    );
+    let out = run_capture(
+        "ssh",
+        &[
+            "-i", key,
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            host,
+            &cmd,
+        ],
+        None,
+    )
+    .await;
+    if out.exit_code != 0 {
+        warn!(
+            host = %host,
+            remote_src = %remote_src,
+            stderr = %truncate(&out.stderr, 256),
+            "apply_rules_acl_remote: ssh exit non-zero (non-fatal)"
+        );
+    }
 }
 
 /// AppDelete path quand `sources_on == CloudMaster` :

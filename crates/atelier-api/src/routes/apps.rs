@@ -8,12 +8,13 @@
 //! - GET    /api/apps            (list)
 //! - GET    /api/apps/{slug}     (single)
 //! - GET    /api/apps/{slug}/env
+//! - GET    /api/apps/{slug}/todos
 //! - POST   /api/apps/{slug}/control  body {action: start|stop|restart}
 //! - GET    /api/apps/{slug}/status   process state (pid, uptime, port)
 //! - POST   /api/apps/{slug}/ship     body {timeout_secs?: u64} (wrapper MCP `app.ship`)
 //!
 //! TODO Phase 9.2 suite : create / update / delete / build / deploy / exec /
-//! env update / regenerate-context / logs / todos.
+//! env update / regenerate-context / logs.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,6 +36,7 @@ pub fn router() -> Router<ApiState> {
         .route("/", get(list_apps))
         .route("/{slug}", get(get_app))
         .route("/{slug}/env", get(get_app_env))
+        .route("/{slug}/todos", get(get_app_todos))
         .route("/{slug}/control", post(control_app))
         .route("/{slug}/status", get(app_status))
         .route("/{slug}/ship", post(ship_app))
@@ -96,6 +98,26 @@ async fn get_app_env(State(state): State<ApiState>, Path(slug): Path<String>) ->
             Json(json!({"success": false, "error": "App not found"})),
         )
             .into_response(),
+    }
+}
+
+async fn get_app_todos(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    match state.todos_manager.list(&slug, None).await {
+        Ok(todos) => Json(json!({"success": true, "data": {"todos": todos}})).into_response(),
+        Err(e) => {
+            warn!(slug = %slug, error = %e, "get_app_todos failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"success": false, "error": format!("{e}")})),
+            )
+                .into_response()
+        }
     }
 }
 
