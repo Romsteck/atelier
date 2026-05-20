@@ -37,7 +37,10 @@ pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
             // icons, /assets/*, etc.) with the right Content-Type, and fall back
             // to `index.html` for any 404 — that's standard SPA semantics.
             let index_path = dir.join("index.html");
-            let serve_dir = ServeDir::new(&dir).not_found_service(ServeFile::new(index_path));
+            // `not_found_service` wraps the fallback response in SetStatus(404)
+            // (cf. tower-http-0.6 serve_dir/mod.rs:241). Use `fallback` so
+            // index.html is served with 200 for SPA routes.
+            let serve_dir = ServeDir::new(&dir).fallback(ServeFile::new(index_path));
             app = app.fallback_service(serve_dir);
         } else {
             tracing::warn!(path = %dir.display(), "web dist not a directory — skipping SPA serve");
@@ -66,5 +69,6 @@ fn api_router() -> Router<ApiState> {
         .nest("/dv", routes::dv::router())
         .nest("/tasks", routes::tasks::router())
         .merge(routes::flows::router())
+        .merge(routes::ws::router())
         .fallback(api_404)
 }

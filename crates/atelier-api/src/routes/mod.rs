@@ -10,3 +10,4 @@ pub mod hooks;
 pub mod mcp;
 pub mod store;
 pub mod tasks;
+pub mod ws;

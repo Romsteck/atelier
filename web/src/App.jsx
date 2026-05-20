@@ -7,6 +7,7 @@ import Tasks from './pages/Tasks';
 import TaskDetail from './pages/TaskDetail';
 import Store from './pages/Store';
 import Git from './pages/Git';
+import Studio from './pages/Studio';
 import DbExplorer from './pages/DbExplorer';
 import SchemaPage from './pages/SchemaPage';
 import FlowsStats from './pages/FlowsStats';
@@ -34,7 +35,7 @@ function App() {
             <Route path="/" element={<Navigate to="/studio" replace />} />
 
             {/* Applications group (mirror homeroute Sidebar) */}
-            <Route path="/studio" element={null} />
+            <Route path="/studio" element={<Studio />} />
             <Route path="/database" element={<DbExplorer />} />
             <Route path="/schema" element={<SchemaPage />} />
             <Route path="/store" element={<Store />} />
