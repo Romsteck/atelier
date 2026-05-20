@@ -2,7 +2,7 @@
 //!
 //! Ported verbatim from homeroute's `hr-orchestrator::mcp` after the Atelier
 //! cutover. Adapted for Atelier's `ApiState`. The homeroute-only infra tools
-//! (hosts.*, monitoring.*, reverseproxy.*, store.*) were removed — they
+//! (hosts.*, monitoring.*, reverseproxy.*) were removed — they
 //! belong to the router half, not Atelier.
 //!
 //! Implements JSON-RPC 2.0 over HTTP POST, with Bearer token authentication.

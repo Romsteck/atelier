@@ -138,9 +138,6 @@ export const getLocalInterfaces = () => api.get('/hosts/local/interfaces');
 // Edge Stats
 export const getEdgeStats = () => api.get('/edge/stats');
 
-// Store
-export const getStoreApps = () => api.get('/store/apps');
-
 // ========== Git ==========
 export const getGitRepos = () => api.get('/git/repos');
 export const getGitRepo = (slug) => api.get(`/git/repos/${slug}`);

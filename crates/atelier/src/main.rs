@@ -13,7 +13,6 @@ const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:4100";
 const DEFAULT_IPC_SOCK: &str = "/run/atelier.sock";
 const DEFAULT_DOCS_DIR: &str = "/var/lib/atelier/docs";
 const DEFAULT_DOCS_INDEX: &str = "/var/lib/atelier/docs-index.sqlite";
-const DEFAULT_STORE_DIR: &str = "/var/lib/atelier/store";
 const DEFAULT_GIT_REPOS_DIR: &str = "/var/lib/atelier/git/repos";
 const DEFAULT_APPS_STATE_DIR: &str = "/var/lib/atelier/state";
 const DEFAULT_APPS_SRC_ROOT: &str = "/opt/homeroute/apps";
@@ -40,7 +39,6 @@ async fn main() -> Result<()> {
     let ipc_sock = PathBuf::from(std::env::var("ATELIER_IPC_SOCK").unwrap_or_else(|_| DEFAULT_IPC_SOCK.to_string()));
     let docs_dir = PathBuf::from(std::env::var("ATELIER_DOCS_DIR").unwrap_or_else(|_| DEFAULT_DOCS_DIR.to_string()));
     let docs_index_path = PathBuf::from(std::env::var("ATELIER_DOCS_INDEX").unwrap_or_else(|_| DEFAULT_DOCS_INDEX.to_string()));
-    let store_dir = PathBuf::from(std::env::var("ATELIER_STORE_DIR").unwrap_or_else(|_| DEFAULT_STORE_DIR.to_string()));
     let git_repos_dir = PathBuf::from(std::env::var("ATELIER_GIT_REPOS_DIR").unwrap_or_else(|_| DEFAULT_GIT_REPOS_DIR.to_string()));
     let apps_state_dir = PathBuf::from(std::env::var("ATELIER_APPS_STATE_DIR").unwrap_or_else(|_| DEFAULT_APPS_STATE_DIR.to_string()));
     let apps_src_root = PathBuf::from(std::env::var("ATELIER_APPS_SRC_ROOT").unwrap_or_else(|_| DEFAULT_APPS_SRC_ROOT.to_string()));
@@ -55,7 +53,6 @@ async fn main() -> Result<()> {
         ipc_sock = %ipc_sock.display(),
         docs_dir = %docs_dir.display(),
         docs_index = %docs_index_path.display(),
-        store_dir = %store_dir.display(),
         git_repos_dir = %git_repos_dir.display(),
         apps_state_dir = %apps_state_dir.display(),
         apps_src_root = %apps_src_root.display(),
@@ -113,7 +110,6 @@ async fn main() -> Result<()> {
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
-        store_dir.clone(),
         git,
         apps_state_dir.clone(),
         dv,

@@ -20,7 +20,6 @@
 //!   - `src/.claude/rules/docs.md`             — usage obligatoire de `docs.*`
 //!   - `src/.claude/rules/todos.md`            — usage obligatoire de `todos.*` (panneau Studio)
 //!   - `src/.claude/rules/claude-md-upkeep.md` — règle de maintenance de CLAUDE.md
-//!   - `src/.claude/rules/store-publishing.md` — Flutter uniquement
 //!   - `src/.claude/skills/app-build/{SKILL.md,build.sh}`
 //!   - `src/.claude/skills/{app-status,app-logs,app-db-info}/SKILL.md`
 //!
@@ -163,13 +162,6 @@ impl ContextGenerator {
                   &render_todos_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
                   &render_claude_md_upkeep_md())?;
-
-        if matches!(app.stack, AppStack::Flutter) {
-            log_write(&app.slug, &src_rules_dir.join("store-publishing.md"),
-                      &render_store_publishing_md(app))?;
-        } else {
-            remove_if_exists(&src_rules_dir.join("store-publishing.md"), &app.slug);
-        }
 
         // `flows-first` always-on rule — pushed to all Rust backends (axum
         // / axum-vite). Wallet was the pilot ; other Rust apps are now
@@ -501,9 +493,6 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `todos_create` — créer (`name`, `description?`) — démarre en `pending`\n\
          - `todos_update` — modifier (`id`, `status?` parmi `pending`/`in_progress`)\n\
          - `todos_delete` — supprimer (`id`) — c'est ainsi qu'on clôt une tâche (pas de statut « done »)\n\
-         \n\
-         ## Store (`store.*`)\n\
-         - Tools for the HomeRoute mobile store (uploads, listings).\n\
          \n\
          ## Build\n\
          Pour builder cette app, utilise la skill **app-build** (lazy-loaded). Elle appelle l'endpoint HTTP bloquant via Bash.\n\
@@ -848,7 +837,7 @@ fn render_app_build_skill(app: &Application) -> String {
         ),
         AppStack::Flutter => format!(
             "## Stack: Flutter (mobile Android)\n\n\
-             - Commande de build : `{cmd}` (publication via la règle `store-publishing.md`).\n",
+             - Commande de build : `{cmd}`.\n",
             cmd = build_cmd,
         ),
     };
@@ -1482,54 +1471,6 @@ HR_FLOW_TOKEN=<32-bytes-hex>   # bearer partagé entre daemon et app pour les ca
 "#.replace("{slug}", slug)
 }
 
-fn render_store_publishing_md(app: &Application) -> String {
-    format!(
-        "# Publication Store — Règles obligatoires\n\
-         \n\
-         Pour publier une nouvelle version de cette app Flutter dans le store mobile HomeRoute, \
-         **toujours** utiliser le tool MCP `store.upload`. Jamais un `curl` manuel vers \
-         `/api/store/apps/{slug}/releases`.\n\
-         \n\
-         ## Workflow\n\
-         \n\
-         1. Build APK sur CloudMaster :\n\
-         ```\n\
-         export PATH=/ssd_pool/flutter/bin:$PATH\n\
-         flutter build apk --release\n\
-         ```\n\
-         2. Encoder en base64 :\n\
-         ```\n\
-         base64 -w0 build/app/outputs/flutter-apk/app-release.apk > /tmp/app.b64\n\
-         ```\n\
-         3. Appeler `store.upload` (tool MCP) avec :\n\
-         - `slug` : `{slug}`\n\
-         - `version` : la version à publier (ex: `1.2.3`)\n\
-         - `apk_base64` : contenu du fichier `.b64`\n\
-         \n\
-         4. Vérifier via `store.get` (slug `{slug}`) que la nouvelle version apparaît avec \
-         `sha256` et `size_bytes` renseignés.\n\
-         \n\
-         ## Arguments optionnels (store.upload)\n\
-         \n\
-         | Argument | Header HTTP | Usage |\n\
-         |---|---|---|\n\
-         | `app_name` | `X-App-Name` | **Requis au premier upload** de ce slug |\n\
-         | `description` | `X-App-Description` | Description affichée dans le store |\n\
-         | `category` | `X-App-Category` | Défaut : `other` |\n\
-         | `changelog` | `X-Changelog` | Notes de version |\n\
-         | `publisher_app_id` | `X-Publisher-App-Id` | Lien vers une app publisher |\n\
-         \n\
-         Package Android, SHA256, taille et icône sont extraits automatiquement de l'APK côté API.\n\
-         \n\
-         ## Limites\n\
-         \n\
-         - Payload max : 500 MB.\n\
-         - Pas de streaming ni de upload par chunks.\n\
-         - Suppression de release : via API REST directement, pas via MCP.\n",
-        slug = app.slug,
-    )
-}
-
 fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
     let mut entry = serde_json::json!({
         "type": "http",
@@ -2065,6 +2006,7 @@ const OBSOLETE_RULE_FILES: &[&str] = &[
     "homeroute-docs.md",
     "homeroute-dataverse.md",
     "homeroute-store.md",
+    "store-publishing.md",
 ];
 
 /// Nettoie les fichiers de contexte agent qui traînent au niveau `app_dir`

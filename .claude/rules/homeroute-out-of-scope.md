@@ -23,7 +23,7 @@ Ou, depuis l'extérieur : `https://app.mynetwk.biz/api/...`.
 
 ## Règles
 
-1. **Ne pas wirer côté homeroute** les routes `/api/apps/*`, `/api/dv/*`, `/api/flows/*`, `/api/docs/*`, `/api/git/*`, `/api/store/*`. Elles vivent côté Atelier exclusivement.
+1. **Ne pas wirer côté homeroute** les routes `/api/apps/*`, `/api/dv/*`, `/api/flows/*`, `/api/docs/*`, `/api/git/*`. Elles vivent côté Atelier exclusivement.
 2. **Si un skill / script appelle `:4000` pour une API apps**, c'est un bug à corriger côté skill (pointer vers `:4100`). Pas côté homeroute.
 3. **Le MCP** côté agent : `mcp__atelier__*` (port 4100) pour tout ce qui touche aux apps / dataverse / flows / docs. Le legacy `mcp__homeroute__*` (port 4000) doit progressivement disparaître à mesure que les Studios se reconfigurent.
 

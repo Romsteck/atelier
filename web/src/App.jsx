@@ -5,7 +5,6 @@ import { StudioProvider } from './context/StudioContext';
 import Layout from './components/Layout';
 import Tasks from './pages/Tasks';
 import TaskDetail from './pages/TaskDetail';
-import Store from './pages/Store';
 import Git from './pages/Git';
 import Studio from './pages/Studio';
 import DbExplorer from './pages/DbExplorer';
@@ -14,7 +13,7 @@ import FlowsStats from './pages/FlowsStats';
 
 // Atelier sert le groupe "Applications" du dashboard homeroute, en read-only
 // pour la migration parallèle (Phase 2-9 du plan d'extraction).
-// Studio + Database + Schema + Store + Git + FlowStats — pas de network/system.
+// Studio + Database + Schema + Git + FlowStats — pas de network/system.
 
 function DocsRedirect() {
   const { appId } = useParams();
@@ -38,7 +37,6 @@ function App() {
             <Route path="/studio" element={<Studio />} />
             <Route path="/database" element={<DbExplorer />} />
             <Route path="/schema" element={<SchemaPage />} />
-            <Route path="/store" element={<Store />} />
             <Route path="/git" element={<Git />} />
             <Route path="/flows-stats" element={<FlowsStats />} />
 

@@ -12,8 +12,7 @@ pub struct ApiState {
     pub docs_dir: PathBuf,
     pub docs_index: Option<Arc<hr_docs::Index>>,
 
-    // Store / Git
-    pub store_dir: PathBuf,
+    // Git
     pub git: Arc<hr_git::GitService>,
 
     // Apps : sources synced + canonical writer
@@ -42,7 +41,6 @@ impl ApiState {
     pub fn new(
         docs_dir: PathBuf,
         docs_index: Option<Arc<hr_docs::Index>>,
-        store_dir: PathBuf,
         git: Arc<hr_git::GitService>,
         apps_state_dir: PathBuf,
         dv: Option<Arc<hr_dataverse::manager::DataverseManager>>,
@@ -60,7 +58,6 @@ impl ApiState {
         Self {
             docs_dir,
             docs_index,
-            store_dir,
             git,
             apps_state_dir,
             apps_src_root,

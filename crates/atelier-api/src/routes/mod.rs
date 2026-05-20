@@ -8,6 +8,5 @@ pub mod git;
 pub mod health;
 pub mod hooks;
 pub mod mcp;
-pub mod store;
 pub mod tasks;
 pub mod ws;

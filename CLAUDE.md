@@ -33,7 +33,6 @@ Plateforme applicative autonome (post-rapatriement 2026-05-09). Contient :
 - **Flows** : moteur d'orchestration TOML.
 - **Docs** : système de documentation per-app (FTS5).
 - **Git** : bare repos.
-- **Store** : catalogue Flutter.
 - **MCP** : exposition des tools `app.*`, `db.*`, `docs.*`, `flow.*`.
 
 Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME (ces concerns restent dans `hr-edge` + `hr-netcore` sur Medion). `code-server` (Studio) reste sur CloudMaster.
