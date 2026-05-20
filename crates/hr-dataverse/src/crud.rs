@@ -146,12 +146,12 @@ pub fn build_insert(
     }
 
     // Audit columns. created_by/updated_by are the same uuid + kind on
-    // INSERT (no prior modifier).
+    // INSERT (no prior modifier). `None` actor_uuid (Identity::System) is
+    // inlined as `NULL::uuid` — see `actor_uuid_sql` for why we don't bind
+    // a Null QueryParam here.
     col_names.extend(["created_by", "updated_by", "created_by_kind", "updated_by_kind"]);
-    placeholders.push(format!("${}", params.len() + 1));
-    params.push(uuid_param(actor_uuid));
-    placeholders.push(format!("${}", params.len() + 1));
-    params.push(uuid_param(actor_uuid));
+    placeholders.push(actor_uuid_sql(actor_uuid, &mut params));
+    placeholders.push(actor_uuid_sql(actor_uuid, &mut params));
     placeholders.push(format!("${}", params.len() + 1));
     params.push(QueryParam::Text(kind.into()));
     placeholders.push(format!("${}", params.len() + 1));
@@ -221,8 +221,8 @@ pub fn build_update(
         }
     }
 
-    params.push(uuid_param(actor_uuid));
-    sets.push(format!("\"updated_by\" = ${}", params.len()));
+    let updated_by_sql = actor_uuid_sql(actor_uuid, &mut params);
+    sets.push(format!("\"updated_by\" = {updated_by_sql}"));
     params.push(QueryParam::Text(kind.into()));
     sets.push(format!("\"updated_by_kind\" = ${}", params.len()));
 
@@ -269,8 +269,7 @@ pub fn build_soft_delete(
     let kind = identity.kind_str();
     let mut params: Vec<QueryParam> = Vec::new();
 
-    params.push(uuid_param(actor_uuid));
-    let by_idx = params.len();
+    let by_sql = actor_uuid_sql(actor_uuid, &mut params);
     params.push(QueryParam::Text(kind.into()));
     let by_kind_idx = params.len();
     params.push(json_to_query_param(id));
@@ -280,11 +279,11 @@ pub fn build_soft_delete(
 
     let returning = full_returning_columns(table);
     let sql = format!(
-        "UPDATE {tbl} SET \"is_deleted\" = TRUE, \"updated_by\" = ${by_idx}, \"updated_by_kind\" = ${by_kind_idx} \
+        "UPDATE {tbl} SET \"is_deleted\" = TRUE, \"updated_by\" = {by_sql}, \"updated_by_kind\" = ${by_kind_idx} \
          WHERE \"id\" = ${id_idx}{cast} AND \"version\" = ${ver_idx} AND \"is_deleted\" = FALSE RETURNING {ret};",
         tbl = quote_ident(&table.name),
         cast = id_cast(table),
-        by_idx = by_idx,
+        by_sql = by_sql,
         by_kind_idx = by_kind_idx,
         id_idx = id_idx,
         ver_idx = ver_idx,
@@ -313,8 +312,7 @@ pub fn build_restore(
     let kind = identity.kind_str();
     let mut params: Vec<QueryParam> = Vec::new();
 
-    params.push(uuid_param(actor_uuid));
-    let by_idx = params.len();
+    let by_sql = actor_uuid_sql(actor_uuid, &mut params);
     params.push(QueryParam::Text(kind.into()));
     let by_kind_idx = params.len();
     params.push(json_to_query_param(id));
@@ -324,11 +322,11 @@ pub fn build_restore(
 
     let returning = full_returning_columns(table);
     let sql = format!(
-        "UPDATE {tbl} SET \"is_deleted\" = FALSE, \"updated_by\" = ${by_idx}, \"updated_by_kind\" = ${by_kind_idx} \
+        "UPDATE {tbl} SET \"is_deleted\" = FALSE, \"updated_by\" = {by_sql}, \"updated_by_kind\" = ${by_kind_idx} \
          WHERE \"id\" = ${id_idx}{cast} AND \"version\" = ${ver_idx} AND \"is_deleted\" = TRUE RETURNING {ret};",
         tbl = quote_ident(&table.name),
         cast = id_cast(table),
-        by_idx = by_idx,
+        by_sql = by_sql,
         by_kind_idx = by_kind_idx,
         id_idx = id_idx,
         ver_idx = ver_idx,
@@ -435,10 +433,24 @@ fn json_to_query_param(v: &Value) -> QueryParam {
     }
 }
 
-fn uuid_param(uuid: Option<uuid::Uuid>) -> QueryParam {
-    match uuid {
-        Some(u) => QueryParam::Uuid(u.to_string()),
-        None => QueryParam::Null,
+/// Return the SQL fragment for a `created_by`/`updated_by`/`deleted_by`
+/// position, pushing a `QueryParam::Uuid` when the identity carries an
+/// actor UUID, or emitting the literal `NULL::uuid` when it doesn't
+/// (`Identity::System`). We do NOT bind `QueryParam::Null` for these
+/// columns because the bind layer encodes `Null` as `Option::<i64>::None`
+/// (bigint NULL) which Postgres then refuses to cast to `uuid`. Mirrors
+/// the typed-null inlining already used for nullable data columns
+/// (cf. `typed_null_literal`).
+fn actor_uuid_sql(
+    actor_uuid: Option<uuid::Uuid>,
+    params: &mut Vec<QueryParam>,
+) -> String {
+    match actor_uuid {
+        Some(u) => {
+            params.push(QueryParam::Uuid(u.to_string()));
+            format!("${}", params.len())
+        }
+        None => "NULL::uuid".into(),
     }
 }
 
@@ -571,16 +583,48 @@ mod tests {
     }
 
     #[test]
-    fn system_identity_emits_null_uuid() {
+    fn system_identity_inlines_null_uuid_in_sql() {
         let mut p = BTreeMap::new();
         p.insert("qty".into(), json!(1));
         let m = build_insert(&table_orders(), &p, &Identity::system()).unwrap();
-        // The 4 audit binds are the last 4. Two should be Null (uuids), two Text 'system'.
+        // `created_by` / `updated_by` are inlined as `NULL::uuid` SQL literals
+        // (not bound params) — bind layer would otherwise encode `Null` as
+        // `Option::<i64>::None` and PG rejects bigint→uuid. Mirrors the
+        // behaviour for nullable Uuid data columns (typed_null_literal).
+        assert!(
+            m.sql.contains("NULL::uuid"),
+            "expected NULL::uuid SQL literal for created_by/updated_by, got SQL: {}",
+            m.sql
+        );
+        // The remaining audit binds are the two `kind` Text values.
+        let last2 = &m.params[m.params.len() - 2..];
+        assert!(matches!(&last2[0], QueryParam::Text(s) if s == "system"));
+        assert!(matches!(&last2[1], QueryParam::Text(s) if s == "system"));
+        // Sanity: no Null param remains anywhere in the bind vector for this
+        // single-column-non-null payload.
+        assert!(
+            !m.params.iter().any(|p| matches!(p, QueryParam::Null)),
+            "no QueryParam::Null should remain when Identity is System"
+        );
+    }
+
+    #[test]
+    fn user_identity_binds_uuid_param() {
+        let mut p = BTreeMap::new();
+        p.insert("qty".into(), json!(1));
+        let actor = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let m = build_insert(&table_orders(), &p, &Identity::user(actor, "alice")).unwrap();
+        // No NULL::uuid literal — both audit positions are $N placeholders.
+        assert!(
+            !m.sql.contains("NULL::uuid"),
+            "user identity must bind UUID params, not inline NULL::uuid"
+        );
+        // Last 4 params: uuid, uuid, "user", "user"
         let last4 = &m.params[m.params.len() - 4..];
-        assert!(matches!(last4[0], QueryParam::Null));
-        assert!(matches!(last4[1], QueryParam::Null));
-        assert!(matches!(&last4[2], QueryParam::Text(s) if s == "system"));
-        assert!(matches!(&last4[3], QueryParam::Text(s) if s == "system"));
+        assert!(matches!(&last4[0], QueryParam::Uuid(s) if s == &actor.to_string()));
+        assert!(matches!(&last4[1], QueryParam::Uuid(s) if s == &actor.to_string()));
+        assert!(matches!(&last4[2], QueryParam::Text(s) if s == "user"));
+        assert!(matches!(&last4[3], QueryParam::Text(s) if s == "user"));
     }
 
     fn table_typed() -> TableDefinition {
