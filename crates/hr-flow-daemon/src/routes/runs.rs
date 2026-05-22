@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     Json,
 };
 use hr_flow::{JsonRunStore, RunDoc, RunResult, RunStore};
@@ -163,29 +164,25 @@ pub async fn replay(
     Ok(Json(result.into()))
 }
 
-#[derive(Debug, Serialize)]
-pub struct CancelResponse {
-    pub cancelled: bool,
-    pub note: &'static str,
-}
-
-#[instrument(skip(state), fields(slug = %q.slug, run_id = %run_id))]
+/// Run cancellation is not implemented: the engine assigns the run_id
+/// internally, so a caller-supplied run_id cannot be mapped to an in-flight
+/// dispatch, and nothing currently consults a cancellation signal. The route
+/// is kept so clients get an honest `501` instead of a silent no-op `200`.
+#[instrument(skip(_state), fields(run_id = %run_id))]
 pub async fn cancel(
-    State(state): State<Arc<DaemonState>>,
+    State(_state): State<Arc<DaemonState>>,
     Path(run_id): Path<String>,
-    Query(q): Query<SlugQuery>,
-) -> Json<CancelResponse> {
-    // Phase 1: best-effort. The dispatch_id key is internal so a user-supplied
-    // run_id won't match unless the engine emitted it after dispatch (which
-    // happens on completion). We still expose the route so callers can begin
-    // wiring it up, and return `{cancelled: false, note: ...}` until Phase 2
-    // exposes a stable run_id-keyed handle.
-    let _ = (q.slug, &run_id);
-    let cancelled = crate::supervisor::cancel_dispatch(&state, &run_id);
-    Json(CancelResponse {
-        cancelled,
-        note: "phase 1 cancel is keyed by dispatch_id (internal); user-supplied run_id rarely matches",
-    })
+    Query(_q): Query<SlugQuery>,
+) -> (StatusCode, Json<Value>) {
+    let _ = run_id;
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "cancelled": false,
+            "error": "run cancellation is not implemented",
+            "code": "not_implemented",
+        })),
+    )
 }
 
 fn open_store(state: &DaemonState, slug: &str) -> DaemonResult<JsonRunStore> {

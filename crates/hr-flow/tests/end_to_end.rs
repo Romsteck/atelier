@@ -550,6 +550,8 @@ async fn output_step_overrides_last_top_level() {
 
 #[tokio::test]
 async fn output_step_missing_id_errors() {
+    // A dangling `output_step` is now caught by semantic validation at
+    // `build()` time rather than as a runtime failure.
     let dir = tempdir();
     let store = JsonRunStore::new(&dir).unwrap();
 
@@ -565,12 +567,10 @@ async fn output_step_missing_id_errors() {
 
     let mut b = FlowEngineBuilder::new();
     b.register_flow(flow).with_store(Arc::new(store));
-    let engine = b.build().unwrap();
-
-    let r = engine.run("bad_output_step", json!({})).await.unwrap();
-    assert_eq!(r.status, RunStatus::Failed);
-    let err = r.error.expect("error required when status is Failed");
-    let msg = err.message.as_str();
+    let msg = match b.build() {
+        Ok(_) => panic!("build must reject a dangling output_step"),
+        Err(e) => e.to_string(),
+    };
     assert!(
         msg.contains("does_not_exist") || msg.contains("output_step"),
         "expected error to mention the missing id, got: {msg}"
@@ -863,5 +863,40 @@ async fn while_errors_at_max_iterations_to_prevent_runaway() {
     let run = engine.store().load(&r.run_id).await.unwrap();
     let noop_count = run.steps.iter().filter(|s| s.step_id == "noop").count();
     assert_eq!(noop_count, 5, "expected 5 noop records before the cap hit, got {noop_count}");
+}
+
+#[tokio::test]
+async fn needs_orders_steps_against_document_order() {
+    // `step_b` is declared *before* `step_a` but `needs` it — the executor
+    // must run `step_a` first regardless of document order.
+    let dir = tempdir();
+    let store = JsonRunStore::new(&dir).unwrap();
+
+    let flow = parse_flow_toml(r#"
+        name = "needs_order"
+        output_step = "step_b"
+
+        [[steps]]
+        id = "step_b"
+        needs = ["step_a"]
+        kind = "append_to_var"
+        name = "log"
+        value = "b"
+
+        [[steps]]
+        id = "step_a"
+        kind = "append_to_var"
+        name = "log"
+        value = "a"
+    "#).unwrap();
+
+    let mut b = FlowEngineBuilder::new();
+    b.register_flow(flow).with_store(Arc::new(store));
+    let engine = b.build().unwrap();
+
+    let r = engine.run("needs_order", json!({})).await.unwrap();
+    assert_eq!(r.status, RunStatus::Success);
+    // `step_b` appends after `step_a`, so the var is ["a", "b"].
+    assert_eq!(r.output, Some(json!(["a", "b"])));
 }
 

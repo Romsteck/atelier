@@ -30,6 +30,10 @@ use serde_json::Value;
 use crate::connector::Connector;
 use crate::error::{FlowError, FlowResult};
 
+/// Hard cap on a response body the `http` connector will buffer into memory.
+/// Without it a flow pointing at a large/hostile URL can OOM the process.
+const MAX_RESPONSE_BYTES: usize = 25 * 1024 * 1024;
+
 pub struct HttpConnector {
     client: Client,
 }
@@ -192,8 +196,30 @@ async fn build_output(resp: Response) -> FlowResult<Value> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let bytes = resp.bytes().await
-        .map_err(|e| FlowError::Connector(format!("http body: {e}")))?;
+
+    // Reject early when the advertised length already exceeds the cap.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES as u64 {
+            return Err(FlowError::Connector(format!(
+                "http response too large: {len} bytes (cap {MAX_RESPONSE_BYTES})"
+            )));
+        }
+    }
+    // Stream chunks so a missing or lying Content-Length cannot blow the cap.
+    let mut resp = resp;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FlowError::Connector(format!("http body: {e}")))?
+    {
+        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(FlowError::Connector(format!(
+                "http response exceeds {MAX_RESPONSE_BYTES} byte cap"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     let body_value: Value = if ct.contains("application/json") || ct.contains("+json") {
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))

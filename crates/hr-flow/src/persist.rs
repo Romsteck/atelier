@@ -67,17 +67,45 @@ impl JsonRunStore {
     }
 }
 
+/// Run ids are UUIDs assigned by the engine. Reject anything carrying a path
+/// separator or `.` so an externally-supplied id cannot escape `runs/`
+/// (`load` is reachable with caller-controlled ids via the daemon routes).
+fn is_safe_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id.len() <= 128
+        && run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 #[async_trait]
 impl RunStore for JsonRunStore {
     async fn save(&self, doc: &RunDoc) -> FlowResult<()> {
+        if !is_safe_run_id(&doc.run_id) {
+            return Err(FlowError::Persistence(format!(
+                "refusing to save: unsafe run_id `{}`",
+                doc.run_id
+            )));
+        }
         let path = self.path_for(&doc.run_id);
         let body = serde_json::to_vec_pretty(doc)
             .map_err(|e| FlowError::Persistence(e.to_string()))?;
-        tokio::fs::write(&path, body).await
-            .map_err(|e| FlowError::Persistence(format!("write {}: {e}", path.display())))
+        // Write to a temp file then atomically rename — a crash mid-write
+        // never leaves a truncated `{run_id}.json` for readers/replay. The
+        // `.tmp` extension keeps it out of `list_dir` (filters on `.json`).
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, body).await
+            .map_err(|e| FlowError::Persistence(format!("write {}: {e}", tmp.display())))?;
+        tokio::fs::rename(&tmp, &path).await
+            .map_err(|e| FlowError::Persistence(format!("rename {}: {e}", path.display())))
     }
 
     async fn load(&self, run_id: &str) -> FlowResult<RunDoc> {
+        if !is_safe_run_id(run_id) {
+            return Err(FlowError::Persistence(format!(
+                "invalid run_id `{run_id}`"
+            )));
+        }
         let path = self.path_for(run_id);
         let body = tokio::fs::read(&path).await
             .map_err(|e| FlowError::Persistence(format!("read {}: {e}", path.display())))?;
@@ -124,4 +152,32 @@ async fn list_dir(dir: &Path, flow_name: Option<&str>, limit: usize) -> FlowResu
         out.push(doc);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_safe_run_id_basics() {
+        assert!(is_safe_run_id("a1b2-c3d4_e5"));
+        assert!(is_safe_run_id(&uuid::Uuid::new_v4().to_string()));
+        assert!(!is_safe_run_id("../escape"));
+        assert!(!is_safe_run_id("a/b"));
+        assert!(!is_safe_run_id("with.dot"));
+        assert!(!is_safe_run_id(""));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_unsafe_run_id() {
+        let dir = std::env::temp_dir().join(format!("hrflow-persist-{}", uuid::Uuid::new_v4()));
+        let store = JsonRunStore::new(&dir).unwrap();
+        for bad in ["../etc/passwd", "a/b", "with.dot", ""] {
+            assert!(
+                store.load(bad).await.is_err(),
+                "load must reject unsafe run_id `{bad}`"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

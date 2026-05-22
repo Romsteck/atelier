@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
+use tracing::error;
 
 use crate::connector::Connector;
 use crate::definition::FlowDef;
@@ -116,6 +117,11 @@ impl FlowEngineBuilder {
         let store = self
             .store
             .ok_or_else(|| FlowError::Internal("FlowEngineBuilder needs a RunStore".into()))?;
+        // Semantic validation: catch dangling refs / dup ids / unimplemented
+        // kinds here rather than as an opaque runtime error.
+        for flow in self.flows.values() {
+            crate::validate::validate_flow(flow)?;
+        }
         Ok(FlowEngine {
             connectors: self.connectors,
             actions: self.actions,
@@ -194,7 +200,13 @@ impl FlowEngine {
                     duration_ms,
                     steps: records,
                 };
-                self.store.save(&doc).await?;
+                // The run itself succeeded — its side effects already
+                // happened. A persistence failure must not turn that into a
+                // hard error for the caller; log it and surface the result.
+                if let Err(e) = self.store.save(&doc).await {
+                    error!(run_id = %run_id, flow = %name, error = %e,
+                        "run succeeded but persisting the trace failed");
+                }
                 Ok(RunResult {
                     run_id,
                     flow_name: name.to_string(),
@@ -228,7 +240,10 @@ impl FlowEngine {
                     duration_ms,
                     steps: records,
                 };
-                self.store.save(&doc).await?;
+                if let Err(e) = self.store.save(&doc).await {
+                    error!(run_id = %run_id, flow = %name, error = %e,
+                        "run failed and persisting the trace also failed");
+                }
                 Ok(RunResult {
                     run_id,
                     flow_name: name.to_string(),

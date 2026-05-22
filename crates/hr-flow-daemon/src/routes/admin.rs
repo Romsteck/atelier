@@ -41,6 +41,11 @@ pub async fn reload(
     let apps_loaded = new.apps.len();
     let flows_loaded = new.flows.len();
     state.registry.store(Arc::new(new));
+    // Drop the per-slug semaphore cache so a changed `max_concurrent_runs`
+    // takes effect. In-flight runs keep their owned permits (the old
+    // semaphore stays alive behind those permits); new runs get a fresh
+    // semaphore sized from the reloaded registry.
+    state.slug_semaphores.clear();
     info!(apps_loaded, flows_loaded, "admin: registry reloaded");
     Ok(Json(ReloadResponse {
         apps_loaded,

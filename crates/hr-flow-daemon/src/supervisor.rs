@@ -24,7 +24,6 @@ use reqwest::Client;
 use serde_json::Value;
 use std::panic::AssertUnwindSafe;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
@@ -35,13 +34,25 @@ use crate::state::DaemonState;
 #[derive(Debug, Clone)]
 pub struct RunHandle {
     /// Internal id assigned at spawn (before the engine generates its own
-    /// run_id). Used as the DashMap key so /cancel doesn't need to wait for
-    /// the engine to emit a UUID.
+    /// run_id). Used as the active-runs DashMap key.
     pub dispatch_id: String,
     pub slug: String,
     pub flow_name: String,
     pub started_at: DateTime<Utc>,
-    pub cancel: CancellationToken,
+}
+
+/// RAII guard: removes the run from the active-runs map on drop, so an
+/// aborted `dispatch_run` future (e.g. the HTTP client disconnected) cannot
+/// leak a stale DashMap entry.
+struct RunGuard {
+    state: Arc<DaemonState>,
+    dispatch_id: String,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.state.runs.remove(&self.dispatch_id);
+    }
 }
 
 #[instrument(skip(state, input), fields(dispatch_id))]
@@ -68,11 +79,20 @@ pub async fn dispatch_run(
 
     // Defense-in-depth global cap (acquired with await — if global is full
     // we'd rather queue briefly than 429 here, since per-slug already serves
-    // as the user-visible limit).
+    // as the user-visible limit). A bounded timeout guards against an
+    // indefinite wait pinning the request.
+    const GLOBAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(60);
     let _global_permit = match &state.global_semaphore {
-        Some(g) => Some(g.clone().acquire_owned().await.map_err(|e| {
-            DaemonError::Internal(format!("global semaphore closed: {e}"))
-        })?),
+        Some(g) => {
+            let acquired = tokio::time::timeout(
+                GLOBAL_ACQUIRE_TIMEOUT,
+                g.clone().acquire_owned(),
+            )
+            .await
+            .map_err(|_| DaemonError::Overloaded { slug: slug.clone() })?
+            .map_err(|e| DaemonError::Internal(format!("global semaphore closed: {e}")))?;
+            Some(acquired)
+        }
         None => None,
     };
 
@@ -95,19 +115,34 @@ pub async fn dispatch_run(
         dv: state.dv.clone(),
     })?;
 
-    let cancel = CancellationToken::new();
     let handle = RunHandle {
         dispatch_id: dispatch_id.clone(),
         slug: slug.clone(),
         flow_name: flow_name.clone(),
         started_at: Utc::now(),
-        cancel: cancel.clone(),
     };
     state.runs.insert(dispatch_id.clone(), handle);
+    // From here on the guard owns cleanup — even if this future is dropped.
+    let _run_guard = RunGuard {
+        state: state.clone(),
+        dispatch_id: dispatch_id.clone(),
+    };
 
     let trigger_owned = trigger.to_string();
     let flow_name_owned = flow_name.clone();
-    let timeout = Duration::from_millis(run_timeout_ms.min(state.step_timeout_max_ms.saturating_mul(20)).max(1_000));
+    // Effective run timeout: the configured `run_timeout_ms`, but never below
+    // 1s and never above 20× the per-step cap (a sanity bound on a fat-finger
+    // config). Log when the clamp actually shortens the requested value.
+    let clamp_ceiling = state.step_timeout_max_ms.saturating_mul(20);
+    let effective_ms = run_timeout_ms.min(clamp_ceiling).max(1_000);
+    if effective_ms < run_timeout_ms {
+        warn!(
+            requested_ms = run_timeout_ms,
+            effective_ms,
+            "dispatch: run_timeout_ms clamped to 20× step_timeout_max_ms"
+        );
+    }
+    let timeout = Duration::from_millis(effective_ms);
 
     info!(slug = %slug, flow = %flow_name_owned, %trigger_owned, "dispatch: spawning run");
 
@@ -123,11 +158,9 @@ pub async fn dispatch_run(
             fut.await
         });
 
-    // Await join + map errors. We deliberately do NOT use cancel.cancel() to
-    // abort here — Phase 1 cancel is best-effort via JoinHandle::abort triggered
-    // by the /cancel route, not the dispatch path.
+    // Await join + map errors. `_run_guard` removes the active-runs entry on
+    // drop, whether we return normally or this future is cancelled.
     let outcome = join.await;
-    state.runs.remove(&dispatch_id);
 
     match outcome {
         Ok(Ok(Ok(result))) => {
@@ -154,16 +187,6 @@ pub async fn dispatch_run(
             error!(slug = %slug, flow = %flow_name, ?join_err, "dispatch: tokio join error");
             Err(DaemonError::Internal(format!("join_error: {join_err}")))
         }
-    }
-}
-
-/// Best-effort cancel by dispatch_id.
-pub fn cancel_dispatch(state: &DaemonState, dispatch_id: &str) -> bool {
-    if let Some(entry) = state.runs.get(dispatch_id) {
-        entry.cancel.cancel();
-        true
-    } else {
-        false
     }
 }
 

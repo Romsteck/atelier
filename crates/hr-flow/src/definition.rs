@@ -180,12 +180,91 @@ pub fn parse_flow_toml(src: &str) -> FlowResult<FlowDef> {
 /// Build a parent → children index from the flat steps list. Useful for the
 /// executor to walk the tree, and for the persistence layer to compute the
 /// `parent_step_id` column.
+///
+/// Each sibling group is topologically ordered by its `needs` edges so the
+/// executor — which walks the groups in order — honours declared
+/// dependencies regardless of document order.
 pub fn index_children(flow: &FlowDef) -> BTreeMap<Option<String>, Vec<&StepDef>> {
     let mut idx: BTreeMap<Option<String>, Vec<&StepDef>> = BTreeMap::new();
     for step in &flow.steps {
         idx.entry(step.parent.clone()).or_default().push(step);
     }
+    for group in idx.values_mut() {
+        *group = order_by_needs(std::mem::take(group));
+    }
     idx
+}
+
+/// Topologically order a sibling group by its `needs` edges. Only `needs`
+/// targets that are themselves in the group act as ordering constraints
+/// (siblings share one parent — cross-group `needs` is not an executor
+/// concern). Document order is the tie-break.
+///
+/// Best-effort: a residual cycle (normally rejected upstream by
+/// `validate_flow`) degrades to document order for the cyclic remainder
+/// rather than dropping steps.
+fn order_by_needs(group: Vec<&StepDef>) -> Vec<&StepDef> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    if group.len() < 2 {
+        return group;
+    }
+    let ids: HashSet<&str> = group.iter().map(|s| s.id.as_str()).collect();
+
+    let mut indegree: HashMap<&str, usize> = HashMap::with_capacity(group.len());
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for s in &group {
+        let deps: Vec<&str> = s
+            .needs
+            .iter()
+            .map(String::as_str)
+            .filter(|n| ids.contains(n) && *n != s.id.as_str())
+            .collect();
+        indegree.insert(s.id.as_str(), deps.len());
+        for n in deps {
+            dependents.entry(n).or_default().push(s.id.as_str());
+        }
+    }
+
+    let by_id: HashMap<&str, &StepDef> =
+        group.iter().map(|s| (s.id.as_str(), *s)).collect();
+    // Seed the queue in document order so independent steps keep their
+    // original relative position.
+    let mut queue: VecDeque<&str> = group
+        .iter()
+        .filter(|s| indegree.get(s.id.as_str()).copied().unwrap_or(0) == 0)
+        .map(|s| s.id.as_str())
+        .collect();
+
+    let mut out: Vec<&StepDef> = Vec::with_capacity(group.len());
+    let mut emitted: HashSet<&str> = HashSet::with_capacity(group.len());
+    while let Some(id) = queue.pop_front() {
+        if !emitted.insert(id) {
+            continue;
+        }
+        if let Some(s) = by_id.get(id) {
+            out.push(s);
+        }
+        if let Some(deps) = dependents.get(id) {
+            for &d in deps {
+                if let Some(e) = indegree.get_mut(d) {
+                    *e = e.saturating_sub(1);
+                    if *e == 0 {
+                        queue.push_back(d);
+                    }
+                }
+            }
+        }
+    }
+    // Residual cycle: append leftovers in document order.
+    if out.len() < group.len() {
+        for s in &group {
+            if !emitted.contains(s.id.as_str()) {
+                out.push(s);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

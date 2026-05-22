@@ -22,8 +22,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use tracing::{info, instrument};
+use std::path::{Path as FsPath, PathBuf};
+use tracing::{info, instrument, warn};
 
 use crate::clients::{flowd::FlowdError, FlowdClient};
 use crate::state::ApiState;
@@ -79,6 +79,9 @@ async fn replay_run(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if !valid_slug(&slug) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid slug"));
+    }
+    if run_id.contains('/') || run_id.contains('.') {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid run_id"));
     }
     let client = FlowdClient::from_env()
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &format!("flowd unavailable: {e}")))?;
@@ -153,17 +156,11 @@ fn valid_slug(slug: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-async fn list_definitions(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-) -> impl IntoResponse {
-    if !valid_slug(&slug) {
-        return err(StatusCode::BAD_REQUEST, "Invalid slug").into_response();
-    }
-    let dir = flows_dir(&state, &slug);
-    let read = match std::fs::read_dir(&dir) {
-        Ok(r) => r,
-        Err(_) => return Json(json!({ "success": true, "flows": [] })).into_response(),
+/// Blocking directory scan of `*.toml` flow definitions. Run inside
+/// `spawn_blocking` — never call directly from an async handler.
+fn scan_flow_definitions(dir: &FsPath) -> Vec<Value> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
     let mut flows = Vec::new();
     for entry in read.flatten() {
@@ -171,13 +168,11 @@ async fn list_definitions(
         if path.extension().and_then(|s| s.to_str()) != Some("toml") {
             continue;
         }
-        let body = match std::fs::read_to_string(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
         };
-        let parsed = match hr_flow::parse_flow_toml(&body) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let Ok(parsed) = hr_flow::parse_flow_toml(&body) else {
+            continue;
         };
         flows.push(json!({
             "name": parsed.name,
@@ -187,6 +182,20 @@ async fn list_definitions(
         }));
     }
     flows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    flows
+}
+
+async fn list_definitions(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if !valid_slug(&slug) {
+        return err(StatusCode::BAD_REQUEST, "Invalid slug").into_response();
+    }
+    let dir = flows_dir(&state, &slug);
+    let flows = tokio::task::spawn_blocking(move || scan_flow_definitions(&dir))
+        .await
+        .unwrap_or_default();
     Json(json!({ "success": true, "flows": flows })).into_response()
 }
 
@@ -201,14 +210,16 @@ async fn get_definition(
         return err(StatusCode::BAD_REQUEST, "Invalid name").into_response();
     }
     let path = flows_dir(&state, &slug).join(format!("{name}.toml"));
-    let body = match std::fs::read_to_string(&path) {
+    let body = match tokio::fs::read_to_string(&path).await {
         Ok(b) => b,
         Err(_) => return err(StatusCode::NOT_FOUND, "Flow not found").into_response(),
     };
     let parsed = match hr_flow::parse_flow_toml(&body) {
         Ok(p) => p,
         Err(e) => {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response();
+            warn!(slug = %slug, name = %name, error = %e, "flow definition is malformed");
+            return err(StatusCode::UNPROCESSABLE_ENTITY, "Invalid flow definition")
+                .into_response();
         }
     };
     Json(json!({
@@ -227,19 +238,11 @@ struct RunsQuery {
     limit: Option<u32>,
 }
 
-async fn list_runs(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-    Query(q): Query<RunsQuery>,
-) -> impl IntoResponse {
-    if !valid_slug(&slug) {
-        return err(StatusCode::BAD_REQUEST, "Invalid slug").into_response();
-    }
-    let dir = runs_dir(&state, &slug);
-    let limit = q.limit.unwrap_or(50) as usize;
-    let read = match std::fs::read_dir(&dir) {
-        Ok(r) => r,
-        Err(_) => return Json(json!({ "success": true, "runs": [] })).into_response(),
+/// Blocking scan of `runs/*.json`, newest first, capped at `limit`. Run
+/// inside `spawn_blocking`.
+fn scan_runs(dir: &FsPath, limit: usize, flow_name: Option<&str>) -> Vec<Value> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for entry in read.flatten() {
@@ -260,16 +263,15 @@ async fn list_runs(
         if out.len() >= limit {
             break;
         }
-        let body = match std::fs::read_to_string(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
         };
-        let mut doc: serde_json::Value = match serde_json::from_str(&body) {
+        let mut doc: Value = match serde_json::from_str(&body) {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if let Some(filter) = &q.flow_name {
-            if doc.get("flow_name").and_then(|v| v.as_str()) != Some(filter.as_str()) {
+        if let Some(filter) = flow_name {
+            if doc.get("flow_name").and_then(|v| v.as_str()) != Some(filter) {
                 continue;
             }
         }
@@ -278,7 +280,28 @@ async fn list_runs(
         }
         out.push(doc);
     }
-    Json(json!({ "success": true, "runs": out })).into_response()
+    out
+}
+
+async fn list_runs(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Query(q): Query<RunsQuery>,
+) -> impl IntoResponse {
+    if !valid_slug(&slug) {
+        return err(StatusCode::BAD_REQUEST, "Invalid slug").into_response();
+    }
+    let dir = runs_dir(&state, &slug);
+    // Clamp the caller-supplied limit so a huge value can't force an
+    // unbounded scan.
+    let limit = (q.limit.unwrap_or(50) as usize).min(1000);
+    let flow_name = q.flow_name.clone();
+    let runs = tokio::task::spawn_blocking(move || {
+        scan_runs(&dir, limit, flow_name.as_deref())
+    })
+    .await
+    .unwrap_or_default();
+    Json(json!({ "success": true, "runs": runs })).into_response()
 }
 
 async fn get_run(
@@ -292,14 +315,16 @@ async fn get_run(
         return err(StatusCode::BAD_REQUEST, "Invalid run_id").into_response();
     }
     let path = runs_dir(&state, &slug).join(format!("{run_id}.json"));
-    let body = match std::fs::read_to_string(&path) {
+    let body = match tokio::fs::read_to_string(&path).await {
         Ok(b) => b,
         Err(_) => return err(StatusCode::NOT_FOUND, "Run not found").into_response(),
     };
     let mut doc: serde_json::Value = match serde_json::from_str(&body) {
         Ok(d) => d,
         Err(e) => {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response();
+            warn!(slug = %slug, run_id = %run_id, error = %e, "run file is corrupt");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "Run file is unreadable")
+                .into_response();
         }
     };
     if let Some(steps) = doc.get_mut("steps").and_then(|v| v.as_array_mut()) {
@@ -334,14 +359,16 @@ async fn get_run_step(
         return err(StatusCode::BAD_REQUEST, "Invalid record_id").into_response();
     }
     let path = runs_dir(&state, &slug).join(format!("{run_id}.json"));
-    let body = match std::fs::read_to_string(&path) {
+    let body = match tokio::fs::read_to_string(&path).await {
         Ok(b) => b,
         Err(_) => return err(StatusCode::NOT_FOUND, "Run not found").into_response(),
     };
     let doc: serde_json::Value = match serde_json::from_str(&body) {
         Ok(d) => d,
         Err(e) => {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response();
+            warn!(slug = %slug, run_id = %run_id, error = %e, "run file is corrupt");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "Run file is unreadable")
+                .into_response();
         }
     };
     let Some(steps) = doc.get("steps").and_then(|v| v.as_array()) else {
@@ -978,11 +1005,26 @@ async fn get_app_stats(
         )
         .into_response();
     };
-    let runs = collect_app_runs(&state, &slug);
-    let run_count = runs.len();
-    let stats = compute_stats(runs, period, false);
-    info!(slug = %slug, period = period.label(), run_count, "flow stats aggregated (app)");
-    Json(json!({ "success": true, "stats": stats })).into_response()
+    // Reading + aggregating every run file is blocking + CPU-bound — keep it
+    // off the async worker threads.
+    let slug_for_log = slug.clone();
+    let computed = tokio::task::spawn_blocking(move || {
+        let runs = collect_app_runs(&state, &slug);
+        let n = runs.len();
+        (compute_stats(runs, period, false), n)
+    })
+    .await;
+    match computed {
+        Ok((stats, run_count)) => {
+            info!(slug = %slug_for_log, period = period.label(), run_count,
+                "flow stats aggregated (app)");
+            Json(json!({ "success": true, "stats": stats })).into_response()
+        }
+        Err(e) => {
+            warn!(error = %e, "app stats task failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "stats aggregation failed").into_response()
+        }
+    }
 }
 
 async fn get_global_stats(
@@ -997,14 +1039,26 @@ async fn get_global_stats(
         )
         .into_response();
     };
-    let runs = collect_global_runs(&state);
-    let run_count = runs.len();
-    let app_count = runs
-        .iter()
-        .map(|(s, _)| s.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-    let stats = compute_stats(runs, period, true);
-    info!(period = period.label(), app_count, run_count, "flow stats aggregated (global)");
-    Json(json!({ "success": true, "stats": stats })).into_response()
+    let computed = tokio::task::spawn_blocking(move || {
+        let runs = collect_global_runs(&state);
+        let run_count = runs.len();
+        let app_count = runs
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        (compute_stats(runs, period, true), run_count, app_count)
+    })
+    .await;
+    match computed {
+        Ok((stats, run_count, app_count)) => {
+            info!(period = period.label(), app_count, run_count,
+                "flow stats aggregated (global)");
+            Json(json!({ "success": true, "stats": stats })).into_response()
+        }
+        Err(e) => {
+            warn!(error = %e, "global stats task failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "stats aggregation failed").into_response()
+        }
+    }
 }

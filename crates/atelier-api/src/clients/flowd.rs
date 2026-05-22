@@ -14,12 +14,21 @@
 //! so apps without the daemon provisioned (dev sandbox) keep booting and only
 //! the flow routes return 503.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
+
+/// Process-wide `reqwest::Client` (connection pool) shared by every
+/// `FlowdClient`. `from_env()` is called per request, so creating a fresh
+/// client each time would discard the pool and re-handshake needlessly.
+fn shared_client() -> Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(Client::new).clone()
+}
 
 #[derive(Debug, Clone)]
 pub struct FlowdClient {
@@ -80,7 +89,7 @@ impl FlowdClient {
         Ok(Self {
             base_url,
             bearer,
-            http: Client::new(),
+            http: shared_client(),
             timeout: Duration::from_millis(timeout_ms),
         })
     }

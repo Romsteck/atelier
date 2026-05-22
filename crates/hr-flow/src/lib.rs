@@ -17,6 +17,7 @@ pub mod executor;
 pub mod expr;
 pub mod persist;
 pub mod remote_engine;
+pub mod validate;
 
 pub use connector::Connector;
 pub use definition::{parse_flow_toml, FlowDef, StepDef, StepKind};
@@ -26,6 +27,7 @@ pub use error::{FlowError, FlowResult};
 pub use executor::StepRecord;
 pub use persist::{JsonRunStore, RunDoc, RunErrorDoc, RunStore};
 pub use remote_engine::RemoteEngine;
+pub use validate::validate_flow;
 
 pub use connectors_managed::http::HttpConnector;
 

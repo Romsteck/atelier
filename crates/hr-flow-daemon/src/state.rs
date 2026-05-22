@@ -80,7 +80,7 @@ impl DaemonState {
             .load()
             .apps
             .get(slug)
-            .map(|a| a.max_concurrent_runs)
+            .and_then(|a| a.max_concurrent_runs)
             .unwrap_or(self.default_slug_concurrency);
         let sem = Arc::new(Semaphore::new(permits.max(1)));
         // Race-safe insert: another caller may have inserted concurrently.

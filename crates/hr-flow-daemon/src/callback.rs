@@ -10,8 +10,13 @@
 //!   POST  {callback_url}/_flow/connector/{name}/{op}
 //!   Authorization: Bearer <flow_callback_token>
 //!   X-HomeRoute-Flow: 1
-//!   X-Flow-Run-Id, X-Flow-Step-Id, X-Flow-Deadline-Ms
+//!   X-Flow-Deadline-Ms: <timeout>
 //!   { "run_id", "step_id", "input" | "params", "params"? }
+//!
+//! ⚠ `run_id` / `step_id` are carried in the body for forward-compat but are
+//! currently **empty** — the executor does not yet thread run context down to
+//! connector / action calls. The `X-Flow-Run-Id` / `X-Flow-Step-Id` headers
+//! are **not** sent. Apps must not rely on either for correlation yet.
 //!
 //! Response:
 //!   200 { "output": <Value> }                     — success

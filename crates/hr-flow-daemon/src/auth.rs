@@ -32,11 +32,14 @@ pub async fn require_bearer(
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
+    // No early return on a length mismatch — fold the difference into `diff`
+    // and iterate over the longer slice so the comparison never branches on
+    // secret content.
+    let mut diff: u8 = (a.len() != b.len()) as u8;
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
         diff |= x ^ y;
     }
     diff == 0

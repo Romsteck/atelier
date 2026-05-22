@@ -6,7 +6,7 @@
 //! not poison the whole reload.
 
 use chrono::{DateTime, Utc};
-use hr_flow::{parse_flow_toml, FlowDef};
+use hr_flow::{parse_flow_toml, validate_flow, FlowDef};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +27,9 @@ pub struct AppEntry {
     pub slug: String,
     pub callback_url: Option<String>,
     pub callback_token: Option<String>,
-    pub max_concurrent_runs: usize,
+    /// `None` when `apps.json` does not specify it — the caller then falls
+    /// back to the daemon-wide `default_slug_concurrency`.
+    pub max_concurrent_runs: Option<usize>,
     pub circuit_breaker: CircuitState,
 }
 
@@ -99,7 +101,7 @@ impl Registry {
                 slug: rec.slug.clone(),
                 callback_url: rec.flow_callback_url.clone(),
                 callback_token: rec.flow_callback_token.clone(),
-                max_concurrent_runs: rec.max_concurrent_runs.unwrap_or(0),
+                max_concurrent_runs: rec.max_concurrent_runs,
                 circuit_breaker: CircuitState::default(),
             };
             // Scan flows for this slug. Sources are at
@@ -110,12 +112,19 @@ impl Registry {
                 Ok(parsed) => {
                     debug!(slug = %rec.slug, count = parsed.len(), dir = %flow_dir.display(), "registry: flows scanned");
                     for def in parsed {
-                        flows.insert((rec.slug.clone(), def.name.clone()), def);
+                        let key = (rec.slug.clone(), def.name.clone());
+                        if flows.contains_key(&key) {
+                            warn!(slug = %rec.slug, flow = %def.name, "registry: duplicate flow name; overwriting earlier definition");
+                        }
+                        flows.insert(key, def);
                     }
                 }
                 Err(err) => {
                     warn!(slug = %rec.slug, dir = %flow_dir.display(), ?err, "registry: flow scan failed; slug has no flows in this snapshot");
                 }
+            }
+            if apps.contains_key(&rec.slug) {
+                warn!(slug = %rec.slug, "registry: duplicate slug in apps.json; overwriting earlier entry");
             }
             apps.insert(rec.slug.clone(), entry);
         }
@@ -157,7 +166,12 @@ fn scan_flow_dir(dir: &Path) -> DaemonResult<Vec<FlowDef>> {
             }
         };
         match parse_flow_toml(&body) {
-            Ok(def) => out.push(def),
+            Ok(def) => match validate_flow(&def) {
+                Ok(()) => out.push(def),
+                Err(e) => {
+                    warn!(path = %path.display(), ?e, "flow failed semantic validation; skipping");
+                }
+            },
             Err(e) => {
                 warn!(path = %path.display(), ?e, "flow TOML invalid; skipping");
             }

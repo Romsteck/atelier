@@ -111,6 +111,16 @@ impl DataverseConnector {
         let key = required_string(&params, "key")?;
         let value = required(&params, "value")?;
 
+        // `key` is interpolated into a dvexpr filter — only allow a plain
+        // column identifier so it cannot inject filter logic (`value` is
+        // escaped by `render_dvexpr_literal`; `key` must be constrained too).
+        if !is_plain_identifier(&key) {
+            return Err(connector_err(
+                "get_by_natural_key",
+                format!("`key` must be a plain column identifier, got `{key}`"),
+            ));
+        }
+
         let engine = self.engine().await?;
         let schema = engine.get_schema().await.map_err(|e| io_err("get_by_natural_key", e))?;
         let table_def = find_table(&schema.tables, &table)?;
@@ -285,7 +295,13 @@ impl DataverseConnector {
     async fn op_audit_list(&self, params: Value) -> FlowResult<Value> {
         let table = params.get("table").and_then(|v| v.as_str()).map(String::from);
         let top = params.get("top").and_then(|v| v.as_u64()).unwrap_or(100).min(1000) as i64;
-        let skip = params.get("skip").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        // Clamp `skip` too: an out-of-range u64 cast straight to i64 could go
+        // negative and make Postgres reject the OFFSET.
+        let skip = params
+            .get("skip")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(10_000_000) as i64;
         let row_id = params.get("id").map(|v| v.to_string());
 
         let engine = self.engine().await?;
@@ -515,6 +531,16 @@ fn find_table<'a>(tables: &'a [TableDefinition], name: &str) -> FlowResult<&'a T
         .ok_or_else(|| connector_err("dataverse", format!("table `{name}` not found")))
 }
 
+/// A plain SQL/dvexpr column identifier: starts with a letter or `_`, then
+/// alphanumerics / `_`, bounded length. Anything else could carry dvexpr
+/// operators into a filter string.
+fn is_plain_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn render_dvexpr_literal(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
@@ -614,5 +640,19 @@ mod tests {
         // Number → idem
         let p = json!({ "table": "files", "filter": 42 });
         assert!(parse_list_params(&p).is_err(), "number filter must error");
+    }
+
+    #[test]
+    fn plain_identifier_rejects_filter_injection() {
+        // Accepted: real column identifiers.
+        assert!(is_plain_identifier("name"));
+        assert!(is_plain_identifier("_col1"));
+        assert!(is_plain_identifier("createdAt"));
+        // Rejected: anything that could carry dvexpr operators into a filter.
+        assert!(!is_plain_identifier("1col"));
+        assert!(!is_plain_identifier("a == b"));
+        assert!(!is_plain_identifier("a || true"));
+        assert!(!is_plain_identifier("name\" == \"x"));
+        assert!(!is_plain_identifier(""));
     }
 }

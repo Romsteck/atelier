@@ -180,11 +180,15 @@ fn traverse(value: &Value, path: &str) -> Value {
         if segment.is_empty() {
             continue;
         }
-        // Try array index then object key.
-        current = if let Ok(idx) = segment.parse::<usize>() {
-            current.get(idx).unwrap_or(&Value::Null)
-        } else {
-            current.get(segment).unwrap_or(&Value::Null)
+        // Object keys take precedence over positional indices: a numeric
+        // *key* on an object (`{"0": …}`) must stay reachable. Only fall
+        // back to array indexing when the current value is actually an array.
+        current = match current {
+            Value::Array(_) => match segment.parse::<usize>() {
+                Ok(idx) => current.get(idx).unwrap_or(&Value::Null),
+                Err(_) => &Value::Null,
+            },
+            _ => current.get(segment).unwrap_or(&Value::Null),
         };
     }
     current.clone()
@@ -754,5 +758,27 @@ mod tests {
         assert!(eval_bool("[1, 2] == [1, 2]", &ctx()).unwrap());
         assert!(eval_bool("{} != null", &ctx()).unwrap());
         assert!(eval_bool("[] != null", &ctx()).unwrap());
+    }
+
+    #[test]
+    fn traverse_prefers_object_key_over_array_index() {
+        // A numeric *key* on an object must stay reachable; positional
+        // indexing only applies when the value is genuinely an array.
+        let mut steps = HashMap::new();
+        steps.insert("s".into(), json!({ "0": "zero", "items": [10, 20, 30] }));
+        let c = TestCtx {
+            input: Value::Null,
+            vars: HashMap::new(),
+            steps,
+            iter: HashMap::new(),
+        };
+        assert_eq!(
+            substitute(&json!("{{ steps.s.output.0 }}"), &c).unwrap(),
+            json!("zero")
+        );
+        assert_eq!(
+            substitute(&json!("{{ steps.s.output.items.2 }}"), &c).unwrap(),
+            json!(30)
+        );
     }
 }
