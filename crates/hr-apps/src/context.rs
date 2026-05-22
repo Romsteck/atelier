@@ -1951,6 +1951,35 @@ Trois options :
    ```
 3. **Wrapper côté app** qui lit `.output.output` — moins propre, à éviter pour les nouveaux flux.
 
+## Cadence & robustesse réseau (rate limiting)
+
+Pour un flux qui appelle une API externe à débit limité (Finnhub, Alpaca, etc.) :
+
+- **`sleep`** — primitive de pause non-bloquante (n'immobilise ni le daemon ni les autres runs). `for_each` est séquentiel, donc un `sleep` dans le corps de boucle espace chaque itération :
+  ```toml
+  [[steps]]
+  id = "loop"
+  kind = "for_each"
+  over = "input.symbols"
+
+  [[steps]]
+  id = "fetch"
+  parent = "loop"
+  kind = "connector"
+  connector = "http"
+  op = "request"
+  params = {{ url = "https://api.exemple.com/q?s={{{{ @iter }}}}", max_retries = 3 }}
+
+  [[steps]]
+  id = "pace"
+  parent = "loop"
+  kind = "sleep"
+  ms = 200
+  ```
+  `ms` : littéral ou expression `{{{{ }}}}` ; valeur clampée à [0, 300_000].
+
+- **Retry HTTP** — le connecteur managé `http` accepte `max_retries` (défaut 0, désactivé) et `retry_backoff_ms` (défaut 1000). Retry automatique sur `429`/`500`/`502`/`503`/`504`/erreur réseau : backoff exponentiel + jitter, en-tête de réponse `Retry-After` honoré en priorité, délai plafonné à 60 s par tentative.
+
 ## Tools MCP disponibles
 
 | Tool | Usage |

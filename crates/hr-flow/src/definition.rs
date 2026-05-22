@@ -116,6 +116,14 @@ pub enum StepKind {
         cond: String,
         max_iterations: u32,
     },
+    /// `sleep` primitive: pauses the run for `ms` milliseconds before
+    /// continuing. Used inside `for_each`/`while` to pace external API
+    /// calls and stay under provider rate limits. `ms` accepts a literal
+    /// number or a `{{ … }}` expression (e.g. a `Retry-After` value);
+    /// the resolved value is clamped to [0, 300_000].
+    Sleep {
+        ms: serde_json::Value,
+    },
     /// `scope` primitive: groups steps with try/catch/finally semantics.
     Scope,
     /// Early exit — `status` is `success`/`failed`/`cancelled`.
@@ -198,6 +206,23 @@ mod tests {
         assert_eq!(def.name, "hello");
         assert_eq!(def.steps.len(), 1);
         assert_eq!(def.steps[0].id, "compose_value");
+    }
+
+    #[test]
+    fn parses_sleep_step() {
+        let toml = r#"
+            name = "paced"
+
+            [[steps]]
+            id = "wait"
+            kind = "sleep"
+            ms = 200
+        "#;
+        let def = parse_flow_toml(toml).expect("parse");
+        match &def.steps[0].kind {
+            StepKind::Sleep { ms } => assert_eq!(ms.as_u64(), Some(200)),
+            other => panic!("expected sleep, got {other:?}"),
+        }
     }
 
     #[test]

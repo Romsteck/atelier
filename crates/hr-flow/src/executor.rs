@@ -498,6 +498,30 @@ async fn run_step_inner(
             }
             Ok(Value::Array(iterations))
         }
+        StepKind::Sleep { ms } => {
+            // Resolve `ms` (literal or `{{ }}` expression), coerce to a
+            // non-negative integer, then clamp — a runaway value must not
+            // pin a worker for hours. `tokio::time::sleep` yields, so a
+            // sleeping run never blocks the daemon or other runs.
+            let resolved = substitute(ms, state)?;
+            let millis = resolved
+                .as_u64()
+                .or_else(|| resolved.as_f64().filter(|f| f.is_finite()).map(|f| f.max(0.0) as u64))
+                .ok_or_else(|| FlowError::StepFailed {
+                    step_id: step.id.clone(),
+                    message: format!("sleep `ms` must resolve to a number, got {resolved:?}"),
+                })?;
+            const SLEEP_CAP_MS: u64 = 300_000;
+            let capped = millis.min(SLEEP_CAP_MS);
+            if capped < millis {
+                tracing::warn!(
+                    step_id = %step.id, requested_ms = millis, capped_ms = capped,
+                    "sleep clamped to cap",
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(capped)).await;
+            Ok(serde_json::json!({ "slept_ms": capped }))
+        }
         other => Err(FlowError::Internal(format!(
             "step kind `{}` not yet implemented", step_kind_label(other),
         ))),
@@ -643,6 +667,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::CondSelect { .. } => "cond_select",
         StepKind::ForEach { .. } => "for_each",
         StepKind::While { .. } => "while",
+        StepKind::Sleep { .. } => "sleep",
         StepKind::Scope => "scope",
         StepKind::Terminate { .. } => "terminate",
         StepKind::SetVar { .. } => "set_var",

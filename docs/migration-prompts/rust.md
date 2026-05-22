@@ -78,6 +78,35 @@ Build, déploie via `make deploy-app SLUG=<slug>`, teste via `mcp__studio__flow.
 
 Itère sur le lot suivant. Garde la tâche réglée même si la route originelle n'est pas encore décommissionnée — la doctrine est de migrer progressivement, pas de big-bang.
 
+### Cadence & robustesse réseau (rate limiting)
+
+Pour les flux qui appellent des APIs externes à débit limité (Finnhub, Alpaca, etc.) :
+
+- **Espacer les appels** — primitive `sleep` (pause non-bloquante : n'immobilise ni le daemon ni les autres runs). `for_each` est séquentiel, donc un `sleep` dans le corps de boucle espace bien chaque itération :
+  ```toml
+  [[steps]]
+  id = "loop"
+  kind = "for_each"
+  over = "input.symbols"
+
+  [[steps]]
+  id = "fetch"
+  parent = "loop"
+  kind = "connector"
+  connector = "http"
+  op = "request"
+  params = { url = "https://finnhub.io/api/v1/quote?symbol={{ @iter }}", max_retries = 3 }
+
+  [[steps]]
+  id = "pace"
+  parent = "loop"
+  kind = "sleep"
+  ms = 200
+  ```
+  `ms` accepte un littéral ou une expression `{{ }}` ; valeur clampée à [0, 300_000].
+
+- **Retry sur 429 / 5xx** — le connecteur managé `http` accepte deux params optionnels : `max_retries` (défaut 0 — désactivé) et `retry_backoff_ms` (défaut 1000). Sur `429`/`500`/`502`/`503`/`504` ou erreur réseau, il réessaie avec backoff exponentiel + jitter. Un en-tête de réponse `Retry-After` numérique est honoré en priorité sur le backoff. Délai plafonné à 60 s par tentative.
+
 ### 4. Escalade plateforme — règle stricte
 
 Si tu rencontres un **bug** ou une **limitation** dans `hr-flow` / `hr-flow-callback` / `hr-flowd` (engine, primitive, expression, connecteur managé, persistence, callback) :
