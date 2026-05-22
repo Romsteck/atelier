@@ -40,14 +40,23 @@ web:
 deploy: deploy-medion
 
 deploy-medion: atelier web
+	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
+	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting (a --delete rsync would wipe prod web)" >&2; exit 1; }
 	@echo "→ rsync atelier binary + web/dist to Medion"
 	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):/opt/atelier/bin/atelier.new
 	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):/opt/atelier/web/dist/
 	@echo "→ atomic swap + restart atelier.service on Medion"
 	ssh $(MEDION) 'sudo install -o root -g root -m 0755 /opt/atelier/bin/atelier.new /opt/atelier/bin/atelier && sudo rm /opt/atelier/bin/atelier.new && sudo systemctl restart atelier.service'
-	@sleep 3
-	@echo "→ healthcheck"
-	curl -fsS $(ATELIER_API)/api/health | jq . || (ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager'; exit 1)
+	@echo "→ healthcheck (poll /api/health)"
+	@for i in $$(seq 1 15); do \
+	  if curl -fsS $(ATELIER_API)/api/health >/dev/null 2>&1; then \
+	    echo "  atelier healthy after $${i}s"; exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "error: atelier healthcheck failed after 15s" >&2; \
+	ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager'; \
+	exit 1
 
 # Build + rsync + restart a single app on Medion.
 deploy-app:

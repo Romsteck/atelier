@@ -8,7 +8,10 @@ use tracing::{info, warn};
 
 use crate::types::Application;
 
-const REGISTRY_PATH: &str = "/opt/homeroute/data/apps.json";
+// Atelier's canonical registry location post-rapatriement (2026-05-09).
+// `main.rs` always passes an explicit path via `load_from`; this default only
+// applies to a bare `load()` call.
+const REGISTRY_PATH: &str = "/opt/atelier/data/apps.json";
 
 /// In-memory registry of HomeRoute applications, persisted to a JSON file.
 #[derive(Clone)]
@@ -18,7 +21,7 @@ pub struct AppRegistry {
 }
 
 impl AppRegistry {
-    /// Load the registry from the default path (`/opt/homeroute/data/apps.json`).
+    /// Load the registry from the default path (`/opt/atelier/data/apps.json`).
     pub async fn load() -> Result<Self> {
         Self::load_from(PathBuf::from(REGISTRY_PATH)).await
     }

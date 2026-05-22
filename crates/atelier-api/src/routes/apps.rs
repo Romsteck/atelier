@@ -16,7 +16,6 @@
 //! TODO Phase 9.2 suite : create / update / delete / build / deploy / exec /
 //! env update / regenerate-context / logs.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, State};
@@ -222,21 +221,30 @@ async fn ship_app(
         edge: None,
         git: state.git.clone(),
         base_domain: state.context_generator.base_domain.clone(),
-        build_locks: Arc::new(tokio::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        build_locks: state.build_locks.clone(),
         app_build_tx,
     };
 
     let resp = ctx.ship(slug.clone(), timeout_secs).await;
-    if resp.ok {
+    // ship()'s pipeline returns ok_data even on a pipeline failure (rsync /
+    // start errors are stuffed into AppExecResult.exit_code). Inspect that so
+    // the HTTP envelope never reports success while the app is actually down.
+    let exit_code = resp
+        .data
+        .as_ref()
+        .and_then(|d| d.get("exit_code"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if resp.ok && exit_code == 0 {
         Json(json!({
             "success": true,
             "data": resp.data.unwrap_or(json!({"ok": true})),
         }))
         .into_response()
     } else {
-        let err_msg = resp.error.unwrap_or_else(|| "unknown error".to_string());
+        let err_msg = resp.error.unwrap_or_else(|| {
+            "ship pipeline failed — app may be down, check atelier logs".to_string()
+        });
         let status = if err_msg.starts_with("BUILD_BUSY") {
             StatusCode::CONFLICT
         } else if err_msg.starts_with("app not found") {

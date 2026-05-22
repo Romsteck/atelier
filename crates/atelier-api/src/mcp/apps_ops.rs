@@ -1330,7 +1330,9 @@ impl AppsContext {
 
         let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
         let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
-        let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800).max(1));
+        // Clamp 1s..=2h — aligns with ship() and prevents a caller from
+        // pinning an orchestrator task on a quasi-infinite timeout.
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800).clamp(1, 7200));
         let started = Instant::now();
         let remote_src = format!("/opt/homeroute/apps/{}/src", slug);
         let local_src = app.src_dir();
@@ -1632,22 +1634,21 @@ impl AppsContext {
             );
 
             // 6) restart the app so the freshly rsynced artefacts are picked up.
-            // Best-effort; if start fails we still consider the build OK and surface the warning.
+            // A start failure means the app is down — the build must NOT report
+            // success (exit_code != 0 surfaces as success:false to callers).
             let restart_started = Instant::now();
-            if let Err(e) = supervisor_for_pipeline.start(&slug_for_pipeline).await {
-                warn!(slug = %slug_for_pipeline, error = %e, "build: post-rsync start failed");
-                emit_step(
-                    5,
-                    "restart",
-                    restart_started.elapsed().as_millis() as u64,
-                    Some(format!("start failed: {e}")),
-                );
-            } else {
-                emit_step(
-                    5,
-                    "restart",
-                    restart_started.elapsed().as_millis() as u64,
-                    None,
+            let start_err = supervisor_for_pipeline.start(&slug_for_pipeline).await.err();
+            emit_step(
+                5,
+                "restart",
+                restart_started.elapsed().as_millis() as u64,
+                start_err.as_ref().map(|e| format!("start failed: {e}")),
+            );
+            if let Some(e) = start_err {
+                error!(slug = %slug_for_pipeline, error = %e, "build: post-rsync start failed — app is down");
+                return acc.into_result(
+                    format!("artefacts rebuilt but the app failed to start: {e}"),
+                    started,
                 );
             }
 
@@ -1953,14 +1954,10 @@ impl AppsContext {
                 None,
             );
 
-            // 3) Restart supervisor.
+            // 3) Restart supervisor. A start failure means the app is down —
+            // ship must report failure (exit_code != 0), not success.
             let restart_started = Instant::now();
-            let restart_msg = if let Err(e) = supervisor_for_pipeline.start(&slug_for_pipeline).await {
-                warn!(slug = %slug_for_pipeline, error = %e, "ship: post-rsync start failed");
-                Some(format!("start failed: {e}"))
-            } else {
-                None
-            };
+            let start_err = supervisor_for_pipeline.start(&slug_for_pipeline).await.err();
             emit_build_event(
                 &app_build_tx,
                 &slug_for_pipeline,
@@ -1968,10 +1965,17 @@ impl AppsContext {
                 Some(3),
                 Some(3),
                 Some("restart".to_string()),
-                restart_msg,
+                start_err.as_ref().map(|e| format!("start failed: {e}")),
                 Some(restart_started.elapsed().as_millis() as u64),
                 None,
             );
+            if let Some(e) = start_err {
+                error!(slug = %slug_for_pipeline, error = %e, "ship: post-rsync start failed — app is down");
+                return acc.into_result(
+                    format!("artefacts shipped but the app failed to start: {e}"),
+                    started,
+                );
+            }
 
             info!(slug = %slug_for_pipeline, duration_ms = started.elapsed().as_millis() as u64, "ship: ok");
             acc.into_result_ok(started)
@@ -1986,7 +1990,16 @@ impl AppsContext {
         };
 
         let total_ms = started.elapsed().as_millis() as u64;
-        if resp.ok {
+        // The pipeline returns ok_data even on failure (exit_code stuffed into
+        // AppExecResult) — inspect it so a failed ship emits "error", not
+        // "finished".
+        let exit_code = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("exit_code"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if resp.ok && exit_code == 0 {
             emit_build_event(
                 &self.app_build_tx,
                 &slug,
@@ -1999,7 +2012,17 @@ impl AppsContext {
                 None,
             );
         } else {
-            let err_msg = resp.error.clone().unwrap_or_else(|| "ship failed".into());
+            let err_msg = resp
+                .error
+                .clone()
+                .or_else(|| {
+                    resp.data
+                        .as_ref()
+                        .and_then(|d| d.get("stderr"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| truncate(s, 512))
+                })
+                .unwrap_or_else(|| "ship failed".into());
             emit_build_event(
                 &self.app_build_tx,
                 &slug,

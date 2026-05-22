@@ -75,9 +75,7 @@ impl McpState {
             edge,
             git: state.git.clone(),
             base_domain: state.context_generator.base_domain.clone(),
-            build_locks: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            build_locks: state.build_locks.clone(),
             app_build_tx,
         };
         Some(Self {

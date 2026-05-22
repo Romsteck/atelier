@@ -30,6 +30,13 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RESTART_RESET_AFTER: Duration = Duration::from_secs(300);
 const MAX_RESTARTS_PER_MIN: u32 = 10;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// Consecutive 10s health-check failures before the health loop escalates to a
+/// supervised restart (≈60s of an unresponsive HTTP server while the systemd
+/// unit is still active).
+const HEALTH_FAIL_THRESHOLD: u32 = 6;
+/// Minimum delay between two health-driven restarts of the same app, so a
+/// permanently-wedged app restarts at most once per window instead of looping.
+const HEALTH_ESCALATION_COOLDOWN: Duration = Duration::from_secs(300);
 /// Default systemd slice for apps spawned by Atelier. Override with
 /// `ATELIER_APP_SLICE` (used during the CloudMaster→Medion transition where
 /// the legacy slice name `hr-apps.slice` must be preserved).
@@ -73,6 +80,8 @@ struct SupervisedProcess {
     health: Option<JoinHandle<()>>,
     /// Whether stop() was requested (suppresses respawn).
     stop_requested: bool,
+    /// Last time the health loop escalated to a restart (cooldown guard).
+    last_health_escalation: Option<Instant>,
 }
 
 impl SupervisedProcess {
@@ -89,6 +98,7 @@ impl SupervisedProcess {
             watcher: None,
             health: None,
             stop_requested: false,
+            last_health_escalation: None,
         }
     }
 
@@ -144,7 +154,9 @@ impl AppSupervisor {
                 .await
                 .with_context(|| format!("assigning port for {slug}"))?;
             app.port = port;
-            self.registry.upsert(app.clone()).await.ok();
+            if let Err(e) = self.registry.upsert(app.clone()).await {
+                warn!(app_slug = slug, error = %e, "start: failed to persist assigned port to registry");
+            }
         }
 
         let proc_arc = self.get_or_create_process(slug, app.port).await;
@@ -353,7 +365,11 @@ impl AppSupervisor {
             if app.state != state {
                 app.state = state;
                 if let Err(e) = self.registry.upsert(app.clone()).await {
-                    warn!(app_slug = slug, error = %e, "update_app_state persist failed");
+                    warn!(app_slug = slug, error = %e, "update_app_state persist failed, retrying");
+                    sleep(Duration::from_millis(200)).await;
+                    if let Err(e2) = self.registry.upsert(app.clone()).await {
+                        error!(app_slug = slug, error = %e2, "update_app_state persist failed after retry — on-disk state is stale");
+                    }
                 }
                 let proc_status = {
                     let procs = self.processes.read().await;
@@ -388,7 +404,7 @@ impl AppSupervisor {
                 old.abort();
             }
             if proc.health.is_none() {
-                proc.health = Some(self.spawn_health_loop(slug.clone(), port, health_path));
+                proc.health = Some(self.spawn_health_loop(slug.clone(), port, health_path, p.clone()));
             }
         }
     }
@@ -502,6 +518,7 @@ impl AppSupervisor {
                         slug.clone(),
                         app.port,
                         app.health_path.clone(),
+                        proc_arc.clone(),
                     ));
                 }
             }
@@ -523,7 +540,7 @@ impl AppSupervisor {
         proc.restart_history
             .retain(|t| now.duration_since(*t) < RESTART_WINDOW);
         proc.restart_history.push(now);
-        if proc.restart_history.len() as u32 > MAX_RESTARTS_PER_MIN {
+        if proc.restart_history.len() as u32 >= MAX_RESTARTS_PER_MIN {
             proc.state = AppState::Crashed;
             return false;
         }
@@ -538,28 +555,105 @@ impl AppSupervisor {
         current
     }
 
-    fn spawn_health_loop(&self, slug: String, port: u16, path: String) -> JoinHandle<()> {
+    fn spawn_health_loop(
+        &self,
+        slug: String,
+        port: u16,
+        path: String,
+        proc_arc: Arc<Mutex<SupervisedProcess>>,
+    ) -> JoinHandle<()> {
+        let supervisor = self.clone();
         tokio::spawn(async move {
+            // `consecutive_failures` counts genuine no-response failures only —
+            // those are the ones a restart can fix. A non-2xx status means the
+            // HTTP server is alive (most often a wrong health_path), so it is
+            // logged but never escalated to a restart.
             let mut consecutive_failures = 0u32;
+            let mut bad_status_streak = 0u32;
             loop {
                 sleep(HEALTH_INTERVAL).await;
-                let ok = http_health_check(port, &path).await;
-                if ok {
-                    if consecutive_failures > 0 {
-                        info!(app_slug = %slug, port, "health recovered");
+                match http_probe(port, &path).await {
+                    HealthProbe::Healthy => {
+                        if consecutive_failures > 0 || bad_status_streak > 0 {
+                            info!(app_slug = %slug, port, "health recovered");
+                        }
+                        consecutive_failures = 0;
+                        bad_status_streak = 0;
+                        continue;
                     }
-                    consecutive_failures = 0;
-                } else {
-                    consecutive_failures += 1;
-                    if consecutive_failures >= 3 {
-                        warn!(
-                            app_slug = %slug,
-                            port,
-                            failures = consecutive_failures,
-                            "health check failing"
-                        );
+                    HealthProbe::BadStatus(code) => {
+                        // Server answered — restarting cannot fix a non-2xx
+                        // health_path. Log on the first hit then every ~5min.
+                        consecutive_failures = 0;
+                        if bad_status_streak % 30 == 0 {
+                            warn!(
+                                app_slug = %slug,
+                                port,
+                                status = code,
+                                health_path = %path,
+                                "health check returns non-2xx — app is up; check its health_path (not restarting)"
+                            );
+                        }
+                        bad_status_streak += 1;
+                        continue;
+                    }
+                    HealthProbe::NoResponse => {
+                        bad_status_streak = 0;
+                        consecutive_failures += 1;
                     }
                 }
+                if consecutive_failures < HEALTH_FAIL_THRESHOLD {
+                    if consecutive_failures >= 3 {
+                        warn!(app_slug = %slug, port, failures = consecutive_failures, "health check failing (no response)");
+                    }
+                    continue;
+                }
+
+                // Threshold reached. If the systemd unit is no longer active the
+                // watcher already drives the respawn — only escalate when the
+                // process is alive but its HTTP server is wedged.
+                if !unit_is_active(&slug).await {
+                    debug!(app_slug = %slug, "health: unit inactive, leaving respawn to watcher");
+                    consecutive_failures = 0;
+                    continue;
+                }
+
+                // Cooldown guard: never escalate twice within the window so a
+                // permanently-wedged app cannot enter a tight restart loop.
+                let escalate = {
+                    let mut proc = proc_arc.lock().await;
+                    let now = Instant::now();
+                    let recent = proc
+                        .last_health_escalation
+                        .map(|t| now.duration_since(t) < HEALTH_ESCALATION_COOLDOWN)
+                        .unwrap_or(false);
+                    if !recent {
+                        proc.last_health_escalation = Some(now);
+                    }
+                    !recent
+                };
+                if !escalate {
+                    warn!(app_slug = %slug, "health: app still unresponsive but within escalation cooldown — not restarting");
+                    consecutive_failures = 0;
+                    continue;
+                }
+
+                error!(
+                    app_slug = %slug,
+                    port,
+                    failures = consecutive_failures,
+                    "health: app unresponsive while unit active — escalating to restart"
+                );
+                // Detached: restart() → stop() aborts THIS task, so the restart
+                // must outlive it. start() then spawns a fresh health loop.
+                let sup = supervisor.clone();
+                let s = slug.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = sup.restart(&s).await {
+                        error!(app_slug = %s, error = %e, "health: escalated restart failed");
+                    }
+                });
+                return;
             }
         })
     }
@@ -723,12 +817,24 @@ async fn port_is_free(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).await.is_err()
 }
 
-async fn http_health_check(port: u16, path: &str) -> bool {
+/// Outcome of an HTTP health probe — distinguishes a genuinely unresponsive
+/// server (a restart may help) from one that answers with a non-2xx status
+/// (alive — a restart cannot fix a wrong health_path or an app-level error).
+enum HealthProbe {
+    /// Server answered with a 2xx/3xx status.
+    Healthy,
+    /// Server answered HTTP but with a status outside 2xx/3xx.
+    BadStatus(u16),
+    /// No usable HTTP response at all (connect refused, timeout, truncated).
+    NoResponse,
+}
+
+async fn http_probe(port: u16, path: &str) -> HealthProbe {
     let connect = TcpStream::connect(("127.0.0.1", port));
     let stream_res = tokio::time::timeout(HEALTH_TIMEOUT, connect).await;
     let mut stream = match stream_res {
         Ok(Ok(s)) => s,
-        _ => return false,
+        _ => return HealthProbe::NoResponse,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let request = format!(
@@ -736,27 +842,31 @@ async fn http_health_check(port: u16, path: &str) -> bool {
         path, port
     );
     if stream.write_all(request.as_bytes()).await.is_err() {
-        return false;
+        return HealthProbe::NoResponse;
     }
     let mut buf = [0u8; 256];
     let read = tokio::time::timeout(HEALTH_TIMEOUT, stream.read(&mut buf)).await;
     let n = match read {
         Ok(Ok(n)) if n > 0 => n,
-        _ => return false,
+        _ => return HealthProbe::NoResponse,
     };
     let resp = String::from_utf8_lossy(&buf[..n]);
     let line = match resp.lines().next() {
         Some(l) => l,
-        None => return false,
+        None => return HealthProbe::NoResponse,
     };
     if !line.starts_with("HTTP/") {
-        return false;
+        return HealthProbe::NoResponse;
     }
-    line.split_whitespace()
+    match line
+        .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
-        .map(|c| (200..400).contains(&c))
-        .unwrap_or(false)
+    {
+        Some(code) if (200..400).contains(&code) => HealthProbe::Healthy,
+        Some(code) => HealthProbe::BadStatus(code),
+        None => HealthProbe::NoResponse,
+    }
 }
 
 #[cfg(test)]

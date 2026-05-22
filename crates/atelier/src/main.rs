@@ -80,6 +80,11 @@ async fn main() -> Result<()> {
     )
     .await
     .expect("Failed to load port registry");
+
+    // apps.json and port-registry.json are persisted independently — a crash
+    // between the two writes can desync them. Repair before adopting apps.
+    reconcile_registries(&app_registry, &port_registry).await;
+
     let supervisor = Arc::new(hr_apps::AppSupervisor::new(
         app_registry.clone(),
         port_registry.clone(),
@@ -189,6 +194,49 @@ fn seed_apps_data(data_dir: &PathBuf, state_dir: &PathBuf) {
             Err(err) => warn!(?err, src = %src.display(), "seed apps data failed"),
         }
     }
+}
+
+/// Cross-check the two persisted registries at boot. `apps.json` and
+/// `port-registry.json` are written independently (no shared transaction), so
+/// a crash between the two writes can leave them inconsistent. This pass
+/// repairs a port registry that lost an entry an app still references, and
+/// logs any orphan port assignment.
+async fn reconcile_registries(
+    app_registry: &hr_apps::AppRegistry,
+    port_registry: &hr_apps::PortRegistry,
+) {
+    let apps = app_registry.list().await;
+    let ports = port_registry.snapshot().await;
+    let app_slugs: std::collections::HashSet<&str> =
+        apps.iter().map(|a| a.slug.as_str()).collect();
+
+    let mut conflicts = 0u32;
+    for app in &apps {
+        if app.port == 0 {
+            continue;
+        }
+        match port_registry.ensure(&app.slug, app.port).await {
+            Ok(true) => {}
+            Ok(false) => conflicts += 1,
+            Err(err) => warn!(slug = %app.slug, ?err, "reconcile: port-registry repair failed"),
+        }
+    }
+
+    let mut orphans = 0u32;
+    for (slug, port) in &ports {
+        if !app_slugs.contains(slug.as_str()) {
+            orphans += 1;
+            warn!(slug = %slug, port, "reconcile: orphan port assignment (no matching app)");
+        }
+    }
+
+    info!(
+        apps = apps.len(),
+        ports = ports.len(),
+        conflicts,
+        orphans,
+        "registry reconciliation done"
+    );
 }
 
 fn open_task_store(state_dir: &PathBuf) -> Arc<hr_common::task_store::TaskStore> {

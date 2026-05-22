@@ -52,7 +52,7 @@ ssh "$MEDION" '
 
 echo "→ healthcheck $HR_FLOWD_HEALTH (via $MEDION)"
 for i in 1 2 3 4 5; do
-  if ssh "$MEDION" "curl -fsS '$HR_FLOWD_HEALTH'" | tee /dev/stderr | jq -e '.ok == true' >/dev/null 2>&1; then
+  if ssh "$MEDION" "curl -fsS '$HR_FLOWD_HEALTH'" | tee /dev/stderr | jq -e '(.ok == true) or (.status == "ok")' >/dev/null 2>&1; then
     echo "→ hr-flowd is up"
     exit 0
   fi

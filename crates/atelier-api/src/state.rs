@@ -34,6 +34,13 @@ pub struct ApiState {
     pub db_manager: Arc<DbManager>,
     pub todos_manager: Arc<TodosManager>,
     pub context_generator: Arc<ContextGenerator>,
+
+    /// Per-slug build/ship locks, created once at boot and shared by the HTTP
+    /// `ship` route and the MCP `app.build`/`app.ship` handlers. Without a
+    /// shared map each request rebuilds an empty one and the BUILD_BUSY guard
+    /// never fires.
+    pub build_locks:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl ApiState {
@@ -71,6 +78,7 @@ impl ApiState {
             db_manager,
             todos_manager,
             context_generator,
+            build_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }

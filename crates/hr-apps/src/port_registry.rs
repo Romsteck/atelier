@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-const REGISTRY_PATH: &str = "/opt/homeroute/data/port-registry.json";
+// Atelier's canonical registry location post-rapatriement (2026-05-09).
+// `main.rs` always passes an explicit path via `load_from`; this default only
+// applies to a bare `load()` call.
+const REGISTRY_PATH: &str = "/opt/atelier/data/port-registry.json";
 const BASE_PORT: u16 = 3001;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,7 +28,7 @@ pub struct PortRegistry {
 }
 
 impl PortRegistry {
-    /// Load the registry from the default path (`/opt/homeroute/data/port-registry.json`).
+    /// Load the registry from the default path (`/opt/atelier/data/port-registry.json`).
     pub async fn load() -> Result<Self> {
         Self::load_from(PathBuf::from(REGISTRY_PATH), BASE_PORT).await
     }
@@ -93,6 +96,35 @@ impl PortRegistry {
             info!(slug = %slug, "PortRegistry release");
         }
         Ok(())
+    }
+
+    /// Ensure `slug` maps to `port`. Used by the boot reconciliation pass to
+    /// repair a port registry that lost an entry (e.g. a crash between the
+    /// port-registry write and the apps.json write — the two files are not
+    /// updated atomically together).
+    ///
+    /// Returns `Ok(true)` if the mapping is now present and correct,
+    /// `Ok(false)` if `slug` already maps to a *different* port (a genuine
+    /// conflict that is logged but left untouched for an operator to resolve).
+    pub async fn ensure(&self, slug: &str, port: u16) -> Result<bool> {
+        let mut assignments = self.assignments.write().await;
+        match assignments.get(slug) {
+            Some(&existing) if existing == port => return Ok(true),
+            Some(&existing) => {
+                warn!(
+                    slug = %slug,
+                    existing,
+                    requested = port,
+                    "PortRegistry: ensure conflict — keeping existing assignment"
+                );
+                return Ok(false);
+            }
+            None => {}
+        }
+        assignments.insert(slug.to_string(), port);
+        Self::persist(&self.path, self.base_port, &assignments).await?;
+        info!(slug = %slug, port, "PortRegistry: ensure inserted missing assignment");
+        Ok(true)
     }
 
     /// Get the assigned port for a slug, without creating one.
