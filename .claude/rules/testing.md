@@ -13,11 +13,7 @@ curl -s https://app.mynetwk.biz/api/<route> | jq
 curl -s -o /dev/null -w "%{http_code}\n" https://app.mynetwk.biz/api/<route>
 
 # 3. Logs propres
-journalctl -u atelier --since "1 min ago" | grep -iE 'error|warn' | tail -20
-
-# 4. Pendant la phase parallèle : comparer parité avec homeroute
-diff <(curl -s https://proxy.mynetwk.biz/api/<route> | jq -S .) \
-     <(curl -s https://app.mynetwk.biz/api/<route> | jq -S .)
+ssh romain@10.0.0.254 "sudo journalctl -u atelier --since '1 min ago' | grep -iE 'error|warn' | tail -20"
 ```
 
 ## Données de test

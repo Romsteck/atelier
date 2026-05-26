@@ -88,6 +88,12 @@ pub enum FieldType {
     MultiChoice,
     Lookup,
     Formula,
+    /// Like `Currency` (NUMERIC(20,6)) but serialised as a JSON string
+    /// instead of an f64 — preserves full precision for amounts beyond
+    /// 2^53 cents. New apps should prefer this over `Currency`/`Decimal`
+    /// when they care about precision. Existing apps can migrate column
+    /// by column; cf. the C2 finding in the dataverse audit.
+    Money,
 }
 
 impl FieldType {
@@ -101,7 +107,7 @@ impl FieldType {
         match self {
             Self::Text | Self::Email | Self::Url | Self::Phone => "TEXT",
             Self::Number => "BIGINT",
-            Self::Decimal | Self::Currency | Self::Percent => "NUMERIC(20, 6)",
+            Self::Decimal | Self::Currency | Self::Percent | Self::Money => "NUMERIC(20, 6)",
             Self::Boolean => "BOOLEAN",
             Self::DateTime => "TIMESTAMPTZ",
             Self::Date => "DATE",
@@ -127,7 +133,7 @@ impl FieldType {
     pub fn graphql_type_name(&self) -> &'static str {
         match self {
             Self::Text | Self::Email | Self::Url | Self::Phone | Self::Time | Self::Duration
-            | Self::Choice | Self::Decimal | Self::Currency | Self::Percent => "String",
+            | Self::Choice | Self::Decimal | Self::Currency | Self::Percent | Self::Money => "String",
             Self::Number | Self::AutoIncrement | Self::Lookup => "Int",
             Self::Boolean => "Boolean",
             Self::DateTime => "DateTime",
@@ -162,6 +168,7 @@ impl FieldType {
             Self::MultiChoice => "multi_choice",
             Self::Lookup => "lookup",
             Self::Formula => "formula",
+            Self::Money => "money",
         }
     }
 
@@ -188,6 +195,7 @@ impl FieldType {
             "multi_choice" => Self::MultiChoice,
             "lookup" => Self::Lookup,
             "formula" => Self::Formula,
+            "money" => Self::Money,
             _ => return None,
         })
     }
@@ -399,6 +407,7 @@ mod tests {
             FieldType::Url, FieldType::Phone, FieldType::Currency, FieldType::Percent,
             FieldType::Duration, FieldType::Json, FieldType::Uuid, FieldType::AutoIncrement,
             FieldType::Choice, FieldType::MultiChoice, FieldType::Lookup, FieldType::Formula,
+            FieldType::Money,
         ] {
             assert!(!ty.pg_type().is_empty());
             assert!(!ty.graphql_type_name().is_empty());

@@ -33,6 +33,7 @@ use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
+        .route("/{slug}/db/schema", get(get_schema))
         .route("/{slug}/db/tables", get(list_tables))
         .route("/{slug}/db/tables/{table}", get(describe_table))
         .route("/{slug}/db/tables/{table}/rows", post(query_rows))
@@ -113,6 +114,52 @@ fn err_response(code: StatusCode, msg: impl Into<String>) -> Response {
         Json(json!({"success": false, "error": msg.into()})),
     )
         .into_response()
+}
+
+/// GET /api/apps/{slug}/db/schema
+async fn get_schema(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = require_pg(&state, &slug).await {
+        return r;
+    }
+    let dv = match state.dv.as_ref() {
+        Some(m) => m,
+        None => {
+            return err_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "dataverse manager not initialised",
+            );
+        }
+    };
+    let engine = match dv.engine_for(&slug).await {
+        Ok(e) => e,
+        Err(e) => {
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("dataverse engine: {e}"),
+            );
+        }
+    };
+    match engine.get_schema().await {
+        Ok(schema) => {
+            info!(
+                slug = %slug,
+                tables = schema.tables.len(),
+                relations = schema.relations.len(),
+                "AppDb get_schema ok"
+            );
+            ok_data(schema)
+        }
+        Err(e) => err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("get_schema: {e}"),
+        ),
+    }
 }
 
 /// GET /api/apps/{slug}/db/tables

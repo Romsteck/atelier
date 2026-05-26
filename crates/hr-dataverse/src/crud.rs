@@ -96,6 +96,22 @@ fn param_for_column(value: &Value, field_type: FieldType) -> (QueryParam, Option
             let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
             (QueryParam::Text(text), Some("::jsonb"))
         }
+        (FieldType::Money, _) => {
+            // Money is stored as NUMERIC(20,6) but received on the wire as
+            // either a JSON string (preferred, full precision) or a JSON
+            // number (legacy / convenience). Bind as text + cast on the
+            // SQL side so Postgres parses the decimal directly. Reject
+            // anything that can't be turned into a string upfront — sqlx
+            // would otherwise error mid-execute with a less actionable
+            // message.
+            let text = match value {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => "0".to_string(), // payload validation should never let
+                                      // arrays/objects through to here
+            };
+            (QueryParam::Text(text), Some("::numeric"))
+        }
         _ => (json_to_query_param(value), None),
     }
 }

@@ -436,7 +436,15 @@ fn check_binary(op: BinOp, l: Type, r: Type) -> Result<Type> {
             )));
         }
         // / always promotes to Float; others use unification.
-        let unified = Type::unify(l, r).unwrap_or(Type::Number(NumKind::Float));
+        // After the is_number()/Null guards above, unify() should always
+        // succeed; surface a precise error rather than silently falling back
+        // to Float if the invariant is ever violated.
+        let unified = Type::unify(l, r).ok_or_else(|| {
+            Error::Type(format!(
+                "arithmetic `{:?}` cannot unify {} and {}",
+                op, l, r
+            ))
+        })?;
         if op == Div {
             return Ok(Type::Number(NumKind::Float));
         }

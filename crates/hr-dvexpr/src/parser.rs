@@ -2,8 +2,14 @@ use crate::ast::{BinOp, ContextRoot, Expr, Literal, UnOp};
 use crate::error::{Error, Result};
 use crate::lexer::{Tok, Token};
 
+/// Hard cap on nested-expression depth. Defends against stack overflow on
+/// pathological inputs like `(((((…)))))` or `------…x`. 64 is generous
+/// for hand-written formulas while still well below the typical 1-2 MB
+/// thread stack budget.
+pub const MAX_DEPTH: usize = 64;
+
 pub fn parse(tokens: &[Token]) -> Result<Expr> {
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser { tokens, pos: 0, depth: 0 };
     let expr = p.parse_or()?;
     if p.pos < tokens.len() {
         return Err(Error::Parse {
@@ -17,6 +23,7 @@ pub fn parse(tokens: &[Token]) -> Result<Expr> {
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -58,9 +65,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn check_depth(&self) -> Result<()> {
+        if self.depth > MAX_DEPTH {
+            return Err(Error::Parse {
+                offset: self.peek_offset(),
+                message: format!("expression too deeply nested (max depth {})", MAX_DEPTH),
+            });
+        }
+        Ok(())
+    }
+
     // expr := or
     // or   := and ("||" and)*
     fn parse_or(&mut self) -> Result<Expr> {
+        self.depth += 1;
+        self.check_depth()?;
         let mut lhs = self.parse_and()?;
         while self.eat(&Tok::OrOr) {
             let rhs = self.parse_and()?;
@@ -70,6 +89,7 @@ impl<'a> Parser<'a> {
                 rhs: Box::new(rhs),
             };
         }
+        self.depth -= 1;
         Ok(lhs)
     }
 
@@ -154,25 +174,29 @@ impl<'a> Parser<'a> {
 
     // unary := ("-"|"!") unary | postfix
     fn parse_unary(&mut self) -> Result<Expr> {
-        match self.peek() {
+        self.depth += 1;
+        self.check_depth()?;
+        let result = match self.peek() {
             Some(Tok::Minus) => {
                 self.pos += 1;
                 let rhs = self.parse_unary()?;
-                Ok(Expr::Unary {
+                Expr::Unary {
                     op: UnOp::Neg,
                     rhs: Box::new(rhs),
-                })
+                }
             }
             Some(Tok::Bang) => {
                 self.pos += 1;
                 let rhs = self.parse_unary()?;
-                Ok(Expr::Unary {
+                Expr::Unary {
                     op: UnOp::Not,
                     rhs: Box::new(rhs),
-                })
+                }
             }
-            _ => self.parse_postfix(),
-        }
+            _ => self.parse_postfix()?,
+        };
+        self.depth -= 1;
+        Ok(result)
     }
 
     // postfix := primary ("??" primary)*
@@ -382,5 +406,44 @@ mod tests {
         let _ = p("-x");
         let _ = p("!flag");
         let _ = p("--3"); // (-(-3))
+    }
+
+    #[test]
+    fn rejects_excessive_paren_nesting() {
+        let mut s = String::new();
+        for _ in 0..(MAX_DEPTH + 10) {
+            s.push('(');
+        }
+        s.push('1');
+        for _ in 0..(MAX_DEPTH + 10) {
+            s.push(')');
+        }
+        let toks = tokenize(&s).unwrap();
+        assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn rejects_excessive_unary_chain() {
+        let mut s = String::new();
+        for _ in 0..(MAX_DEPTH + 10) {
+            s.push('-');
+        }
+        s.push('1');
+        let toks = tokenize(&s).unwrap();
+        assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn accepts_modest_nesting() {
+        let mut s = String::new();
+        for _ in 0..10 {
+            s.push('(');
+        }
+        s.push('1');
+        for _ in 0..10 {
+            s.push(')');
+        }
+        let toks = tokenize(&s).unwrap();
+        assert!(parse(&toks).is_ok());
     }
 }

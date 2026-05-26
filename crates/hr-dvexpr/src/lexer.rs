@@ -1,5 +1,11 @@
 use crate::error::{Error, Result};
 
+/// Hard cap on input length. Filter expressions in `$filter` URLs are
+/// already constrained by HTTP server limits; this is a defense-in-depth
+/// to prevent linear-time-but-very-wide attacks (e.g. a 10 MB string
+/// literal allocated upfront).
+pub const MAX_INPUT_LEN: usize = 16 * 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     // Literals
@@ -40,6 +46,12 @@ pub struct Token {
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>> {
+    if input.len() > MAX_INPUT_LEN {
+        return Err(Error::Lex {
+            offset: 0,
+            message: format!("input too large: {} bytes (max {})", input.len(), MAX_INPUT_LEN),
+        });
+    }
     let bytes = input.as_bytes();
     let mut i = 0;
     let mut out = Vec::new();
@@ -330,5 +342,11 @@ mod tests {
     #[test]
     fn unterminated_string() {
         assert!(tokenize("'abc").is_err());
+    }
+
+    #[test]
+    fn rejects_input_above_max_len() {
+        let s = "x".repeat(MAX_INPUT_LEN + 1);
+        assert!(tokenize(&s).is_err());
     }
 }

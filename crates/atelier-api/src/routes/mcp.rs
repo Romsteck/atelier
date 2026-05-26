@@ -17,6 +17,7 @@ use axum::routing::post;
 use hr_docs::{DocType, Frontmatter, Store, validate_app_id, validate_entry_name};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -51,6 +52,9 @@ pub struct McpState {
     pub apps_ctx: Option<crate::mcp::apps_ops::AppsContext>,
     /// FTS5 index for `docs.search`. None if FTS init failed at boot.
     pub docs_index: Option<Arc<hr_docs::Index>>,
+    /// Docs filesystem root. Mirrors `ApiState::docs_dir`; required because
+    /// `hr_docs::DEFAULT_DOCS_DIR` is a homeroute-era path absent on Medion.
+    pub docs_dir: PathBuf,
 }
 
 impl McpState {
@@ -83,6 +87,7 @@ impl McpState {
             git: state.git.clone(),
             apps_ctx: Some(apps_ctx),
             docs_index: state.docs_index.clone(),
+            docs_dir: state.docs_dir.clone(),
         })
     }
 }
@@ -403,8 +408,32 @@ fn handle_tools_list(id: Value, project_slug: &Option<String>) -> Value {
 /// server is queried with `?project=<slug>`. Any name here MUST also appear
 /// (1) in `tool_definitions_project()` with a schema, and (2) as a match arm
 /// in `handle_tools_call`. The `project_scoped_tools_are_consistent` test
-/// enforces (1); a missing arm in (2) surfaces as "Tool not found" at runtime.
+/// enforces (1); `project_scoped_tools_are_dispatched` enforces (2) by
+/// requiring `is_dispatched_project_tool()` to stay in sync with the match.
 fn is_project_simplified_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "status" | "start" | "stop" | "restart" | "exec" | "logs"
+            | "db_tables" | "db_schema" | "db_query" | "db_exec"
+            | "db_overview" | "db_count_rows"
+            | "db_get_schema" | "db_sync_schema"
+            | "db_create_table" | "db_drop_table"
+            | "db_add_column" | "db_remove_column" | "db_create_relation"
+            | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
+            | "docs_completeness" | "docs_diagram_get"
+            | "docs_update" | "docs_delete" | "docs_diagram_set"
+            | "git_log" | "git_branches"
+            | "todos_list" | "todos_create" | "todos_update" | "todos_delete"
+    )
+}
+
+/// Returns true iff `name` has a corresponding dispatch arm in the
+/// project-scope block of `handle_tools_call`. MUST be kept in sync with that
+/// match — the `project_scoped_tools_are_dispatched` test enforces parity
+/// against `tool_definitions_project()`. A drift surfaces at runtime as
+/// "Tool not found" (e.g. `db_count_rows` before this guard was added).
+#[cfg(test)]
+fn is_dispatched_project_tool(name: &str) -> bool {
     matches!(
         name,
         "status" | "start" | "stop" | "restart" | "exec" | "logs"
@@ -501,13 +530,13 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "git.log" => tool_git_log(id, &arguments, state).await,
         "git.branches" => tool_git_branches(id, &arguments, state).await,
         // ── Docs (v2) ──
-        "docs.overview" => tool_docs_overview(id, &arguments).await,
-        "docs.list_entries" => tool_docs_list_entries(id, &arguments).await,
-        "docs.get" => tool_docs_get(id, &arguments).await,
+        "docs.overview" => tool_docs_overview(id, &arguments, state).await,
+        "docs.list_entries" => tool_docs_list_entries(id, &arguments, state).await,
+        "docs.get" => tool_docs_get(id, &arguments, state).await,
         "docs.search" => tool_docs_search(id, &arguments, state).await,
-        "docs.list_apps" => tool_docs_list_apps(id).await,
-        "docs.completeness" => tool_docs_completeness(id, &arguments).await,
-        "docs.diagram_get" => tool_docs_diagram_get(id, &arguments).await,
+        "docs.list_apps" => tool_docs_list_apps(id, state).await,
+        "docs.completeness" => tool_docs_completeness(id, &arguments, state).await,
+        "docs.diagram_get" => tool_docs_diagram_get(id, &arguments, state).await,
         "docs.update" => tool_docs_update(id, &arguments, state).await,
         "docs.delete" => tool_docs_delete(id, &arguments, state).await,
         "docs.diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
@@ -577,12 +606,14 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_add_column" => tool_db_add_column(id, &arguments, state).await,
         "db_remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
-        "docs_overview" => tool_docs_overview(id, &arguments).await,
-        "docs_list_entries" => tool_docs_list_entries(id, &arguments).await,
-        "docs_get" => tool_docs_get(id, &arguments).await,
+        "db_overview" => tool_db_overview(id, &arguments, state).await,
+        "db_count_rows" => tool_db_count_rows(id, &arguments, state).await,
+        "docs_overview" => tool_docs_overview(id, &arguments, state).await,
+        "docs_list_entries" => tool_docs_list_entries(id, &arguments, state).await,
+        "docs_get" => tool_docs_get(id, &arguments, state).await,
         "docs_search" => tool_docs_search(id, &arguments, state).await,
-        "docs_completeness" => tool_docs_completeness(id, &arguments).await,
-        "docs_diagram_get" => tool_docs_diagram_get(id, &arguments).await,
+        "docs_completeness" => tool_docs_completeness(id, &arguments, state).await,
+        "docs_diagram_get" => tool_docs_diagram_get(id, &arguments, state).await,
         "docs_update" => tool_docs_update(id, &arguments, state).await,
         "docs_delete" => tool_docs_delete(id, &arguments, state).await,
         "docs_diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
@@ -684,8 +715,8 @@ async fn tool_git_branches(id: Value, args: &Value, state: &McpState) -> Value {
 
 // ── Docs tools (v2: structured by overview/screens/features/components + mermaid) ──
 
-fn docs_store() -> Store {
-    Store::new(hr_docs::DEFAULT_DOCS_DIR)
+fn docs_store(state: &McpState) -> Store {
+    Store::new(&state.docs_dir)
 }
 
 fn parse_doc_type(s: &str) -> Option<DocType> {
@@ -703,21 +734,21 @@ fn entry_to_json(entry: &hr_docs::DocEntry, diagram: Option<&str>) -> Value {
     })
 }
 
-async fn tool_docs_overview(id: Value, args: &Value) -> Value {
+async fn tool_docs_overview(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
     if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
-    match docs_store().overview(app_id) {
+    match docs_store(state).overview(app_id) {
         Ok(ov) => tool_success(id, serde_json::to_value(&ov).unwrap_or(json!({}))),
         Err(hr_docs::StoreError::AppNotFound(_)) => tool_error(id, &format!("No docs found for '{app_id}'")),
         Err(e) => tool_error(id, &format!("overview failed: {e}")),
     }
 }
 
-async fn tool_docs_list_entries(id: Value, args: &Value) -> Value {
+async fn tool_docs_list_entries(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
@@ -731,13 +762,13 @@ async fn tool_docs_list_entries(id: Value, args: &Value) -> Value {
             None => return tool_error(id, &format!("Invalid type '{s}'")),
         },
     };
-    match docs_store().list_entries(app_id, doc_type) {
+    match docs_store(state).list_entries(app_id, doc_type) {
         Ok(entries) => tool_success(id, json!({ "app_id": app_id, "entries": entries })),
         Err(e) => tool_error(id, &format!("list_entries failed: {e}")),
     }
 }
 
-async fn tool_docs_get(id: Value, args: &Value) -> Value {
+async fn tool_docs_get(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
@@ -753,7 +784,7 @@ async fn tool_docs_get(id: Value, args: &Value) -> Value {
     let Some(doc_type) = parse_doc_type(doc_type_str) else {
         return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
     };
-    let store = docs_store();
+    let store = docs_store(state);
     match store.read_entry(app_id, doc_type, name) {
         Ok(entry) => {
             let diagram = store.read_diagram(app_id, doc_type, &entry.name).ok().flatten();
@@ -797,8 +828,8 @@ async fn tool_docs_search(id: Value, args: &Value, state: &McpState) -> Value {
     }
 }
 
-async fn tool_docs_list_apps(id: Value) -> Value {
-    let store = docs_store();
+async fn tool_docs_list_apps(id: Value, state: &McpState) -> Value {
+    let store = docs_store(state);
     let app_ids = match store.list_app_ids() {
         Ok(v) => v,
         Err(e) => return tool_error(id, &format!("list_app_ids failed: {e}")),
@@ -823,14 +854,14 @@ async fn tool_docs_list_apps(id: Value) -> Value {
     tool_success(id, json!({ "apps": apps }))
 }
 
-async fn tool_docs_completeness(id: Value, args: &Value) -> Value {
+async fn tool_docs_completeness(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
     if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
-    let store = docs_store();
+    let store = docs_store(state);
     let overview = match store.overview(app_id) {
         Ok(o) => o,
         Err(hr_docs::StoreError::AppNotFound(_)) => {
@@ -886,7 +917,7 @@ async fn tool_docs_completeness(id: Value, args: &Value) -> Value {
     )
 }
 
-async fn tool_docs_diagram_get(id: Value, args: &Value) -> Value {
+async fn tool_docs_diagram_get(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
@@ -902,7 +933,7 @@ async fn tool_docs_diagram_get(id: Value, args: &Value) -> Value {
     let Some(doc_type) = parse_doc_type(doc_type_str) else {
         return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
     };
-    match docs_store().read_diagram(app_id, doc_type, name) {
+    match docs_store(state).read_diagram(app_id, doc_type, name) {
         Ok(opt) => tool_success(
             id,
             json!({
@@ -962,7 +993,7 @@ async fn tool_docs_update(id: Value, args: &Value, state: &McpState) -> Value {
     }
 
     // Ensure the app's docs dir exists (auto-create if missing — keeps the agent's flow simple).
-    let store = docs_store();
+    let store = docs_store(state);
     let _ = store.ensure_layout(app_id);
     if !store.app_dir(app_id).exists() {
         let _ = std::fs::create_dir_all(store.app_dir(app_id));
@@ -1013,7 +1044,7 @@ async fn tool_docs_delete(id: Value, args: &Value, state: &McpState) -> Value {
     if doc_type == DocType::Overview {
         return tool_error(id, "Cannot delete the overview");
     }
-    match docs_store().delete_entry(app_id, doc_type, name) {
+    match docs_store(state).delete_entry(app_id, doc_type, name) {
         Ok(deleted) => {
             if deleted {
                 if let Some(idx) = state.docs_index.as_ref() {
@@ -1056,7 +1087,7 @@ async fn tool_docs_diagram_set(id: Value, args: &Value, state: &McpState) -> Val
     let Some(doc_type) = parse_doc_type(doc_type_str) else {
         return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
     };
-    let store = docs_store();
+    let store = docs_store(state);
     if let Err(e) = store.write_diagram(app_id, doc_type, name, mermaid) {
         return tool_error(id, &format!("diagram_set failed: {e}"));
     }
@@ -2250,15 +2281,9 @@ async fn tool_todos_delete(id: Value, args: &Value, state: &McpState) -> Value {
 mod tests {
     use super::*;
 
-    /// Guarantees parity between `tool_definitions_project()` (what clients
-    /// discover) and `is_project_simplified_tool()` (what the dispatcher
-    /// treats as project-scoped and injects the slug into). If these drift,
-    /// a client sees a tool it cannot call (or calls one without a slug).
-    #[test]
-    fn project_scoped_tools_are_consistent() {
+    fn advertised_project_tool_names() -> Vec<String> {
         let defs = tool_definitions_project();
-        let names: Vec<String> = defs
-            .as_array()
+        defs.as_array()
             .expect("tool_definitions_project must be an array")
             .iter()
             .map(|t| {
@@ -2267,14 +2292,40 @@ mod tests {
                     .expect("every tool definition has a name")
                     .to_string()
             })
-            .collect();
+            .collect()
+    }
 
-        for name in &names {
+    /// Guarantees parity between `tool_definitions_project()` (what clients
+    /// discover) and `is_project_simplified_tool()` (what the dispatcher
+    /// treats as project-scoped and injects the slug into). If these drift,
+    /// a client sees a tool it cannot call (or calls one without a slug).
+    #[test]
+    fn project_scoped_tools_are_consistent() {
+        for name in &advertised_project_tool_names() {
             assert!(
                 is_project_simplified_tool(name),
                 "tool `{name}` is advertised by tool_definitions_project() but \
                  is_project_simplified_tool() does not recognize it. Add it \
                  there AND add a match arm in handle_tools_call."
+            );
+        }
+    }
+
+    /// Guarantees every advertised project-scoped tool has a corresponding
+    /// match arm in `handle_tools_call`. Catches the failure mode where a tool
+    /// is added to `is_project_simplified_tool()` and `tool_definitions_project()`
+    /// but the dispatcher's match falls through to the catchall, returning
+    /// "Tool not found" to the client (regression seen with `db_count_rows`
+    /// and `db_overview`). `is_dispatched_project_tool()` must mirror the
+    /// match arms below.
+    #[test]
+    fn project_scoped_tools_are_dispatched() {
+        for name in &advertised_project_tool_names() {
+            assert!(
+                is_dispatched_project_tool(name),
+                "tool `{name}` is advertised by tool_definitions_project() but \
+                 has no match arm in handle_tools_call (project-scope block). \
+                 Add the arm AND mirror the name in is_dispatched_project_tool()."
             );
         }
     }

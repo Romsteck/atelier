@@ -403,6 +403,7 @@ fn field_to_rust_type(col: &ColumnDefinition) -> &'static str {
         | FieldType::Formula => "String",
         FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => "i64",
         FieldType::Decimal | FieldType::Currency | FieldType::Percent => "f64",
+        FieldType::Money => "String",
         FieldType::Boolean => "bool",
         FieldType::DateTime => "chrono::DateTime<chrono::Utc>",
         FieldType::Date => "chrono::NaiveDate",

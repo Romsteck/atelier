@@ -226,9 +226,15 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value> {
         let li = l.as_int().unwrap();
         let ri = r.as_int().unwrap();
         return Ok(Value::Int(match op {
-            Add => li.wrapping_add(ri),
-            Sub => li.wrapping_sub(ri),
-            Mul => li.wrapping_mul(ri),
+            Add => li
+                .checked_add(ri)
+                .ok_or_else(|| Error::Eval("integer overflow in '+'".into()))?,
+            Sub => li
+                .checked_sub(ri)
+                .ok_or_else(|| Error::Eval("integer overflow in '-'".into()))?,
+            Mul => li
+                .checked_mul(ri)
+                .ok_or_else(|| Error::Eval("integer overflow in '*'".into()))?,
             Mod => {
                 if ri == 0 {
                     return Err(Error::Eval("modulo by zero".into()));
@@ -482,5 +488,21 @@ mod tests {
         // null || false → null
         let v = eval(&typed("null || false"), &row, &ctx).unwrap();
         assert!(v.is_null());
+    }
+
+    #[test]
+    fn int_overflow_returns_error() {
+        let row = MapRow::new();
+        let ctx = EvalContext::default();
+        // i64::MAX + 1 must not silently wrap to i64::MIN.
+        let expr = typed("9223372036854775807 + 1");
+        let err = eval(&expr, &row, &ctx).unwrap_err();
+        assert!(matches!(err, Error::Eval(_)));
+        // i64::MIN - 1 underflow: -i64::MAX - 2 == -(2^63 + 1).
+        let expr = typed("-9223372036854775807 - 2");
+        assert!(eval(&expr, &row, &ctx).is_err());
+        // Mul overflow.
+        let expr = typed("9223372036854775807 * 2");
+        assert!(eval(&expr, &row, &ctx).is_err());
     }
 }

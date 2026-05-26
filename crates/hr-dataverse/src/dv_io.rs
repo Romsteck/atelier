@@ -115,9 +115,9 @@ fn read_user_column(row: &PgRow, col: &ColumnDefinition) -> Result<Value> {
         FieldType::Decimal | FieldType::Currency | FieldType::Percent => {
             // PG `NUMERIC` decodes via the bigdecimal feature; we then
             // narrow to f64 for the JSON wire shape. Lossy on very large
-            // / very precise values; acceptable for currency at typical
-            // ranges, and consumers that need full precision can declare
-            // the column as `Text`.
+            // / very precise values; this is a documented tradeoff —
+            // apps that need full precision should use `FieldType::Money`
+            // (string-serialized) instead.
             match row
                 .try_get::<Option<sqlx_core::types::BigDecimal>, _>(name)
                 .map_err(map_err)?
@@ -128,6 +128,20 @@ fn read_user_column(row: &PgRow, col: &ColumnDefinition) -> Result<Value> {
                     let f = f64::from_str(&s).unwrap_or(0.0);
                     Value::Number(Number::from_f64(f).unwrap_or_else(|| Number::from(0)))
                 }
+                None => Value::Null,
+            }
+        }
+        FieldType::Money => {
+            // Full-precision string serialisation. The wire shape is a
+            // JSON string, not a number, so clients must `parseFloat` /
+            // `Decimal(s)` on their side. Counterpart: writes accept
+            // both `"123.456"` and the legacy `123.456` number form
+            // (see `query_param_from_json` in this module).
+            match row
+                .try_get::<Option<sqlx_core::types::BigDecimal>, _>(name)
+                .map_err(map_err)?
+            {
+                Some(d) => Value::String(d.to_string()),
                 None => Value::Null,
             }
         }

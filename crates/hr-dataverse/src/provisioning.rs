@@ -13,7 +13,7 @@
 
 use rand::RngCore;
 
-use crate::sqlx::{self, PgPool, PgPoolOptions};
+use crate::sqlx::{self, PgPool};
 use crate::engine::INIT_METADATA_SQL;
 use crate::error::{DataverseError, Result};
 use crate::migration::quote_ident;
@@ -71,6 +71,7 @@ pub async fn app_exists(admin: &PgPool, slug: &str) -> Result<bool> {
 /// `CREATEDB`/`CREATEROLE`). The admin pool stays connected to its original
 /// database; this function opens a temporary second pool to the new DB to
 /// run [`INIT_METADATA_SQL`].
+#[tracing::instrument(level = "info", skip(admin, config), fields(slug = %slug))]
 pub async fn provision_app(
     admin: &PgPool,
     config: &ProvisioningConfig,
@@ -166,16 +167,31 @@ pub async fn provision_app(
     //    the `_dv_set_updated_at` function are owned by the app role,
     //    which avoids "must be owner of …" errors when the engine later
     //    re-runs init_metadata defensively.
-    let init_pool = PgPoolOptions::new()
+    //
+    //    From here on, failures must roll back both the DATABASE and the
+    //    ROLE — otherwise the app slug is stuck in a half-provisioned state
+    //    that `app_exists()` blocks at the top of this function. See
+    //    [`drop_app_artifacts`].
+    let init_pool = match crate::manager::pool_with_session_defaults()
         .max_connections(2)
         .connect(&dsn)
         .await
-        .map_err(|e| DataverseError::provisioning(slug, format!("connect new DB as app role: {}", e)))?;
+    {
+        Ok(p) => p,
+        Err(e) => {
+            drop_app_artifacts(admin, &db_name, &role_name).await;
+            return Err(DataverseError::provisioning(
+                slug,
+                format!("connect new DB as app role: {}", e),
+            ));
+        }
+    };
 
-    sqlx::raw_sql(INIT_METADATA_SQL)
-        .execute(&init_pool)
-        .await
-        .map_err(|e| DataverseError::provisioning(slug, format!("init _dv_*: {}", e)))?;
+    if let Err(e) = sqlx::raw_sql(INIT_METADATA_SQL).execute(&init_pool).await {
+        init_pool.close().await;
+        drop_app_artifacts(admin, &db_name, &role_name).await;
+        return Err(DataverseError::provisioning(slug, format!("init _dv_*: {}", e)));
+    }
     init_pool.close().await;
 
     Ok(ProvisioningResult {
@@ -187,9 +203,27 @@ pub async fn provision_app(
     })
 }
 
+/// Best-effort rollback of partial provisioning side-effects. Used when an
+/// error occurs after `CREATE DATABASE` / `CREATE ROLE` succeeded but before
+/// the app is considered live. Errors during cleanup are swallowed (logged
+/// when tracing is wired) — the original provisioning error is the one the
+/// caller actually wants to see.
+async fn drop_app_artifacts(admin: &PgPool, db_name: &str, role_name: &str) {
+    let _ = sqlx::query(&format!(
+        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+        quote_ident(db_name)
+    ))
+    .execute(admin)
+    .await;
+    let _ = sqlx::query(&format!("DROP ROLE IF EXISTS {}", quote_ident(role_name)))
+        .execute(admin)
+        .await;
+}
+
 /// Adopt an existing per-app PG database whose password we no longer
 /// have: ALTER ROLE to a fresh random password, return the new
 /// `ProvisioningResult`. Does NOT touch the database contents.
+#[tracing::instrument(level = "info", skip(admin, config), fields(slug = %slug))]
 pub async fn adopt_app(
     admin: &PgPool,
     config: &ProvisioningConfig,

@@ -73,6 +73,9 @@ impl Direction {
 
 pub const DEFAULT_TOP: u32 = 50;
 pub const MAX_TOP: u32 = 1000;
+/// Hard cap on `$skip`. Past this, deep pagination via OFFSET wastes Postgres
+/// time scanning + discarding rows; clients should switch to keyset pagination.
+pub const MAX_SKIP: u32 = 100_000;
 
 /// A parameter value bound into the produced SQL. Mirrors
 /// [`hr_dvexpr::sql::Param`] but stays inside this crate because the IPC
@@ -193,6 +196,12 @@ pub fn build_list_sql(
     let top = query.top.unwrap_or(DEFAULT_TOP).min(MAX_TOP);
     let mut limit_sql = format!(" LIMIT {}", top);
     if let Some(skip) = query.skip {
+        if skip > MAX_SKIP {
+            return Err(DataverseError::internal(format!(
+                "$skip={} exceeds MAX_SKIP={}; use keyset pagination for deeper ranges",
+                skip, MAX_SKIP
+            )));
+        }
         if skip > 0 {
             limit_sql.push_str(&format!(" OFFSET {}", skip));
         }
@@ -338,6 +347,11 @@ fn field_to_dvexpr_type(ft: FieldType) -> Option<Type> {
         // to f64). Mapping them to `Type::Text` previously made `$filter`
         // reject ordered comparisons like `amount > 0`.
         FieldType::Decimal | FieldType::Currency | FieldType::Percent => Type::FLOAT,
+        // Money is NUMERIC server-side but text on the JSON wire. We still
+        // want `$filter=amount > 100` to work, so we map it to Float for the
+        // type checker — the SQL emitter binds via TEXT and Postgres casts
+        // on comparison (NUMERIC > FLOAT promotes naturally).
+        FieldType::Money => Type::FLOAT,
         FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => Type::INT,
         FieldType::Boolean => Type::Bool,
         FieldType::DateTime => Type::Timestamp,
@@ -471,6 +485,25 @@ mod tests {
         };
         let cq = build_list_sql(&table_orders(), &q, &id()).unwrap();
         assert!(cq.sql.contains(&format!("LIMIT {}", MAX_TOP)));
+    }
+
+    #[test]
+    fn skip_above_max_rejected() {
+        let q = ListQuery {
+            skip: Some(MAX_SKIP + 1),
+            ..Default::default()
+        };
+        assert!(build_list_sql(&table_orders(), &q, &id()).is_err());
+    }
+
+    #[test]
+    fn skip_at_max_allowed() {
+        let q = ListQuery {
+            skip: Some(MAX_SKIP),
+            ..Default::default()
+        };
+        let cq = build_list_sql(&table_orders(), &q, &id()).unwrap();
+        assert!(cq.sql.contains(&format!("OFFSET {}", MAX_SKIP)));
     }
 
     #[test]

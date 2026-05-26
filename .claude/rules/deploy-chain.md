@@ -42,6 +42,21 @@ Sous le capot ([scripts/deploy-app.sh](../../scripts/deploy-app.sh)) :
 - **JAMAIS** `cargo run` en local — toujours `make deploy` (sinon le binaire ne va pas en prod sur Medion).
 - **JAMAIS** modifier les sources des apps sur Medion (`/var/lib/atelier/apps/`) — c'est de l'artefact, pas une source. Les sources canoniques sont sur CloudMaster (`/opt/homeroute/apps/<slug>/src/`).
 - **TOUJOURS** vérifier le healthcheck dans la sortie du `make deploy*` avant de considérer un déploiement réussi.
+- Toute modification d'un crate partagé encore en path-dep (`hr-common`, `hr-ipc`, `hr-docs` sous `/nvme/homeroute/crates/shared/`) doit garder homeroute compilable : `cd /nvme/homeroute && cargo build --release` avant de pousser.
+
+## Fenêtres d'indisponibilité
+
+- `make deploy` : ~5 sec où l'API Atelier est down pendant le restart. Les apps continuent à tourner.
+- `make deploy-app SLUG=<x>` : 1-3 sec d'indispo du domaine de l'app concernée. Pas d'impact sur les autres.
+
+## Rollback
+
+```bash
+# Rollback du binaire Atelier sur Medion (archive faite lors du rapatriement)
+ssh romain@10.0.0.254 "sudo tar xzf /var/backups/atelier-cloudmaster-2026-05-09.tar.gz -C /tmp \
+  && sudo cp /tmp/opt/atelier/bin/atelier /opt/atelier/bin/atelier \
+  && sudo systemctl restart atelier"
+```
 
 ## Variables Makefile
 

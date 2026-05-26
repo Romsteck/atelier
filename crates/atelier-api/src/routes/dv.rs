@@ -39,6 +39,7 @@ use crate::state::ApiState;
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/{slug}/$schema", get(get_schema))
+        .route("/{slug}/$repair", post(repair_schema))
         .route("/{slug}/{table}", get(list_rows).post(insert_row))
         .route(
             "/{slug}/{table}/{id}",
@@ -133,6 +134,38 @@ fn error_resp(code: StatusCode, msg: &str) -> Response {
     (
         code,
         Json(json!({"error": {"code": code_label(code), "message": msg}})),
+    )
+        .into_response()
+}
+
+/// Map an internal dataverse error to an HTTP response while:
+///   1. logging the full error server-side (with a fresh correlation id),
+///   2. returning a generic message + the correlation id to the client.
+///
+/// Use for any error that may originate from Postgres (`sqlx::Error`),
+/// schema introspection, or migration — exposing those raw to the client
+/// leaks internal table/relation names, constraint identifiers, and
+/// schema layout (cf. audit P1 #8).
+///
+/// Stick to `error_resp` directly for user-facing validation errors that
+/// the caller actually needs to read.
+fn db_error_resp(context: &str, e: impl std::fmt::Display + std::fmt::Debug) -> Response {
+    let correlation_id = uuid::Uuid::new_v4();
+    tracing::error!(
+        correlation_id = %correlation_id,
+        context = %context,
+        error = ?e,
+        "dataverse internal error"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": {
+                "code": "INTERNAL",
+                "message": "database error",
+                "correlation_id": correlation_id,
+            }
+        })),
     )
         .into_response()
 }
@@ -273,6 +306,60 @@ async fn audit_after(
 
 // ── Schema ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize, Default)]
+struct RepairParams {
+    /// When false, sync_schema performs active cleanup (drops orphaned
+    /// metadata, recreates missing triggers). Defaults to `true` (report
+    /// only) so accidental hits don't mutate state.
+    #[serde(default = "default_true", rename = "dry_run")]
+    dry_run: bool,
+}
+
+fn default_true() -> bool { true }
+
+/// POST /{slug}/$repair?dry_run=true
+///
+/// Surface for the engine-level drift detection (`sync_schema`). Listed
+/// in the audit as D3: lets an operator inspect / fix orphans left by a
+/// partial DDL mutation (cf. P0 #1 in the audit).
+///
+/// Requires the same auth as the schema endpoint — only users (not apps)
+/// should call this, but the policy split lives in the gateway, not here.
+async fn repair_schema(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Query(params): Query<RepairParams>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let identity = match extract_identity(&headers, &state, &slug).await {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+    // App tokens are scoped to their own data — repair is an admin op.
+    if matches!(identity, Identity::App { .. }) {
+        return error_resp(
+            StatusCode::FORBIDDEN,
+            "repair requires user identity, not app token",
+        );
+    }
+    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let engine = match dv.engine_for(&slug).await {
+        Ok(e) => e,
+        Err(e) => return db_error_resp("dv_repair", e),
+    };
+    match engine.sync_schema(params.dry_run).await {
+        Ok(report) => {
+            tracing::info!(slug = %slug, dry_run = params.dry_run, "dv_repair completed");
+            (StatusCode::OK, Json(serde_json::to_value(report).unwrap_or(Value::Null)))
+                .into_response()
+        }
+        Err(e) => db_error_resp("dv_repair", e),
+    }
+}
+
 async fn get_schema(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
@@ -287,11 +374,11 @@ async fn get_schema(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     match engine.get_schema().await {
         Ok(schema) => Json(serde_json::to_value(schema).unwrap_or(Value::Null)).into_response(),
-        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_schema: {e}")),
+        Err(e) => db_error_resp("dv_schema", e),
     }
 }
 
@@ -335,11 +422,11 @@ async fn list_rows(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_list: {e}")),
+        Err(e) => return db_error_resp("dv_list", e),
     };
     let table_def = match find_table(&schema, &table) {
         Some(t) => t,
@@ -401,7 +488,7 @@ async fn list_rows(
         Ok(r) => r,
         Err(e) => {
             error!(?e, "dv_list run failed");
-            return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_list: {e}"));
+            return db_error_resp("dv_list", e);
         }
     };
 
@@ -415,10 +502,7 @@ async fn list_rows(
                     envelope.insert("@count".into(), json!(n));
                 }
                 Err(e) => {
-                    return error_resp(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("dv_count: {e}"),
-                    );
+                    return db_error_resp("dv_count", e);
                 }
             },
             Err(e) => {
@@ -461,11 +545,11 @@ async fn get_row(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_get: {e}")),
+        Err(e) => return db_error_resp("dv_get", e),
     };
     let table_def = match find_table(&schema, &table) {
         Some(t) => t,
@@ -482,7 +566,7 @@ async fn get_row(
     match run_get(engine.pool(), table_def, &compiled.sql, &compiled.params).await {
         Ok(Some(row)) => Json(row).into_response(),
         Ok(None) => error_resp(StatusCode::NOT_FOUND, "not found"),
-        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_get: {e}")),
+        Err(e) => db_error_resp("dv_get", e),
     }
 }
 
@@ -518,11 +602,11 @@ async fn insert_row(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_insert: {e}")),
+        Err(e) => return db_error_resp("dv_insert", e),
     };
     let table_def = match find_table(&schema, &table) {
         Some(t) => t,
@@ -560,11 +644,11 @@ async fn insert_row(
             info!(slug = %slug, table = %table, "DvInsert ok");
             (StatusCode::CREATED, Json(row)).into_response()
         }
-        Ok(other) => error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("dv_insert: unexpected {:?}", other),
-        ),
-        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_insert: {e}")),
+        Ok(other) => {
+            tracing::error!(slug = %slug, table = %table, ?other, "dv_insert unexpected outcome");
+            db_error_resp("dv_insert_unexpected", format!("{:?}", other))
+        }
+        Err(e) => db_error_resp("dv_insert", e),
     }
 }
 
@@ -606,11 +690,11 @@ async fn update_row(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_update: {e}")),
+        Err(e) => return db_error_resp("dv_update", e),
     };
     let table_def = match find_table(&schema, &table) {
         Some(t) => t,
@@ -671,7 +755,7 @@ async fn update_row(
             error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_update: {e}")),
+        Err(e) => db_error_resp("dv_update", e),
     }
 }
 
@@ -702,15 +786,12 @@ async fn soft_delete_row(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
         Err(e) => {
-            return error_resp(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("dv_soft_delete: {e}"),
-            );
+            return db_error_resp("dv_soft_delete_schema", e);
         }
     };
     let table_def = match find_table(&schema, &table) {
@@ -753,10 +834,7 @@ async fn soft_delete_row(
             error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => error_resp(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("dv_soft_delete: {e}"),
-        ),
+        Err(e) => db_error_resp("dv_soft_delete", e),
     }
 }
 
@@ -787,15 +865,12 @@ async fn restore_row(
     let dv = state.dv.as_ref().expect("dv manager checked above");
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
-        Err(e) => return error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")),
+        Err(e) => return db_error_resp("dv_internal", e),
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
         Err(e) => {
-            return error_resp(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("dv_restore: {e}"),
-            );
+            return db_error_resp("dv_restore_schema", e);
         }
     };
     let table_def = match find_table(&schema, &table) {
@@ -838,7 +913,7 @@ async fn restore_row(
             error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => error_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("dv_restore: {e}")),
+        Err(e) => db_error_resp("dv_restore", e),
     }
 }
 

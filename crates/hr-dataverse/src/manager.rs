@@ -15,12 +15,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 use uuid::Uuid;
-use crate::sqlx::{PgPool, PgPoolOptions};
+use crate::sqlx::{Executor, PgPool, PgPoolOptions};
 use tokio::sync::RwLock;
 
 use crate::engine::DataverseEngine;
@@ -98,6 +100,56 @@ impl From<&ProvisioningResult> for AppSecret {
     }
 }
 
+/// Maximum age of a gateway token before it is rejected by
+/// [`DataverseManager::verify_token`]. Apps must call `rotate_token` before
+/// the deadline. Override via `ATELIER_DV_TOKEN_MAX_AGE_SECS` for tests or
+/// short-lived deployments.
+const DEFAULT_TOKEN_MAX_AGE_SECS: u64 = 90 * 24 * 3600; // 90 days
+
+fn token_max_age_secs() -> u64 {
+    std::env::var("ATELIER_DV_TOKEN_MAX_AGE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TOKEN_MAX_AGE_SECS)
+}
+
+/// Default per-statement timeout enforced on every connection opened by
+/// `hr-dataverse` (admin + app pools). 30s is generous for OLTP — schema
+/// mutations and migrations run on the admin pool which is fine, large
+/// migrations should use the offline `hr-dataverse-migrate` tool, not the
+/// gateway. Without this, a transaction abandoned by a crashed client
+/// holds row locks indefinitely.
+const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_IDLE_IN_TX_TIMEOUT_MS: u64 = 60_000;
+
+/// Build a `PgPoolOptions` pre-configured with sane session defaults
+/// (statement_timeout, idle_in_transaction_session_timeout). Wrap every
+/// `PgPoolOptions::new()` call site that opens a pool against an app or
+/// admin database.
+pub fn pool_with_session_defaults() -> PgPoolOptions {
+    let stmt_ms = std::env::var("ATELIER_DV_STATEMENT_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STATEMENT_TIMEOUT_MS);
+    let idle_ms = std::env::var("ATELIER_DV_IDLE_IN_TX_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_IN_TX_TIMEOUT_MS);
+    let sql = format!(
+        "SET statement_timeout = {}; SET idle_in_transaction_session_timeout = {};",
+        stmt_ms, idle_ms
+    );
+    PgPoolOptions::new()
+        .acquire_timeout(Duration::from_secs(10))
+        .after_connect(move |conn, _meta| {
+            let sql = sql.clone();
+            Box::pin(async move {
+                conn.execute(sql.as_str()).await?;
+                Ok(())
+            })
+        })
+}
+
 pub struct DataverseManager {
     admin_pool: PgPool,
     admin_dsn: String,
@@ -107,6 +159,13 @@ pub struct DataverseManager {
     /// Production code typically leaves this empty; tests inject ephemeral DSNs.
     dsn_overrides: RwLock<HashMap<String, String>>,
     engines: RwLock<HashMap<String, Arc<DataverseEngine>>>,
+    /// Serializes all provisioning operations. Without this, two parallel
+    /// `provision("foo")` calls can both pass the `app_exists` check and race
+    /// to `CREATE ROLE`, leaving a half-provisioned state. Atelier is
+    /// mono-process so a Rust mutex is sufficient; if we ever fan out to
+    /// multiple instances, switch to a Postgres advisory lock on a pinned
+    /// admin connection.
+    provision_lock: tokio::sync::Mutex<()>,
 }
 
 impl DataverseManager {
@@ -123,6 +182,7 @@ impl DataverseManager {
             secrets_path,
             dsn_overrides: RwLock::new(HashMap::new()),
             engines: RwLock::new(HashMap::new()),
+            provision_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -134,7 +194,7 @@ impl DataverseManager {
         config: ProvisioningConfig,
         secrets_path: Option<PathBuf>,
     ) -> Result<Self> {
-        let admin_pool = PgPoolOptions::new()
+        let admin_pool = pool_with_session_defaults()
             .max_connections(2)
             .connect(&admin_dsn)
             .await
@@ -172,13 +232,14 @@ impl DataverseManager {
 
     /// Get or open the engine for `slug`. Opens a new connection pool on
     /// first call and primes the `_dv_*` metadata defensively (idempotent).
+    #[instrument(level = "info", skip(self), fields(slug = %slug))]
     pub async fn engine_for(&self, slug: &str) -> Result<Arc<DataverseEngine>> {
         if let Some(eng) = self.engines.read().await.get(slug).cloned() {
             return Ok(eng);
         }
 
         let dsn = self.resolve_dsn(slug).await?;
-        let pool = PgPoolOptions::new()
+        let pool = pool_with_session_defaults()
             .max_connections(8)
             .connect(&dsn)
             .await
@@ -186,6 +247,12 @@ impl DataverseManager {
 
         let engine = Arc::new(DataverseEngine::new(pool, slug));
         engine.init_metadata().await?;
+        // Drift detection in dry-run mode at first open. Surfaces orphans
+        // left by partial DDL mutations (cf. SyncSchemaReport). Active
+        // repair is gated behind the /_repair admin endpoint.
+        if let Err(e) = engine.sync_schema(true).await {
+            tracing::warn!(slug = %slug, error = ?e, "sync_schema check failed");
+        }
 
         let mut guard = self.engines.write().await;
         if let Some(existing) = guard.get(slug).cloned() {
@@ -208,7 +275,13 @@ impl DataverseManager {
     /// Provision a new app and persist its secret to the configured
     /// secrets file (if any). Returns the `ProvisioningResult` so the
     /// caller can inject the DATABASE_URL into the app's env.
+    #[instrument(level = "info", skip(self), fields(slug = %slug))]
     pub async fn provision(&self, slug: &str) -> Result<ProvisioningResult> {
+        // Serialize all provisioning operations to avoid TOCTOU races on the
+        // `app_exists` check. Held for the whole CREATE ROLE/DATABASE +
+        // INIT_METADATA sequence + secrets-file write.
+        let _guard = self.provision_lock.lock().await;
+
         let result =
             provisioning::provision_app(&self.admin_pool, &self.config, &self.admin_dsn, slug).await?;
 
@@ -233,7 +306,12 @@ impl DataverseManager {
     /// was lost / never written" scenarios — common during the
     /// transitional rollout. Caller is expected to validate that the
     /// schema in the existing DB matches what they expect.
+    #[instrument(level = "info", skip(self), fields(slug = %slug))]
     pub async fn adopt_existing(&self, slug: &str) -> Result<ProvisioningResult> {
+        // Share the provision_lock so adopt + provision serialize against
+        // each other (both mutate the secrets file and the postgres role).
+        let _guard = self.provision_lock.lock().await;
+
         if !self.exists(slug).await? {
             return Err(DataverseError::provisioning(
                 slug,
@@ -315,7 +393,8 @@ impl DataverseManager {
 
     /// Verify that `presented` matches the stored `gateway_token` for
     /// `slug`. Returns the `app_uuid` on success. Constant-time on the
-    /// token comparison.
+    /// token comparison. Rejects tokens whose `token_rotated_at` is older
+    /// than [`TOKEN_MAX_AGE`] to force periodic rotation.
     pub fn verify_token(&self, slug: &str, presented: &str) -> Result<Uuid> {
         let secret = self
             .read_secret(slug)?
@@ -327,6 +406,25 @@ impl DataverseManager {
         }
         if !ct_eq(secret.gateway_token.as_bytes(), presented.as_bytes()) {
             return Err(DataverseError::internal("invalid gateway token"));
+        }
+        // Enforce token age. Tokens written before this check existed have
+        // `token_rotated_at = Some(now)` from the provision/adopt flow, so
+        // the only entries without a timestamp are legacy ones from much
+        // older provisioning paths — we treat those as expired so rotation
+        // is required before next use.
+        let rotated_at = secret.token_rotated_at.ok_or_else(|| {
+            DataverseError::internal(
+                "gateway token has no rotation timestamp; please call rotate_token",
+            )
+        })?;
+        let age = Utc::now().signed_duration_since(rotated_at);
+        let max_age = chrono::Duration::seconds(token_max_age_secs() as i64);
+        if age > max_age {
+            return Err(DataverseError::internal(format!(
+                "gateway token expired (age {}d, max {}d); please rotate",
+                age.num_days(),
+                max_age.num_days()
+            )));
         }
         Ok(secret.app_uuid)
     }
@@ -362,24 +460,71 @@ fn write_secrets_file(path: &Path, secrets: &SecretsFile) -> Result<()> {
         })?;
     }
     let bytes = serde_json::to_vec_pretty(secrets)?;
-    std::fs::write(path, &bytes)
-        .map_err(|e| DataverseError::internal(format!("write secrets {}: {}", path.display(), e)))?;
-    set_owner_only(path);
+    atomic_write_owner_only(path, &bytes)
+}
+
+/// Write `bytes` to `path` atomically with mode `0o600` from the moment the
+/// file exists on disk. The previous implementation (`fs::write` then
+/// `set_permissions`) briefly exposed the file under the process umask
+/// (typically `0o644`) — a small but reproducible window where the per-app
+/// Postgres passwords were world-readable.
+#[cfg(unix)]
+fn atomic_write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| DataverseError::internal(format!("no parent for {}", path.display())))?;
+
+    // Pick a tmp name in the *same* directory so the final rename is atomic
+    // on the same filesystem. Filename includes pid + random suffix so two
+    // concurrent writers don't collide.
+    let pid = std::process::id();
+    let mut rnd = [0u8; 6];
+    rand::rng().fill_bytes(&mut rnd);
+    let suffix: String = rnd.iter().map(|b| format!("{:02x}", b)).collect();
+    let fname = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "secrets".to_string());
+    let tmp = parent.join(format!(".{}.tmp.{}.{}", fname, pid, suffix));
+
+    let mut f = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| {
+            DataverseError::internal(format!("create tmp {}: {}", tmp.display(), e))
+        })?;
+    f.write_all(bytes).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        DataverseError::internal(format!("write tmp {}: {}", tmp.display(), e))
+    })?;
+    f.sync_all().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        DataverseError::internal(format!("fsync tmp {}: {}", tmp.display(), e))
+    })?;
+    drop(f);
+
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        DataverseError::internal(format!(
+            "rename {} -> {}: {}",
+            tmp.display(),
+            path.display(),
+            e
+        ))
+    })?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_owner_only(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        let mut perms = meta.permissions();
-        perms.set_mode(0o600);
-        let _ = std::fs::set_permissions(path, perms);
-    }
-}
-
 #[cfg(not(unix))]
-fn set_owner_only(_path: &Path) {}
+fn atomic_write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes)
+        .map_err(|e| DataverseError::internal(format!("write secrets {}: {}", path.display(), e)))
+}
 
 /// Constant-time byte slice equality.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {

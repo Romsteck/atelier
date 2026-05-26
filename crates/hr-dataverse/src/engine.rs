@@ -11,6 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use tracing::instrument;
 
 use crate::sqlx::{self, PgPool};
 use crate::error::{DataverseError, Result};
@@ -157,6 +158,7 @@ impl DataverseEngine {
     /// upgrades pre-base-model tables (legacy data-migrated apps) by
     /// adding the audit/version/soft-delete columns + the active-row
     /// partial index; this is idempotent via `ADD COLUMN IF NOT EXISTS`.
+    #[instrument(level = "info", skip(self), fields(slug = %self.slug))]
     pub async fn init_metadata(&self) -> Result<()> {
         sqlx::raw_sql(INIT_METADATA_SQL).execute(&self.pool).await?;
         self.upgrade_base_model().await?;
@@ -332,6 +334,7 @@ impl DataverseEngine {
     /// are infrequent and a partial failure leaves an orphan that
     /// `sync_schema` can repair. Restoring transactional grouping is a
     /// later fix once sqlx ships an HRTB-friendly Transaction API.
+    #[instrument(level = "info", skip(self, def), fields(slug = %self.slug, table = %def.name))]
     pub async fn create_table(&self, def: &TableDefinition) -> Result<u64> {
         let snapshot = self.get_schema().await?;
         validation::validate_table_definition(def, &snapshot)?;
@@ -396,6 +399,7 @@ impl DataverseEngine {
 
     /// Drop a user table, its FKs, its trigger, and its metadata.
     /// See [`create_table`] for the atomicity caveat.
+    #[instrument(level = "info", skip(self), fields(slug = %self.slug, table = %name))]
     pub async fn drop_table(&self, name: &str) -> Result<u64> {
         validation::validate_user_identifier(name)?;
         if !self.table_exists(name).await? {
@@ -426,6 +430,7 @@ impl DataverseEngine {
         Ok(version)
     }
 
+    #[instrument(level = "info", skip(self, col), fields(slug = %self.slug, table = %table, column = %col.name))]
     pub async fn add_column(&self, table: &str, col: &ColumnDefinition) -> Result<u64> {
         validation::validate_user_identifier(table)?;
         validation::validate_column(col)?;
@@ -478,6 +483,7 @@ impl DataverseEngine {
         Ok(version)
     }
 
+    #[instrument(level = "info", skip(self), fields(slug = %self.slug, table = %table, column = %column))]
     pub async fn remove_column(&self, table: &str, column: &str) -> Result<u64> {
         validation::validate_user_identifier(table)?;
         validation::validate_user_identifier(column)?;
@@ -503,6 +509,7 @@ impl DataverseEngine {
         Ok(version)
     }
 
+    #[instrument(level = "info", skip(self, rel), fields(slug = %self.slug, from = %rel.from_table, to = %rel.to_table))]
     pub async fn create_relation(&self, rel: &RelationDefinition) -> Result<u64> {
         let snapshot = self.get_schema().await?;
         validation::validate_relation(rel, &snapshot)?;
@@ -518,6 +525,152 @@ impl DataverseEngine {
         })).await?;
 
         Ok(version)
+    }
+
+    /// Detect drift between the Dataverse metadata (`_dv_tables`) and the
+    /// actual Postgres schema (`information_schema.tables`). Returns the
+    /// list of inconsistencies. With `dry_run=false`, also auto-repairs:
+    ///   - metadata pointing to a non-existent physical table → DELETE
+    ///     orphaned rows in `_dv_tables` / `_dv_columns` / `_dv_relations`.
+    ///   - physical table not in metadata → leave it alone (we do NOT
+    ///     drop physical data) but report it. Adopting such a table
+    ///     requires explicit operator action.
+    ///
+    /// This exists because `create_table` and friends can't be wrapped in
+    /// a single Postgres transaction (sqlx 0.8 HRTB + DDL constraints),
+    /// so a crash mid-mutation can leave a half-created table or stranded
+    /// metadata. Called automatically (in `dry_run=true` mode) by
+    /// `engine_for` the first time an engine is opened, and exposed on
+    /// demand via the `/api/dv/{slug}/_repair` admin endpoint.
+    #[instrument(level = "info", skip(self), fields(slug = %self.slug, dry_run))]
+    pub async fn sync_schema(&self, dry_run: bool) -> Result<SyncSchemaReport> {
+        let mut report = SyncSchemaReport::default();
+
+        // 1. Tables present in _dv_tables: do they exist physically?
+        let meta_tables: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM _dv_tables ORDER BY name")
+                .fetch_all(&self.pool)
+                .await?;
+
+        for (table,) in &meta_tables {
+            let exists: Option<(bool,)> = sqlx::query_as(
+                "SELECT EXISTS(\
+                    SELECT 1 FROM information_schema.tables \
+                    WHERE table_schema = 'public' AND table_name = $1\
+                )",
+            )
+            .bind(table)
+            .fetch_optional(&self.pool)
+            .await?;
+            let physical_exists = exists.map(|(b,)| b).unwrap_or(false);
+            if !physical_exists {
+                report.orphan_metadata.push(table.clone());
+                if !dry_run {
+                    sqlx::query("DELETE FROM _dv_columns WHERE table_name = $1")
+                        .bind(table)
+                        .execute(&self.pool)
+                        .await?;
+                    sqlx::query(
+                        "DELETE FROM _dv_relations WHERE from_table = $1 OR to_table = $1",
+                    )
+                    .bind(table)
+                    .execute(&self.pool)
+                    .await?;
+                    sqlx::query("DELETE FROM _dv_tables WHERE name = $1")
+                        .bind(table)
+                        .execute(&self.pool)
+                        .await?;
+                    report.repaired_metadata.push(table.clone());
+                }
+            }
+        }
+
+        // 2. Physical tables not in _dv_tables (excluding _dv_* system).
+        let physical_tables: Vec<(String,)> = sqlx::query_as(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' \
+             AND table_name NOT LIKE '\\_dv\\_%' ESCAPE '\\' \
+             ORDER BY table_name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let meta_set: std::collections::HashSet<&str> =
+            meta_tables.iter().map(|(n,)| n.as_str()).collect();
+
+        for (table,) in &physical_tables {
+            if !meta_set.contains(table.as_str()) {
+                report.orphan_physical.push(table.clone());
+                // We do NOT auto-drop user data. Operator must inspect.
+            }
+        }
+
+        // 3. For tables that do exist in both, check the update trigger and
+        //    the active-row partial index are still present. These are
+        //    created in `create_table` (steps 2 and 3) and a crash between
+        //    them and the metadata insert leaves them, but the inverse
+        //    (table created via psql then init_metadata replayed) lacks
+        //    them.
+        for (table,) in &meta_tables {
+            if report.orphan_metadata.contains(table) {
+                continue;
+            }
+            let trigger_name = format!("{}_set_updated_at", table);
+            let trig: Option<(bool,)> = sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM pg_trigger \
+                 JOIN pg_class ON pg_trigger.tgrelid = pg_class.oid \
+                 WHERE pg_class.relname = $1 AND pg_trigger.tgname = $2)",
+            )
+            .bind(table)
+            .bind(&trigger_name)
+            .fetch_optional(&self.pool)
+            .await?;
+            if !trig.map(|(b,)| b).unwrap_or(false) {
+                report.missing_triggers.push(table.clone());
+                if !dry_run {
+                    let sql = crate::migration::create_updated_at_trigger_sql(table);
+                    let _ = sqlx::raw_sql(&sql).execute(&self.pool).await;
+                    report.repaired_triggers.push(table.clone());
+                }
+            }
+        }
+
+        if report.is_empty() {
+            tracing::info!(slug = %self.slug, "sync_schema clean");
+        } else {
+            tracing::warn!(
+                slug = %self.slug,
+                orphan_meta = report.orphan_metadata.len(),
+                orphan_phys = report.orphan_physical.len(),
+                missing_triggers = report.missing_triggers.len(),
+                dry_run,
+                "sync_schema drift detected"
+            );
+        }
+        Ok(report)
+    }
+}
+
+/// Output of [`DataverseEngine::sync_schema`].
+#[derive(Debug, Default, serde::Serialize)]
+pub struct SyncSchemaReport {
+    /// Tables present in `_dv_tables` but missing in `information_schema`.
+    pub orphan_metadata: Vec<String>,
+    /// Tables physically present but not in `_dv_tables`.
+    pub orphan_physical: Vec<String>,
+    /// Tables missing their `*_set_updated_at` trigger.
+    pub missing_triggers: Vec<String>,
+    /// Subset of `orphan_metadata` that was repaired in this call.
+    pub repaired_metadata: Vec<String>,
+    /// Subset of `missing_triggers` that was repaired in this call.
+    pub repaired_triggers: Vec<String>,
+}
+
+impl SyncSchemaReport {
+    pub fn is_empty(&self) -> bool {
+        self.orphan_metadata.is_empty()
+            && self.orphan_physical.is_empty()
+            && self.missing_triggers.is_empty()
     }
 }
 
