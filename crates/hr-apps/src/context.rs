@@ -163,15 +163,9 @@ impl ContextGenerator {
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
                   &render_claude_md_upkeep_md())?;
 
-        // `flows-first` always-on rule — pushed to all Rust backends (axum
-        // / axum-vite). Wallet was the pilot ; other Rust apps are now
-        // expected to migrate. NextJS/Flutter are out of scope.
-        if is_flows_eligible(app) {
-            log_write(&app.slug, &src_rules_dir.join("flows-first.md"),
-                      &render_flows_first_rule(app))?;
-        } else {
-            remove_if_exists(&src_rules_dir.join("flows-first.md"), &app.slug);
-        }
+        // Le système de flux a été éradiqué (2026-05-26) — nettoyer les
+        // anciennes règles `flows-first.md` si encore présentes.
+        remove_if_exists(&src_rules_dir.join("flows-first.md"), &app.slug);
 
         // Step 5 — Cleanup des règles obsolètes (scaffolds anciens, systèmes précédents).
         for legacy in OBSOLETE_RULE_FILES {
@@ -1154,323 +1148,6 @@ fn render_claude_md_upkeep_md() -> String {
         .to_string()
 }
 
-fn render_flows_first_rule(app: &Application) -> String {
-    // Stack-aware : NextJS and Rust apps share the same flow doctrine but
-    // wire actions/connectors via different toolchains. We keep both bodies
-    // close in shape so reading two is cheap, and avoid `format!` so the
-    // literal `{{ ... }}` TOML placeholders don't need escaping.
-    if matches!(app.stack, AppStack::NextJs) {
-        render_flows_first_rule_next(&app.slug)
-    } else {
-        render_flows_first_rule_rust(&app.slug)
-    }
-}
-
-fn render_flows_first_rule_rust(slug: &str) -> String {
-    r#"# Flows-first — orchestration via daemon `hr-flowd`
-
-Cette app utilise le moteur **`hr-flow`** comme **daemon partagé** (`hr-flowd`, Medion `127.0.0.1:4002`, loopback only) — équivalent Power Automate, natif Rust. Toute logique métier qui chaîne plusieurs étapes doit s'exprimer comme un **flux**, pas comme du Rust écrit à la main dans un handler.
-
-## État de la migration
-
-Le pilote **Wallet** a validé la plateforme (engine, persistence, MCP, Studio, stats) et a basculé en **mode callback** (Phase 4 livrée, 2026-05-09). Cette app (`{slug}`) est **éligible** au mode callback dès maintenant — on saute la phase embedded, on attaque directement le daemon partagé.
-
-Selon où en est cette app :
-
-- **Pas encore intégrée à hr-flow** : `Cargo.toml` du serveur n'a ni `hr-flow` ni `hr-flow-callback`, pas de `flows/` ni de `flows::register_callbacks()`. → Quand l'utilisateur te donnera le **prompt de migration** (commence par "Migration vers hr-flow"), suis-le. Le prompt complet vit dans `/nvme/atelier/docs/migration-prompts/rust.md`.
-- **Déjà intégrée et au moins une route migrée** : tu peux ajouter de nouveaux flux et migrer le reste des routes existantes. Réfère-toi au skill `flow-build` (lazy-loaded, demande-le au besoin).
-
-**Tant que l'utilisateur n'a pas explicitement lancé la migration**, ne crée pas de flux spontanément — finis ce qu'il te demande. Mais quand tu écris du nouveau code orchestrant ≥ 2 étapes, **mentionne** que ça pourrait être un flux et propose-le.
-
-## Architecture callback (le modèle actuel)
-
-Le daemon orchestre, l'app héberge ses actions/connecteurs custom. Contrat :
-
-```
-hr-flowd (4002) ──HTTP POST──► <app>:<port>/_flow/action/{name}
-                                Authorization: Bearer <HR_FLOW_TOKEN>
-                                X-HomeRoute-Flow: 1
-                                Body: { run_id, step_id, input, params }
-
-                              ► <app>:<port>/_flow/connector/{name}/{op}
-                                (idem, params au lieu de input)
-
-                              ◄ 200 { "output": ... }
-                                ou { "error": "...", "kind": "..." }
-```
-
-Côté app Rust, le sous-router est créé par `hr_flow_callback::router()` et merged dans le router axum principal. Les actions `#[flow_action]` génèrent automatiquement deux fonctions sœurs :
-- `register_<fn>(&mut FlowEngineBuilder)` — legacy embedded (sera retiré Phase 6)
-- `mount_<fn>(CallbackRouter) -> CallbackRouter` — wiring callback (utilisation actuelle)
-
-## ⛔ Escalade plateforme — règle stricte
-
-Si tu rencontres un **bug** ou une **limitation** dans `hr-flow` / `hr-flow-callback` / `hr-flowd` (engine, primitives, expressions, connecteurs managés, persistence, MCP, callback) :
-
-1. **STOP. NE CONTOURNE PAS.** Pas d'action Rust custom pour faire le travail d'une primitive manquante. Pas de hack qui maquille le bug.
-2. **Produis un rapport structuré** dans la conversation, en français, avec :
-   - **Sévérité** : `P0` (bloque la migration), `P1` (force un workaround moche), `P2` (ergonomie).
-   - **Contexte** : quel flux, quel step, quelle valeur d'input réelle.
-   - **Repro minimale** : extrait TOML ou expression qui déclenche le problème, ce que tu attends, ce qui se passe.
-   - **Hypothèse** sur la cause si tu en as une.
-3. **Attends le correctif**. La plateforme `hr-flow` est maintenue dans le repo Atelier (`/nvme/atelier/crates/hr-flow*`) par un agent dédié. Le user transmet le rapport, l'agent plateforme corrige et redéploie, puis te dit de reprendre.
-4. **Pas de TODO bidouille pendant l'attente** : passe à un autre lot de routes ou à une autre tâche. Tu reprendras le flux problématique quand le correctif sera là.
-
-Cette règle existe parce que les workarounds polluent durablement le code de l'app et masquent les vrais besoins de la plateforme. La plateforme s'améliore *parce qu'on lui remonte les manques* — pas en les évitant.
-
-## Quand créer un flux
-
-Crée un flux dès que tu as :
-
-- une logique avec ≥ 2 étapes (ex : appel HTTP + transformation + écriture en base) ;
-- une orchestration que tu voudras pouvoir **rejouer** ou **inspecter step-by-step** ;
-- un branchement, une boucle ou une accumulation portant sur des données métier.
-
-Le code Rust de l'app reste l'**entrée du monde réel** (route HTTP, cron, webhook). Il invoque ensuite le flux via :
-- `RemoteEngine::from_env(slug)?.run(name, input).await` (côté serveur de l'app, en interne), ou
-- `POST http://127.0.0.1:4100/api/apps/<slug>/flows/<name>/run` (route Atelier API, depuis n'importe où loopback).
-
-## Hiérarchie de choix
-
-Pour chaque étape d'un flux, choisis dans cet ordre :
-
-1. **Connecteur managé daemon-side** (`http`) — l'option par défaut pour parler à n'importe quelle API HTTP.
-2. **Connecteur custom de l'app** (déclaré via `with_connector` dans `register_callbacks`, ex : `openrouter`, `dataverse`-app-specific) — quand un service tiers est utilisé plus d'une fois OU quand l'app porte des credentials/contexte de connexion non-portables au daemon.
-3. **Primitive** (`if`, `for_each`, `set_var`, `compose`, `increment_var`, etc.) — toute la logique de contrôle et les transformations légères.
-4. **Action Rust custom** (`#[flow_action]`) — **dernier recours**, uniquement pour :
-   - un calcul pur, isolé, type-safe (algorithme, scoring, parsing) ;
-   - un wrapper autour d'un service éphémère qui ne mérite pas un connecteur dédié.
-
-Une action Rust est **opaque** dans la timeline du run : tu vois son input et son output, mais pas ce qui se passe dedans. C'est pour ça qu'elle doit rester strictement une **fonction pure**.
-
-## Anti-patterns à proscrire
-
-- ❌ Une boucle, une condition ou une accumulation **dans** une action Rust → sors-la en `for_each`/`if`/`set_var` ; sinon le run trace n'est plus auditable.
-- ❌ Un handler HTTP qui fait `dataverse_query → openrouter_call → dataverse_update` en code direct au lieu de déléguer à un flux → tu perds traçabilité, replay, drilldown Studio.
-- ❌ Une action Rust nommée `process_all`/`do_everything` → c'est un signal qu'il y a du contrôle de flux caché dedans.
-- ❌ Réintroduire `FlowEngineBuilder` dans cette app pour faire de l'embedded — Phase 6 retire ce chemin, on n'y retourne pas.
-
-## Nommage des steps — règle stricte
-
-Les `id` de steps apparaissent tels quels dans la timeline du run. Ils doivent **se lire** : un humain qui ouvre un run sans contexte doit comprendre ce que fait chaque ligne sans cliquer.
-
-- ✅ **Verbe en snake_case** qui décrit l'intention métier :
-  - `fetch_uncategorized_transactions`
-  - `classify_with_ai`
-  - `apply_categories_to_db`
-  - `compute_monthly_summary`
-  - `partition_by_recurrence`
-- ❌ **Génériques numérotés** (vieille logique Power Automate) :
-  - `lookup1`, `if_exists1`, `do_insert1`, `step_3`, `action`, `loop`, `branch`
-- ❌ **Le kind comme nom** : un step `kind = "if"` ne s'appelle pas `if`, il s'appelle `if_above_threshold` ou `if_already_exists`.
-
-Cas particulier des steps répétés : si tu boucles avec `for_each` et qu'un step à l'intérieur est invoqué N fois, garde un nom singulier descriptif (`upsert_recommendation`, pas `upsert1`/`upsert2`/…). L'`iteration_index` distingue déjà les exécutions dans la trace.
-
-Pour les variables (`set_var.name`, `append_to_var.name`) : même règle. `total`, `flag`, `tmp` sont à proscrire — préfère `total_high_risk_eur`, `has_pending_imports`.
-
-## Format des flux
-
-Les flux vivent en TOML **plat** sous `flows/*.toml`. Une étape par bloc `[[steps]]` ; le nesting passe par `parent = "id_parent"` et `parent_branch = "then" | "else" | "case:..."` (jamais d'imbrication TOML profonde).
-
-```toml
-name = "categorize_transaction"
-
-[[steps]]
-id = "fetch"
-kind = "connector"
-connector = "dataverse"
-op = "find"
-table = "transactions"
-filter = "id == @input.transaction_id"
-
-[[steps]]
-id = "branch"
-kind = "if"
-cond = "{{ steps.fetch.output.amount }} > 1000"
-
-[[steps]]
-id = "ai"
-parent = "branch"
-parent_branch = "then"
-kind = "connector"
-connector = "openrouter"
-op = "chat"
-# ...
-```
-
-## Outils
-
-- `mcp__studio__flow.list_definitions(slug=...)` / `flow.get_definition` — lecture des flux
-- `mcp__studio__flow.run(slug, name, input)` — déclencher un flux à la main
-- `mcp__studio__flow.list_runs` / `flow.get_run` — lecture de l'historique avec arbre des steps
-- `mcp__studio__flow.replay(slug, run_id)` — rejouer un run en l'état
-- `POST http://127.0.0.1:4100/api/apps/<slug>/flows/<name>/run` — Atelier API write endpoint (depuis le code Rust de l'app)
-- Studio onglet **Flows** — visualisation lecture seule pour l'utilisateur
-
-Le skill `flow-build` (lazy-loaded) couvre le scaffold, le lint et le debug en détail.
-
-## Variables d'environnement (côté app)
-
-```
-HR_FLOW_TOKEN=<32-bytes-hex>   # bearer partagé entre daemon et app pour les callbacks
-```
-
-À provisionner dans le `.env` canonique de l'app sur CloudMaster, avec le même token côté `apps.json::flow_callback_token` sur Medion.
-"#.replace("{slug}", slug)
-}
-
-fn render_flows_first_rule_next(slug: &str) -> String {
-    r#"# Flows-first — orchestration via daemon `hr-flowd` (NextJS)
-
-Cette app utilise le moteur **`hr-flow`** comme **daemon partagé** (`hr-flowd`, Medion `127.0.0.1:4002`, loopback only) — équivalent Power Automate. Toute logique métier qui chaîne plusieurs étapes doit s'exprimer comme un **flux**, pas comme du TS écrit à la main dans un handler Next.
-
-Pas de Rust dans ta toolchain : les actions custom sont des fonctions TS pures, exposées via une route catchall Next vers le daemon.
-
-## État de la migration
-
-Le pilote **Wallet** (Rust) a validé la plateforme et le daemon `hr-flowd` tourne en prod (Phase 4 livrée, 2026-05-09). Cette app (`{slug}`) est **éligible** au mode callback dès qu'on lance la migration. C'est la **première fois** qu'elle touche aux flux.
-
-Selon où en est cette app :
-
-- **Pas encore intégrée à hr-flow** : pas de `flows/`, pas de route `app/api/_flow/[type]/[name]/route.ts`, pas de dep `@homeroute/flow-action` dans `package.json`. → Quand l'utilisateur te donnera le **prompt de migration** (commence par "Migration vers hr-flow"), suis-le. Le prompt complet vit dans `/nvme/atelier/docs/migration-prompts/next.md`.
-- **Déjà intégrée et au moins une route migrée** : tu peux ajouter de nouveaux flux et migrer le reste des routes existantes. Réfère-toi au skill `flow-build` (lazy-loaded, demande-le au besoin).
-
-**Tant que l'utilisateur n'a pas explicitement lancé la migration**, ne crée pas de flux spontanément — finis ce qu'il te demande. Mais quand tu écris du nouveau code orchestrant ≥ 2 étapes, **mentionne** que ça pourrait être un flux et propose-le.
-
-## Architecture callback (le modèle)
-
-Le daemon orchestre, l'app héberge ses actions / connecteurs custom en TS. Contrat :
-
-```
-hr-flowd (4002) ──HTTP POST──► <app>:<port>/api/_flow/action/{name}
-                                Authorization: Bearer <HR_FLOW_TOKEN>
-                                X-HomeRoute-Flow: 1
-                                Body: { run_id, step_id, input, params }
-
-                              ► <app>:<port>/api/_flow/connector/{name}/{op}
-                                (idem, params au lieu de input)
-
-                              ◄ 200 { "output": ... }
-                                ou { "error": "...", "kind": "..." }
-```
-
-Côté app NextJS, la route catchall `app/api/_flow/[type]/[name]/route.ts` (et éventuellement `[op]/route.ts` plus profond pour les connecteurs) est servie par `handleFlowCallback({ actions, connectors })` du package `@homeroute/flow-action`. Validation bearer + isolement panique + sérialisation d'erreur sont gérées par le helper.
-
-**Important** : la route DOIT spécifier `export const runtime = 'nodejs';` — Edge runtime ne fournit pas `crypto.timingSafeEqual`.
-
-## ⛔ Escalade plateforme — règle stricte
-
-Si tu rencontres un **bug** ou une **limitation** dans `hr-flow` / `@homeroute/flow-action` / `hr-flowd` (engine, primitive, expression, callback contract, persistence) :
-
-1. **STOP. NE CONTOURNE PAS.** Pas d'action TS qui contourne une primitive manquante. Pas de hack qui maquille le bug.
-2. **Produis un rapport structuré** dans la conversation, en français, avec :
-   - **Sévérité** : `P0` (bloque la migration), `P1` (force un workaround moche), `P2` (ergonomie).
-   - **Contexte** : quel flux, quel step, quelle valeur d'input réelle.
-   - **Repro minimale** : extrait TOML ou expression qui déclenche le problème, ce que tu attends, ce qui se passe.
-   - **Hypothèse** sur la cause si tu en as une.
-3. **Attends le correctif**. La plateforme `hr-flow` est dans `/nvme/atelier/crates/hr-flow*` + `/nvme/atelier/web/packages/flow-action/`, maintenue par un agent dédié. Le user transmet le rapport, l'agent plateforme corrige et redéploie, puis te dit de reprendre.
-4. **Pas de TODO bidouille pendant l'attente** : passe à un autre lot de routes ou à une autre tâche. Tu reprendras le flux problématique quand le correctif sera là.
-
-Cette règle existe parce que les workarounds polluent durablement le code de l'app et masquent les vrais besoins de la plateforme. La plateforme s'améliore *parce qu'on lui remonte les manques* — pas en les évitant.
-
-## Quand créer un flux
-
-Crée un flux dès que tu as :
-
-- une logique avec ≥ 2 étapes (ex : appel HTTP + transformation + écriture en base) ;
-- une orchestration que tu voudras pouvoir **rejouer** ou **inspecter step-by-step** ;
-- un branchement, une boucle ou une accumulation portant sur des données métier.
-
-Le code TS de l'app reste l'**entrée du monde réel** (route HTTP, cron, webhook). Il invoque ensuite le flux via :
-- `POST http://127.0.0.1:4100/api/apps/<slug>/flows/<name>/run` (Atelier API write endpoint, recommandé)
-- ou `POST http://127.0.0.1:4002/v1/runs` directement (avec bearer `HR_FLOWD_TOKEN`)
-
-## Hiérarchie de choix
-
-Pour chaque étape d'un flux, choisis dans cet ordre :
-
-1. **Connecteur managé daemon-side** (`http`) — l'option par défaut pour parler à n'importe quelle API HTTP.
-2. **Connecteur custom de l'app** (object map dans `handleFlowCallback({ connectors })`) — quand un service tiers est utilisé plus d'une fois OU porte des credentials propres à l'app.
-3. **Primitive** (`if`, `for_each`, `set_var`, `compose`, `increment_var`, etc.) — toute la logique de contrôle et les transformations légères.
-4. **Action TS custom** (`FlowAction` dans `lib/flow-actions/<name>.ts`) — **dernier recours**, uniquement pour :
-   - un calcul pur, isolé (algorithme, parsing, scoring) ;
-   - un wrapper autour d'un service éphémère qui ne mérite pas un connecteur dédié.
-
-Une action TS est **opaque** dans la timeline du run : tu vois son input et son output, mais pas ce qui se passe dedans. C'est pour ça qu'elle doit rester strictement **pure** (pas d'I/O caché, pas d'effet de bord global).
-
-## Anti-patterns à proscrire
-
-- ❌ Une boucle, une condition ou une accumulation **dans** une action TS → sors-la en `for_each`/`if`/`set_var` ; sinon le run trace n'est plus auditable.
-- ❌ Un route Next qui fait `db_query → openai_call → db_update` en code direct au lieu de déléguer à un flux → tu perds traçabilité, replay, drilldown Studio.
-- ❌ Une action TS nommée `process_all`/`do_everything` → c'est un signal qu'il y a du contrôle de flux caché dedans.
-- ❌ Oublier `export const runtime = 'nodejs'` — la route va 500 silencieusement en Edge runtime.
-
-## Nommage des steps — règle stricte
-
-Les `id` de steps apparaissent tels quels dans la timeline du run. Ils doivent **se lire** : un humain qui ouvre un run sans contexte doit comprendre ce que fait chaque ligne sans cliquer.
-
-- ✅ **Verbe en snake_case** qui décrit l'intention métier :
-  - `fetch_uncategorized_transactions`
-  - `classify_with_ai`
-  - `apply_categories_to_db`
-  - `compute_monthly_summary`
-  - `partition_by_recurrence`
-- ❌ **Génériques numérotés** : `lookup1`, `if_exists1`, `do_insert1`, `step_3`, `action`, `loop`, `branch`
-- ❌ **Le kind comme nom** : un step `kind = "if"` ne s'appelle pas `if`, il s'appelle `if_above_threshold`.
-
-Cas particulier des steps répétés (`for_each`) : nom singulier descriptif (`upsert_recommendation`, pas `upsert1`/`upsert2`/…). L'`iteration_index` distingue déjà les exécutions dans la trace.
-
-Pour les variables (`set_var.name`, `append_to_var.name`) : même règle. `total`, `flag`, `tmp` à proscrire — préfère `total_high_risk_eur`, `has_pending_imports`.
-
-## Format des flux
-
-Les flux vivent en TOML **plat** sous `flows/*.toml` à la racine de l'app (pas sous `app/`). Une étape par bloc `[[steps]]` ; le nesting passe par `parent = "id_parent"` et `parent_branch = "then" | "else" | "case:..."` (jamais d'imbrication TOML profonde).
-
-```toml
-name = "categorize_transaction"
-
-[[steps]]
-id = "fetch"
-kind = "connector"
-connector = "http"
-op = "get"
-url = "https://api.example.com/transactions/{{ input.id }}"
-
-[[steps]]
-id = "branch"
-kind = "if"
-cond = "{{ steps.fetch.output.amount }} > 1000"
-
-[[steps]]
-id = "classify"
-parent = "branch"
-parent_branch = "then"
-kind = "action"
-action = "compute_score"
-params = { amount = "{{ steps.fetch.output.amount }}" }
-```
-
-## Outils
-
-- `mcp__studio__flow.list_definitions(slug=...)` / `flow.get_definition` — lecture des flux
-- `mcp__studio__flow.run(slug, name, input)` — déclencher un flux à la main
-- `mcp__studio__flow.list_runs` / `flow.get_run` — lecture de l'historique avec arbre des steps
-- `mcp__studio__flow.replay(slug, run_id)` — rejouer un run en l'état
-- `POST http://127.0.0.1:4100/api/apps/<slug>/flows/<name>/run` — Atelier API write endpoint (depuis le code TS de l'app, en interne)
-- Studio onglet **Flows** — visualisation lecture seule pour l'utilisateur
-
-Le skill `flow-build` (lazy-loaded) couvre le scaffold, le lint et le debug en détail.
-
-## Variables d'environnement (côté app)
-
-```
-HR_FLOW_TOKEN=<32-bytes-hex>   # bearer partagé entre daemon et app pour les callbacks
-```
-
-À provisionner dans `.env.local` (ou `.env`, selon la convention de l'app) sur CloudMaster, avec le même token côté `apps.json::flow_callback_token` sur Medion.
-"#.replace("{slug}", slug)
-}
-
 fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
     let mut entry = serde_json::json!({
         "type": "http",
@@ -1721,286 +1398,10 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
         )));
     }
 
-    if is_flows_eligible(app) {
-        skills.push(("flow-build", render_flow_build_skill(app)));
-    }
-
     skills
 }
 
-/// Apps eligible for the hr-flow rollout. Phase 4 livrée le 2026-05-09 :
-/// le daemon `hr-flowd` est partagé, donc les apps NextJS sont éligibles
-/// au même titre que les apps Rust — leurs actions/connecteurs custom
-/// sont exposés en TS via `@homeroute/flow-action`. Flutter reste hors
-/// scope (pas d'app NodeJS/Rust hostable côté mobile).
-fn is_flows_eligible(app: &Application) -> bool {
-    matches!(
-        app.stack,
-        AppStack::AxumVite | AppStack::Axum | AppStack::NextJs
-    )
-}
-
-fn render_flow_build_skill(app: &Application) -> String {
-    let is_next = matches!(app.stack, AppStack::NextJs);
-    let stack_block_check = if is_next {
-        r#"1. **Dep `@homeroute/flow-action` dans `package.json`** (path-dep `file:/nvme/atelier/web/packages/flow-action` le temps de la transition).
-2. **Catchall route** `app/api/_flow/[type]/[name]/route.ts` qui appelle `handleFlowCallback({ actions, connectors })`. La route DOIT déclarer `export const runtime = 'nodejs';`.
-3. **`HR_FLOW_TOKEN` dans `.env.local`** (ou `.env`) — bearer partagé avec le daemon, miroir de `apps.json::flow_callback_token`.
-4. **Dossier `flows/`** à la racine de l'app (au même niveau que `app/`, `lib/`, `package.json`).
-5. **Inscription côté daemon** : `apps.json` côté Medion porte `flow_callback_url=http://127.0.0.1:<port>` + `flow_callback_token` pour ce slug, et le daemon a fait `POST /v1/_admin/reload` après ajout."#
-    } else {
-        r#"1. **Deps `hr-flow` + `hr-flow-callback` dans `server/Cargo.toml`** — path-dep relatif vers `/nvme/atelier/crates/hr-flow*`.
-2. **Module `flows/`** dans `server/src/` avec `pub fn register_callbacks() -> Router<Arc<AppState>>` qui crée un `hr_flow_callback::router()` et y attache les `mount_<fn>` (actions custom, générés par `#[flow_action]`) + les `with_connector(name, Arc::new(...))` (connecteurs custom).
-3. **`register_callbacks()` mergé dans le router axum principal de `main.rs`** — AVANT le premier `with_state`.
-4. **`HR_FLOW_TOKEN` dans `.env`** — bearer partagé avec le daemon, miroir de `apps.json::flow_callback_token`.
-5. **Dossier `flows/`** au niveau de `server/src/` (relatif au cwd du process), ajouté au `build_artefact` de l'app.
-6. **Inscription côté daemon** : `apps.json` côté Medion porte `flow_callback_url=http://127.0.0.1:<port>` + `flow_callback_token` pour ce slug, et le daemon a fait `POST /v1/_admin/reload` après ajout."#
-    };
-
-    let stack_block_connector = if is_next {
-        r#"Si tu as besoin d'appeler un service tiers (et qu'`http` daemon-side ne suffit pas pour des raisons d'auth, de format, etc.) :
-
-1. Dans la route catchall, ajoute un sous-objet à `connectors` :
-   ```ts
-   import { handleFlowCallback, type FlowAction } from '@homeroute/flow-action';
-   import { OpenRouterClient } from '@/lib/openrouter';
-
-   const openrouter = new OpenRouterClient(process.env.OPENROUTER_API_KEY!);
-
-   export const runtime = 'nodejs';
-   export const POST = handleFlowCallback({
-     actions: { /* ... */ },
-     connectors: {
-       openrouter: {
-         chat: async (_input, params, _ctx) => openrouter.chat(params),
-       },
-     },
-   });
-   ```
-2. Si plusieurs op (`chat`, `embed`, …), expose-les dans le map.
-3. Les credentials viennent de `.env` (par app, jamais hardcodées)."#
-    } else {
-        r#"Si tu as besoin d'appeler un service tiers (et qu'`http` daemon-side ne suffit pas pour des raisons d'auth, de format, etc.) :
-
-1. Crée un module Rust `server/src/flows/connectors/<nom>.rs` qui implémente le trait `hr_flow::Connector` (méthode `async fn call(&self, op: &str, params: Value) -> FlowResult<Value>`).
-2. Dans `flows/mod.rs::register_callbacks()`, ajoute `router = router.with_connector("<nom>", Arc::new(MyConnector::from_env()?));`.
-3. Les credentials viennent de `.env` (par app, jamais hardcodées)."#
-    };
-
-    let stack_block_action = if is_next {
-        r#"1. Dans `lib/flow-actions/<nom>.ts` :
-   ```ts
-   import type { FlowAction } from '@homeroute/flow-action';
-
-   export const compute_score: FlowAction = async (input, params, _ctx) => {
-     // calcul pur — pas de boucle visible, pas de side-effect
-     return { score: 0.42 };
-   };
-   ```
-2. Dans la route catchall, importe et ajoute au map `actions` :
-   ```ts
-   import { compute_score } from '@/lib/flow-actions/compute_score';
-   export const POST = handleFlowCallback({ actions: { compute_score }, ... });
-   ```
-3. Référence dans le flux :
-   ```toml
-   [[steps]]
-   id = "score"
-   kind = "action"
-   action = "compute_score"
-   params = { tx = "{{ steps.fetch.output }}" }
-   ```"#
-    } else {
-        r#"1. Dans `server/src/flows/actions/<nom>.rs` (ou similaire) :
-   ```rust
-   use hr_flow::flow_action;
-
-   #[flow_action(name = "compute_score")]
-   async fn compute_score(input: serde_json::Value) -> hr_flow::FlowResult<serde_json::Value> {
-       // calcul pur — pas de boucle visible, pas de side-effect
-       Ok(serde_json::json!({ "score": 0.42 }))
-   }
-   ```
-2. Dans `flows/mod.rs::register_callbacks()`, ajoute `router = router.with_action(actions::scoring::mount_compute_score);` (le `mount_<fn>` est généré par la macro à côté de `register_<fn>`).
-3. Référence dans le flux :
-   ```toml
-   [[steps]]
-   id = "score"
-   kind = "action"
-   action = "compute_score"
-   params = { tx = "{{ steps.fetch.output }}" }
-   ```"#
-    };
-
-    format!(r#"---
-name: flow-build
-description: Crée, teste, débugge un flux hr-flow pour cette app. Utilise-moi quand l'utilisateur demande un nouveau flux, veut modifier un flux existant, ajoute un connecteur custom ou une action, ou cherche pourquoi un run a échoué. Lis aussi `.claude/rules/flows-first.md` qui pose la doctrine.
-allowed-tools:
----
-
-# `flow-build` — guide complet
-
-## Doctrine (rappel — voir `flows-first.md` pour la version longue)
-
-Pour toute logique chaînée : **flux > primitive > action custom**. Une action custom = une fonction pure ; toute boucle/condition/accumulation visible doit être en primitive. Les flux sont orchestrés par le daemon partagé `hr-flowd` (Medion 127.0.0.1:4002, loopback) ; cette app expose ses actions/connecteurs custom via callback HTTP.
-
-## Prérequis — l'app est-elle intégrée à `hr-flow` ?
-
-Vérifie d'abord :
-
-{stack_check}
-
-Si **un seul** de ces points manque, l'app n'est pas intégrée. Réfère-toi au prompt de migration que t'a passé l'utilisateur ; **n'invente pas** la procédure d'intégration depuis le skill — c'est un prompt explicite et structuré (voir `/nvme/atelier/docs/migration-prompts/{stack}.md`).
-
-## Workflow
-
-### 1. Créer un flux
-
-1. **Définition TOML** : dans `flows/<nom>.toml`, format plat avec `parent`/`parent_branch`. Schéma minimal :
-   ```toml
-   name = "<nom>"
-   description = "Une phrase pour l'utilisateur"
-
-   [[steps]]
-   id = "<id_unique>"
-   kind = "connector" | "action" | "compose" | "set_var" | "if" | "for_each" | …
-   # … champs spécifiques selon kind
-   ```
-2. **Inscription daemon** : après ajout d'un nouveau TOML, `POST http://127.0.0.1:4100/api/flows/_admin/reload` (Atelier API → daemon). Ou `make deploy-app SLUG=<slug>` qui rsync les TOML + relance — le scan filesystem du daemon les voit après reload.
-3. **Test rapide** : `mcp__studio__flow.run(slug="<app-slug>", name="<nom>", input={{...}})` → vérifie status + output. Le `slug` est auto-injecté par le MCP per-app — tu peux l'omettre la plupart du temps.
-4. **Inspection** : `flow.get_run(slug, run_id)` pour voir l'arbre des steps avec input/output/durée par step.
-
-### 2. Ajouter un connecteur custom
-
-{stack_connector}
-
-### 3. Ajouter une action custom (dernier recours)
-
-{stack_action}
-
-### 4. Debug d'un run échoué
-
-1. `flow.list_runs(slug, flow_name="<nom>", limit=10)` → repère le run failed.
-2. `flow.get_run(slug, run_id="<id>")` → trouve le step qui a `status=failed` ; lis `error` et `input`.
-3. Reproduis localement avec `flow.run(slug, name, input=<input du run failed>)`.
-4. Une fois corrigé, `flow.replay(slug, run_id)` re-tourne le run d'origine pour confirmer le fix.
-
-## Règles de forme
-
-- IDs de step en `snake_case`, descriptifs (`fetch_user`, pas `step1`).
-- Une expression `{{{{ ... }}}}` qui occupe toute la string préserve le type natif (array, number, etc.). Mixée à du texte, elle est coercée en string.
-- Variables d'itération : référencées par `@<nom>` (par défaut `@iter`). Dispo seulement à l'intérieur d'un `for_each`.
-- Conditions (`if.cond`, `while.cond`, `cond_select.when.cond`) : sous-langage `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parens. Les `{{{{ ... }}}}` y sont substituées d'abord.
-- **Strings dans les expressions** : `'...'` ET `"..."` acceptés. Pratique pour ne pas se battre avec les guillemets TOML — wrap la cond en `'...'` côté TOML, et utilise `"..."` pour les literals à l'intérieur (ou l'inverse).
-- **`Object != null` / `Array != null`** fonctionne directement : `cond = '{{{{ steps.X.output }}}} != null'` est vrai dès que `steps.X.output` est un objet/array non-null. Pas besoin de tester un champ scalaire (`output.id != null`) pour contourner.
-
-## Aiguillage et sélection de valeur (`if` vs `cond_select`)
-
-Deux primitives, deux intentions :
-
-- **`if`** : « j'exécute des steps **différents** selon une condition ». Output = `{{ "branch": "then" | "else", "output": <last_child_output> }}` — l'enveloppe permet d'inspecter quelle branche a été prise.
-- **`cond_select`** : « je **choisis une valeur** parmi N cas ». Output = directement la valeur de la branche prise (pas d'enveloppe). Plus court qu'un `if` quand les branches ne font que renvoyer une valeur déjà calculée.
-
-### `cond_select` — exemple
-
-```toml
-[[steps]]
-id = "fetch_a"
-kind = "connector"
-connector = "dataverse"
-op = "get_by_natural_key"
-params = {{ table = "items", key = "kind", value = "A" }}
-
-[[steps]]
-id = "fetch_b"
-kind = "connector"
-connector = "dataverse"
-op = "get_by_natural_key"
-params = {{ table = "items", key = "kind", value = "B" }}
-
-[[steps]]
-id = "pick"
-kind = "cond_select"
-default = "null"
-needs = ["fetch_a", "fetch_b"]
-
-[[steps.when]]
-cond = "{{{{ input.kind }}}} == 'A'"
-value = "{{{{ steps.fetch_a.output }}}}"
-
-[[steps.when]]
-cond = "{{{{ input.kind }}}} == 'B'"
-value = "{{{{ steps.fetch_b.output }}}}"
-```
-
-### Output du flow — quand le dernier step est un `if`
-
-Trois options :
-
-1. **`output_step` au niveau FlowDef** (préféré) — désigne explicitement le step dont l'output devient l'output du flow :
-   ```toml
-   name = "do_thing"
-   output_step = "branch_result"
-   ```
-2. **Step terminal `compose`** qui déballe le wrapper :
-   ```toml
-   [[steps]]
-   id = "final"
-   kind = "compose"
-   value = "{{{{ steps.branch.output.output }}}}"
-   ```
-3. **Wrapper côté app** qui lit `.output.output` — moins propre, à éviter pour les nouveaux flux.
-
-## Cadence & robustesse réseau (rate limiting)
-
-Pour un flux qui appelle une API externe à débit limité (Finnhub, Alpaca, etc.) :
-
-- **`sleep`** — primitive de pause non-bloquante (n'immobilise ni le daemon ni les autres runs). `for_each` est séquentiel, donc un `sleep` dans le corps de boucle espace chaque itération :
-  ```toml
-  [[steps]]
-  id = "loop"
-  kind = "for_each"
-  over = "input.symbols"
-
-  [[steps]]
-  id = "fetch"
-  parent = "loop"
-  kind = "connector"
-  connector = "http"
-  op = "request"
-  params = {{ url = "https://api.exemple.com/q?s={{{{ @iter }}}}", max_retries = 3 }}
-
-  [[steps]]
-  id = "pace"
-  parent = "loop"
-  kind = "sleep"
-  ms = 200
-  ```
-  `ms` : littéral ou expression `{{{{ }}}}` ; valeur clampée à [0, 300_000].
-
-- **Retry HTTP** — le connecteur managé `http` accepte `max_retries` (défaut 0, désactivé) et `retry_backoff_ms` (défaut 1000). Retry automatique sur `429`/`500`/`502`/`503`/`504`/erreur réseau : backoff exponentiel + jitter, en-tête de réponse `Retry-After` honoré en priorité, délai plafonné à 60 s par tentative.
-
-## Tools MCP disponibles
-
-| Tool | Usage |
-|------|-------|
-| `flow.list_definitions` | Liste les flux de l'app |
-| `flow.get_definition` | Lit un flux complet (parsé + source TOML) |
-| `flow.run` | Trigger manuel d'un flux |
-| `flow.list_runs` | Historique des runs (filtrable par `flow_name`) |
-| `flow.get_run` | Détail d'un run avec arbre des steps |
-| `flow.replay` | Rejoue un run par id |
-"#,
-        stack_check = stack_block_check,
-        stack = if is_next { "next" } else { "rust" },
-        stack_connector = stack_block_connector,
-        stack_action = stack_block_action,
-    )
-}
-
 /// Slash-commands & fichiers legacy à nettoyer à chaque régénération.
-/// Les builds sont désormais la skill `app-build` ; les raccourcis status/logs/db-info
-/// sont devenus des skills — plus rien ne vit dans `src/.claude/commands/`.
 const OBSOLETE_SLASH_COMMANDS: &[&str] = &[
     "build.md",
     "build-client.md",
@@ -2016,13 +1417,10 @@ const OBSOLETE_SLASH_COMMANDS: &[&str] = &[
 ];
 
 /// Noms de skills auxiliaires potentiellement obsolètes à nettoyer si la stack
-/// de l'app change (ex: app passe de `has_db=true` à `false` → retirer app-db-info).
+/// de l'app change.
 const ALL_EXTRA_SKILL_NAMES: &[&str] = &["app-status", "app-logs", "app-db-info", "flow-build"];
 
-/// Fichiers `rules/*.md` obsolètes à nettoyer à chaque génération. Certains
-/// étaient produits par un système antérieur (bootstrap env-agent) et sont
-/// encore présents sous `src/.claude/rules/` dans les apps existantes ; d'autres
-/// ont été renommés ou fusionnés au fil du temps.
+/// Fichiers `rules/*.md` obsolètes à nettoyer à chaque génération.
 const OBSOLETE_RULE_FILES: &[&str] = &[
     "env-rules.md",
     "env-context.md",
@@ -2036,11 +1434,11 @@ const OBSOLETE_RULE_FILES: &[&str] = &[
     "homeroute-dataverse.md",
     "homeroute-store.md",
     "store-publishing.md",
+    "flows-first.md",
 ];
 
 /// Nettoie les fichiers de contexte agent qui traînent au niveau `app_dir`
-/// (au-dessus de `src/`). Aucun fichier utile ne doit vivre là — voir
-/// l'INVARIANT du module. Silencieux si rien à supprimer.
+/// (au-dessus de `src/`).
 fn cleanup_legacy_parent_context(app_dir: &Path, slug: &str) {
     remove_if_exists(&app_dir.join("CLAUDE.md"), slug);
     remove_if_exists(&app_dir.join(".mcp.json"), slug);
@@ -2053,21 +1451,6 @@ fn cleanup_legacy_parent_context(app_dir: &Path, slug: &str) {
     }
 }
 
-/// Always-on rule that documents the DB stack the app is on. The content
-/// is selected at generation time from `app.db_backend`:
-/// - `LegacySqlite` → "MIGRATION POSTGRES PENDING" (RULE PRINCIPALE that
-///   asks the agent to minimise schema churn until migration runs)
-/// - `PostgresDataverse` → new-stack documentation + post-migration
-///   cleanup instruction (delete leftover SQLite references)
-///
-/// The rule is regenerated at every boot / `AppUpdate` /
-/// `AppRegenerateContext`. Switching `db_backend` flips the rule
-/// automatically — agents inside the app pick up the new instructions on
-/// the next context refresh.
-/// Backend-aware DB section in `app-info.md`. Tracks the same 3-state
-/// model as [`render_db_md`] so the headline description in the
-/// agent's "what is this app" rule stays consistent with the
-/// dedicated `db.md` rule.
 fn render_db_section(app: &crate::types::Application, db_tables: &Option<Vec<String>>) -> String {
     use crate::types::DbBackend;
     if !app.has_db {
@@ -2114,9 +1497,9 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
            process par `hr-apps`. Tu peux utiliser sqlx, tokio-postgres, prisma,\n\
            etc. selon la stack de l'app.\n\
          \n\
-         Trois surfaces officielles pour parler à la base, selon le contexte :\n\
-         **REST OData-style** (app runtime), **connecteur `dataverse`** (flows hr-flow),\n\
-         **MCP `dv_*`** (agent / debug). Pas de GraphQL.\n\
+         Deux surfaces officielles pour parler à la base, selon le contexte :\n\
+         **REST OData-style** (app runtime) et **MCP `dv_*`** (agent / debug).\n\
+         Pas de GraphQL, pas de flows TOML (système éradiqué 2026-05-26).\n\
          \n\
          ## Côté app runtime — REST OData-style\n\
          \n\
@@ -2139,45 +1522,6 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          **dvexpr** (dialect propriétaire) : `==`, `!=`, `<`, `>`, `<=`, `>=`,\n\
          `&&`, `||`, `contains(...)`, `startswith(...)`, `endswith(...)`.\n\
          Exemple : `?$filter=active == true && contains(email, \"@example.com\")`.\n\
-         \n\
-         ## Côté flows hr-flow — connecteur `dataverse`\n\
-         \n\
-         Pour faire des appels DB depuis un flow TOML, **n'utilise pas le\n\
-         connecteur `http`** vers les routes REST ci-dessus — utilise le\n\
-         connecteur natif `dataverse` (plus court, typé, audit automatique) :\n\
-         \n\
-         ```toml\n\
-         [[steps]]\n\
-         id = \"get_page\"\n\
-         kind = \"connector\"\n\
-         connector = \"dataverse\"\n\
-         op = \"get_by_natural_key\"\n\
-         params = {{ table = \"legal_pages\", key = \"slug\", value = \"{{{{ input.slug }}}}\" }}\n\
-         \n\
-         [[steps]]\n\
-         id = \"create_page\"\n\
-         kind = \"connector\"\n\
-         connector = \"dataverse\"\n\
-         op = \"insert\"\n\
-         params = {{ table = \"legal_pages\", data = {{ slug = \"{{{{ input.slug }}}}\", body = \"\" }} }}\n\
-         ```\n\
-         \n\
-         Operations supportées :\n\
-         \n\
-         | Op | Params | Output |\n\
-         |---|---|---|\n\
-         | `list` | `{{ table, filter?, select?, orderby?, top?, skip?, count?, include_deleted?, expand? }}` | `{{ rows: [...], count?: u64 }}` |\n\
-         | `get` | `{{ table, id }}` | `row` ou `null` |\n\
-         | `get_by_natural_key` | `{{ table, key, value }}` | `row` ou `null` |\n\
-         | `insert` | `{{ table, data }}` | `row` (avec `id`/`version` générés) |\n\
-         | `update` | `{{ table, id, version, data }}` | `row` (mis à jour) |\n\
-         | `soft_delete` | `{{ table, id, version }}` | `{{ id, version }}` |\n\
-         | `restore` | `{{ table, id, version }}` | `row` |\n\
-         | `schema` | `{{ table? }}` | schéma tables/colonnes/relations |\n\
-         | `audit_list` | `{{ table?, id?, top?, skip? }}` | `{{ rows: [...] }}` |\n\
-         \n\
-         Les writes (`insert`, `update`, `soft_delete`, `restore`) loggent\n\
-         automatiquement dans la table d'audit avec l'identity `flow:<name>#<run_id>`.\n\
          \n\
          ## Côté agent — MCP tools `dv_*`\n\
          \n\

@@ -14,13 +14,9 @@
 - **Refacto `homeroute-core`** — découpler `hr-common`/`hr-ipc`/`hr-docs` qu'Atelier path-dep encore vers `/nvme/homeroute/crates/shared/`.
 - **Path-routing `app.mynetwk.biz/apps/{slug}`** — but initial de la séparation Studio. Reporté ; cf. [.claude/rules/path-routing-pending.md](.claude/rules/path-routing-pending.md).
 
-## Plan suivant — `hr-flowd` daemon multi-stack
+## Système de flux — supprimé (2026-05-26)
 
-📌 **Plan complet dans le repo** : [docs/plan-hr-flowd.md](docs/plan-hr-flowd.md) (copie locale, source originale `/home/romain/.claude/plans/peaceful-spinning-mountain.md`)
-
-Transformer `hr-flow` (lib Rust embeddable, donc inutilisable côté NextJS) en daemon partagé `hr-flowd` accessible via callbacks HTTP par toutes les apps quelle que soit leur stack. **Explicitement reporté** par l'utilisateur ; à reprendre quand le rapatriement sera stable.
-
-⚠️ **Pendant les évolutions de `hr-flow` ici** : ne pas refactorer de façon qui rendrait l'extraction du daemon plus difficile. Pas de nouveau couplage fort à `ApiState` ou au runtime des apps.
+Le système `hr-flow` (lib + daemon + macros + callback + 34 TOML répartis sur 6 apps) a été éradiqué le 2026-05-26. Chaque app a été refondue en code natif (Rust ou TS). Voir [docs/refonte/](docs/refonte/) pour le journal détaillé. Les 4 crates `hr-flow*` ont été supprimées du workspace, le daemon `hr-flowd` désinstallé sur Medion, et toutes les routes/MCP tools/UI flow ont été retirées d'Atelier.
 
 ---
 
@@ -30,10 +26,9 @@ Plateforme applicative autonome (post-rapatriement 2026-05-09). Contient :
 
 - **Apps** : supervisor Tokio des apps locales (lifecycle, ports, logs) — services nommés `atelier-app-{slug}.service` (slice `atelier-apps.slice`).
 - **Dataverse** : moteur Postgres avec schéma dynamique, GraphQL, dvexpr.
-- **Flows** : moteur d'orchestration TOML.
 - **Docs** : système de documentation per-app (FTS5).
 - **Git** : bare repos.
-- **MCP** : exposition des tools `app.*`, `db.*`, `docs.*`, `flow.*`.
+- **MCP** : exposition des tools `app.*`, `db.*`, `docs.*`.
 
 Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME (ces concerns restent dans `hr-edge` + `hr-netcore` sur Medion). `code-server` (Studio) reste sur CloudMaster.
 
@@ -124,7 +119,7 @@ hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
 
 Ne jamais modifier ces crates depuis Atelier — leur source de vérité reste dans `/nvme/homeroute/`. Refacto `homeroute-core` = travail futur.
 
-Les **10 crates applicatives** (`hr-apps`, `hr-db`, `hr-git`, `hr-flow`, `hr-flow-macros`, `hr-dataverse`, `hr-dataverse-migrate`, `hr-dvexpr`, `hr-dv-codegen`) ont été internalisées dans Atelier (`crates/hr-XXX`) le 2026-05-09 — modifiables localement.
+Les **6 crates applicatives** restantes (`hr-apps`, `hr-db`, `hr-git`, `hr-dataverse`, `hr-dataverse-migrate`, `hr-dvexpr`, `hr-dv-codegen`) ont été internalisées dans Atelier (`crates/hr-XXX`) le 2026-05-09 — modifiables localement. Les 4 crates `hr-flow*` ont été supprimées le 2026-05-26.
 
 ## Service naming + autonomie
 

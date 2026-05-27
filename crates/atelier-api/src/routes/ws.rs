@@ -26,11 +26,11 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     debug!("ws client connected");
 
     // task_update has no Atelier-side publisher today (TaskStore is read-only
-    // here — populated by external sync). Channel is wired so a future
-    // hr-flow task lifecycle change will light up TaskContext / TaskDetail
-    // automatically.
+    // here — populated by external sync). Channel is wired for future
+    // task lifecycle changes to light up TaskContext / TaskDetail automatically.
     let mut task_update_rx = state.events.task_update.subscribe();
     let mut log_rx = state.events.log_entry.subscribe();
+    let mut logs_pg_rx = state.logs.subscribe();
     let mut app_state_rx = state.events.app_state.subscribe();
     let mut app_build_rx = state.events.app_build.subscribe();
     let mut app_todos_rx = state.events.app_todos.subscribe();
@@ -92,6 +92,21 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "app:log", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = logs_pg_rx.recv() => {
+                match result {
+                    Ok(entry) => {
+                        let msg = json!({ "type": "log:entry", "data": entry });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "log:entry", dropped = n, "ws subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

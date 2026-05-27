@@ -2058,28 +2058,16 @@ fn parse_artefact_spec(spec: &str) -> (&str, bool) {
 
 /// Resolve the list of artefacts to rsync down for `build`/`ship`. Reads
 /// `app.build_artefact` if set (one path per line, `?` prefix = optional),
-/// else falls back to stack defaults. Apps with `flow_callback_url` set get
-/// `?flows` auto-appended so TOML flow definitions edited on CloudMaster
-/// descend to Medion alongside compiled outputs. Optional so apps without
-/// any flow file still ship cleanly.
+/// else falls back to stack defaults.
 fn resolve_artefacts(app: &Application, defaults: Vec<String>) -> Vec<String> {
-    let mut artefacts: Vec<String> = match app.build_artefact.as_deref() {
+    match app.build_artefact.as_deref() {
         Some(custom) => custom
             .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
         None => defaults,
-    };
-    if app.flow_callback_url.is_some()
-        && !artefacts.iter().any(|a| {
-            let (path, _) = parse_artefact_spec(a);
-            path == "flows" || path == "src/flows"
-        })
-    {
-        artefacts.push("?flows".to_string());
     }
-    artefacts
 }
 
 fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<String>)> {

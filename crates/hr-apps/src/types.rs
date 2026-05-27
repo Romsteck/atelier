@@ -148,15 +148,13 @@ pub struct Application {
     /// (controlled by the registry's create flow).
     #[serde(default)]
     pub db_backend: DbBackend,
-    /// URL where `hr-flowd` POSTs callback requests for custom actions and
-    /// connectors (e.g. `http://127.0.0.1:3009`). When `None`, the app cannot
-    /// host custom flow steps — managed connectors only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy flow-callback URL — kept as `#[serde(default)]` to tolerate
+    /// existing `apps.json` entries that still carry the field after the
+    /// flow-system eradication (2026-05-26). No longer read or written.
+    #[serde(default, skip_serializing)]
     pub flow_callback_url: Option<String>,
-    /// HMAC bearer token shared between `hr-flowd` and the app for callback
-    /// authentication. 32 bytes hex. Posed in both `apps.json` (read by daemon)
-    /// and `.env` of the app (read by `hr-flow-callback` / `@homeroute/flow-action`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy flow-callback bearer token — see `flow_callback_url`.
+    #[serde(default, skip_serializing)]
     pub flow_callback_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

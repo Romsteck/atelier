@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use atelier_api::state::ApiState;
+use atelier_logging::{LogIngestConfig, LogIngestService, LoggingLayer};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:4100";
 const DEFAULT_IPC_SOCK: &str = "/run/atelier.sock";
@@ -33,7 +36,11 @@ const DEFAULT_DV_HOST: &str = "10.0.0.254";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    // Bootstrap the centralized logging service first, then install tracing
+    // layers that pipe events into it. If Postgres is unreachable at boot,
+    // LogIngestService runs in noop mode and Atelier still starts.
+    let logs = init_logs_ingest().await;
+    init_tracing(logs.clone());
 
     let http_addr = std::env::var("ATELIER_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
     let ipc_sock = PathBuf::from(std::env::var("ATELIER_IPC_SOCK").unwrap_or_else(|_| DEFAULT_IPC_SOCK.to_string()));
@@ -128,6 +135,7 @@ async fn main() -> Result<()> {
         db_manager,
         todos_manager,
         context_generator,
+        logs,
     );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
@@ -164,12 +172,54 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_tracing(logs: LogIngestService) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
+    let logging_layer = LoggingLayer::new(logs, "atelier");
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .with(logging_layer)
         .init();
+}
+
+/// Bootstrap the Postgres-backed log ingest service. Reads:
+///
+/// - `ATELIER_LOGS_DB_ADMIN_URL` — admin DSN (typically the dataverse admin)
+///   used to CREATE DATABASE/CREATE ROLE on first boot. Optional if the DB
+///   and writer role already exist.
+/// - `ATELIER_LOGS_DB_URL` — writer DSN used for INSERT/SELECT on
+///   `events_log`. If absent, falls back to the admin DSN swapped to
+///   `atelier_logs`.
+/// - `ATELIER_LOGS_WRITER_PASSWORD` — only consulted on the very first boot
+///   when the writer role doesn't yet exist.
+///
+/// If neither admin nor writer DSN is set, the service starts in noop mode
+/// (logs go to stdout only, no Postgres persistence). This keeps `atelier`
+/// bootable even when Postgres is unreachable.
+async fn init_logs_ingest() -> LogIngestService {
+    let admin_dsn = std::env::var("ATELIER_LOGS_DB_ADMIN_URL")
+        .or_else(|_| std::env::var("ATELIER_DV_ADMIN_URL"))
+        .ok()
+        .filter(|s| !s.is_empty());
+    let writer_dsn = std::env::var("ATELIER_LOGS_DB_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let writer_password = std::env::var("ATELIER_LOGS_WRITER_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    if admin_dsn.is_none() && writer_dsn.is_none() {
+        warn!("ATELIER_LOGS_DB_URL / ATELIER_DV_ADMIN_URL absent — log ingest in noop mode");
+    }
+
+    let cfg = LogIngestConfig {
+        admin_dsn,
+        writer_dsn,
+        writer_password,
+        ..LogIngestConfig::default()
+    };
+    LogIngestService::start(cfg).await
 }
 
 /// Seed `/opt/atelier/data/{apps,port-registry}.json` from the read-only mirror

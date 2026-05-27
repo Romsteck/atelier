@@ -1,18 +1,20 @@
 [workspace]
 resolver = "2"
+exclude = [
+    # Stand-alone shipper crate used by apps; not part of the workspace so
+    # apps can keep their own reqwest 0.12 without clashing.
+    "crates/atelier-logging-shipper",
+]
 members = [
     "crates/atelier",
     "crates/atelier-api",
+    "crates/atelier-logging",
     "crates/hr-apps",
     "crates/hr-dataverse",
     "crates/hr-dataverse-migrate",
     "crates/hr-db",
     "crates/hr-dv-codegen",
     "crates/hr-dvexpr",
-    "crates/hr-flow",
-    "crates/hr-flow-callback",
-    "crates/hr-flow-daemon",
-    "crates/hr-flow-macros",
     "crates/hr-git",
 ]
 
@@ -82,10 +84,6 @@ hr-dataverse-migrate = { path = "crates/hr-dataverse-migrate" }
 hr-db                = { path = "crates/hr-db" }
 hr-dv-codegen        = { path = "crates/hr-dv-codegen" }
 hr-dvexpr            = { path = "crates/hr-dvexpr" }
-hr-flow              = { path = "crates/hr-flow" }
-hr-flow-callback     = { path = "crates/hr-flow-callback" }
-hr-flow-daemon       = { path = "crates/hr-flow-daemon" }
-hr-flow-macros       = { path = "crates/hr-flow-macros" }
 hr-git               = { path = "crates/hr-git" }
 
 # Postgres + sqlx — voir commentaire dans homeroute Cargo.toml
@@ -94,7 +92,8 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chro
 async-graphql = { version = "7.0", default-features = false, features = ["dynamic-schema", "dataloader", "chrono", "uuid"] }
 
 # Crates internes Atelier
-atelier-api = { path = "crates/atelier-api" }
+atelier-api     = { path = "crates/atelier-api" }
+atelier-logging = { path = "crates/atelier-logging" }
 
 [profile.release]
 lto = "thin"

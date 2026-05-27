@@ -6,16 +6,16 @@ import DbExplorer from './DbExplorer';
 import TodosPanel from '../components/TodosPanel';
 import StudioIframe from '../components/StudioIframe';
 import DocsTab from '../components/docs/DocsTab';
-import FlowsTab from '../components/flows/FlowsTab';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
-  Eye, EyeOff, ChevronDown, Workflow,
+  Eye, EyeOff, ChevronDown,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
-  getApp, getAppStatus, getAppLogs, getAppEnv, updateAppEnv,
+  getApp, getAppStatus, getAppLogs, getAppEnv, updateAppEnv, getLogs,
 } from '../api/client';
+import { Link } from 'react-router-dom';
 
 export const CODESERVER_BASE = 'https://codeserver.mynetwk.biz';
 
@@ -25,16 +25,11 @@ const STACKS = [
   { value: 'axum', label: 'Rust Only' },
 ];
 
-// Phase 4 livrée (2026-05-09) : le daemon hr-flowd est partagé, donc toute
-// app HomeRoute est éligible aux flux indépendamment de la stack. Plus de
-// gating client-side ; le tab Flows s'affiche pour toutes les apps. Les
-// apps qui n'ont pas encore de TOML voient simplement un état vide.
 const TABS = [
   { id: 'code', label: 'Code', icon: Code2 },
   { id: 'db', label: 'DB', icon: Database, requiresDb: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'docs', label: 'Docs', icon: BookOpen },
-  { id: 'flows', label: 'Flows', icon: Workflow },
   { id: 'env', label: 'Env', icon: KeyRound },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -117,23 +112,40 @@ function CodeTab({ slug }) {
 function LogsTab({ slug }) {
   const [logs, setLogs] = useState([]);
   const [filter, setFilter] = useState('');
+  const [source, setSource] = useState('atelier');
   const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const ref = useRef(null);
 
   useEffect(() => {
     setLoading(true);
-    getAppLogs(slug, { limit: 200 }).then(res => {
-      const d = res.data?.data || res.data;
-      const data = d?.logs || (Array.isArray(d) ? d : []);
-      setLogs(Array.isArray(data) ? data : []);
-    }).catch(() => {}).finally(() => setLoading(false));
-  }, [slug]);
+    if (source === 'atelier') {
+      getLogs({ app_slug: slug, limit: 200 }).then(res => {
+        const d = res.data?.logs || [];
+        setLogs(Array.isArray(d) ? d : []);
+      }).catch(() => setLogs([])).finally(() => setLoading(false));
+    } else {
+      getAppLogs(slug, { limit: 200 }).then(res => {
+        const d = res.data?.data || res.data;
+        const data = d?.logs || (Array.isArray(d) ? d : []);
+        setLogs(Array.isArray(data) ? data : []);
+      }).catch(() => setLogs([])).finally(() => setLoading(false));
+    }
+  }, [slug, source]);
 
   useEffect(() => { if (autoScroll && ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs, autoScroll]);
 
   useWebSocket({
-    'app:log': (data) => { if (data.slug === slug) setLogs(prev => [...prev.slice(-499), data]); },
+    'log:entry': (data) => {
+      if (source !== 'atelier') return;
+      if (data?.app_slug !== slug) return;
+      setLogs(prev => [...prev.slice(-499), data]);
+    },
+    'app:log': (data) => {
+      if (source !== 'journalctl') return;
+      if (data?.slug !== slug) return;
+      setLogs(prev => [...prev.slice(-499), data]);
+    },
   });
 
   const onScroll = () => { if (!ref.current) return; const { scrollTop, scrollHeight, clientHeight } = ref.current; setAutoScroll(scrollHeight - scrollTop - clientHeight < 50); };
@@ -145,9 +157,32 @@ function LogsTab({ slug }) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 px-4 py-2 shrink-0 border-b border-gray-700">
+        <div className="flex gap-1 text-xs">
+          <button
+            onClick={() => setSource('atelier')}
+            className={`px-2 py-1 rounded ${source === 'atelier' ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+            title="Logs structurés Postgres (atelier-logging-shipper)"
+          >
+            Atelier
+          </button>
+          <button
+            onClick={() => setSource('journalctl')}
+            className={`px-2 py-1 rounded ${source === 'journalctl' ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+            title="Logs systemd bruts (journalctl)"
+          >
+            journalctl
+          </button>
+        </div>
         <input type="text" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtrer..."
           className="flex-1 max-w-[300px] px-3 py-1 rounded text-sm outline-none bg-gray-900 text-white border border-gray-700" />
-        <span className="text-xs text-gray-500 ml-auto">{filtered.length} entrees{autoScroll ? ' (auto-scroll)' : ''}</span>
+        <Link
+          to={`/logs?app_slug=${encodeURIComponent(slug)}`}
+          className="text-xs text-amber-400 hover:text-amber-300 inline-flex items-center gap-1"
+          title="Voir tous les logs de cette app en plein écran"
+        >
+          plein écran <ExternalLink className="w-3 h-3" />
+        </Link>
+        <span className="text-xs text-gray-500 ml-2">{filtered.length} entrees{autoScroll ? ' (auto-scroll)' : ''}</span>
       </div>
       <div ref={ref} onScroll={onScroll} className="flex-1 overflow-y-auto p-4 font-mono text-xs">
         {filtered.map((e, i) => {
@@ -490,7 +525,6 @@ export default function Studio() {
                   {activeTab === 'db' && currentApp?.has_db && <DbExplorer appSlug={selectedSlug} embedded />}
                   {activeTab === 'logs' && <LogsTab slug={selectedSlug} />}
                   {activeTab === 'docs' && <DocsTab slug={selectedSlug} />}
-                  {activeTab === 'flows' && <FlowsTab slug={selectedSlug} />}
                   {activeTab === 'env' && <EnvTab slug={selectedSlug} />}
                   {activeTab === 'settings' && <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />}
                 </div>

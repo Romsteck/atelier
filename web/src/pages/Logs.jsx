@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { ScrollText, Pause, Play, Search, ChevronDown, ChevronRight, X } from 'lucide-react';
+import { ScrollText, Pause, Play, Search, ChevronDown, ChevronRight, X, Factory, Layers } from 'lucide-react';
 import useWebSocket from '../hooks/useWebSocket';
-import { getLogs } from '../api/client';
+import { getLogs, getLogStats, getApps } from '../api/client';
 
 const LEVELS = [
   { key: 'ERROR', label: 'ERROR', color: 'text-red-400', bg: 'bg-red-400/10', rowBg: 'bg-red-400/5' },
@@ -10,7 +10,15 @@ const LEVELS = [
   { key: 'DEBUG', label: 'DEBUG', color: 'text-gray-500', bg: 'bg-gray-600/10', rowBg: '' },
 ];
 
-const SERVICES = ['homeroute', 'edge', 'orchestrator', 'netcore'];
+// `SCOPES` reflects the Atelier-specific UX choice : split the world into
+// (a) the platform itself (Atelier core — service=atelier, no app_slug) and
+// (b) the apps it supervises. The default "tous" preserves the legacy
+// behaviour of showing everything.
+const SCOPES = [
+  { key: 'all',   label: 'Tous',         icon: null    },
+  { key: 'core',  label: 'Atelier core', icon: Factory },
+  { key: 'apps',  label: 'Apps',         icon: Layers  },
+];
 
 const TIME_RANGES = [
   { key: 'live', label: 'Live' },
@@ -45,7 +53,17 @@ export default function Logs() {
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const [activeLevels, setActiveLevels] = useState(new Set(['ERROR', 'WARN', 'INFO']));
-  const [activeServices, setActiveServices] = useState(new Set(SERVICES));
+  const [availableServices, setAvailableServices] = useState([]);
+  const [activeServices, setActiveServices] = useState(null); // null = all
+  const [availableApps, setAvailableApps] = useState([]);
+  const [scope, setScope] = useState(() => {
+    const url = new URLSearchParams(window.location.search);
+    if (url.get('app_slug')) return 'apps';
+    return url.get('scope') || 'all';
+  });
+  const [appSlug, setAppSlug] = useState(() => {
+    return new URLSearchParams(window.location.search).get('app_slug') || '';
+  });
   const [searchText, setSearchText] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [timeRange, setTimeRange] = useState('live');
@@ -70,6 +88,32 @@ export default function Logs() {
     return () => clearTimeout(debounceRef.current);
   }, [searchInput]);
 
+  // Discover available services + apps (filter chips are dynamic, since
+  // services are not known ahead of time once apps start logging).
+  useEffect(() => {
+    getLogStats()
+      .then(res => {
+        const services = (res.data?.by_service || []).map(s => s.service).filter(Boolean);
+        setAvailableServices(services);
+      })
+      .catch(() => {});
+    getApps()
+      .then(res => {
+        const apps = (res.data?.apps || res.data || []);
+        setAvailableApps(Array.isArray(apps) ? apps.map(a => a.slug).filter(Boolean) : []);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Keep URL in sync with scope/app_slug so AppDetail → Logs deep-links work
+  // and so the page is shareable.
+  useEffect(() => {
+    const url = new URL(window.location);
+    if (appSlug) url.searchParams.set('app_slug', appSlug); else url.searchParams.delete('app_slug');
+    if (scope !== 'all') url.searchParams.set('scope', scope); else url.searchParams.delete('scope');
+    window.history.replaceState(null, '', url);
+  }, [appSlug, scope]);
+
   // Toggle level filter
   const toggleLevel = useCallback((level) => {
     setActiveLevels(prev => {
@@ -90,22 +134,24 @@ export default function Logs() {
     });
   }, []);
 
-  // WebSocket for live logs
-  useWebSocket(isLive ? {
-    'log:entry': (data) => {
-      if (!data) return;
-      wsConnected.current = true;
-      const entry = { ...data, _id: data.id || `${Date.now()}-${Math.random()}` };
-      setLiveLogs(prev => {
-        const next = [...prev, entry];
-        if (next.length > MAX_LOGS) return next.slice(next.length - MAX_LOGS);
-        return next;
-      });
-      if (paused) {
-        setNewCount(n => n + 1);
-      }
+  // WebSocket for live logs. Atelier emits `log:entry` from the Postgres
+  // ingest service (centralized) and a legacy `app:log` from per-app
+  // forwarded streams — we listen to both so coverage stays complete during
+  // the transition.
+  const liveHandler = useCallback((data) => {
+    if (!data) return;
+    wsConnected.current = true;
+    const entry = { ...data, _id: data.id || `${Date.now()}-${Math.random()}` };
+    setLiveLogs(prev => {
+      const next = [...prev, entry];
+      if (next.length > MAX_LOGS) return next.slice(next.length - MAX_LOGS);
+      return next;
+    });
+    if (paused) {
+      setNewCount(n => n + 1);
     }
-  } : {});
+  }, [paused]);
+  useWebSocket(isLive ? { 'log:entry': liveHandler, 'app:log': liveHandler } : {});
 
   // Fetch history logs when not live
   useEffect(() => {
@@ -117,7 +163,14 @@ export default function Logs() {
     const since = new Date(Date.now() - timeRangeToMs(timeRange)).toISOString();
     const params = { since, limit: 100, offset: 0 };
     if (activeLevels.size < 4) params.level = [...activeLevels].map(l => l.toLowerCase()).join(',');
-    if (activeServices.size < SERVICES.length) params.service = [...activeServices].join(',');
+    if (activeServices && availableServices.length > 0 && activeServices.size < availableServices.length) {
+      params.service = [...activeServices].join(',');
+    }
+    if (scope === 'core') params.service = 'atelier';
+    if (scope === 'apps' && !appSlug && availableApps.length > 0) {
+      params.service = availableApps.map(s => `app-${s}`).join(',');
+    }
+    if (appSlug) params.app_slug = appSlug;
     if (searchText) params.q = searchText;
 
     getLogs(params)
@@ -128,7 +181,7 @@ export default function Logs() {
       })
       .catch(() => {})
       .finally(() => setLoadingHistory(false));
-  }, [timeRange, activeLevels, activeServices, searchText, isLive]);
+  }, [timeRange, activeLevels, activeServices, availableServices, scope, appSlug, availableApps, searchText, isLive]);
 
   // Load more history
   const loadMore = useCallback(() => {
@@ -137,7 +190,14 @@ export default function Logs() {
     const since = new Date(Date.now() - timeRangeToMs(timeRange)).toISOString();
     const params = { since, limit: 100, offset: historyLogs.length };
     if (activeLevels.size < 4) params.level = [...activeLevels].map(l => l.toLowerCase()).join(',');
-    if (activeServices.size < SERVICES.length) params.service = [...activeServices].join(',');
+    if (activeServices && availableServices.length > 0 && activeServices.size < availableServices.length) {
+      params.service = [...activeServices].join(',');
+    }
+    if (scope === 'core') params.service = 'atelier';
+    if (scope === 'apps' && !appSlug && availableApps.length > 0) {
+      params.service = availableApps.map(s => `app-${s}`).join(',');
+    }
+    if (appSlug) params.app_slug = appSlug;
     if (searchText) params.q = searchText;
 
     getLogs(params)
@@ -147,7 +207,7 @@ export default function Logs() {
       })
       .catch(() => {})
       .finally(() => setLoadingHistory(false));
-  }, [loadingHistory, isLive, timeRange, historyLogs.length, activeLevels, activeServices, searchText]);
+  }, [loadingHistory, isLive, timeRange, historyLogs.length, activeLevels, activeServices, availableServices, scope, appSlug, availableApps, searchText]);
 
   // Auto-scroll in live mode
   useEffect(() => {
@@ -166,14 +226,19 @@ export default function Logs() {
     if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
-  // Filter live logs client-side
+  // Filter live logs client-side. In live mode the server filter doesn't
+  // apply (we read everything off the WS), so we re-apply the same
+  // predicates locally for visual consistency.
   const filteredLogs = useMemo(() => {
     const source = isLive ? liveLogs : historyLogs;
     return source.filter(log => {
       const level = (log.level || 'INFO').toUpperCase();
       if (!activeLevels.has(level)) return false;
       const svc = (log.service || '').toLowerCase();
-      if (svc && !activeServices.has(svc)) return false;
+      if (svc && activeServices && !activeServices.has(svc)) return false;
+      if (scope === 'core' && svc !== 'atelier') return false;
+      if (scope === 'apps' && (!log.app_slug || (log.app_slug && appSlug && log.app_slug !== appSlug))) return false;
+      if (appSlug && log.app_slug !== appSlug) return false;
       if (searchText) {
         const q = searchText.toLowerCase();
         const msg = (log.message || '').toLowerCase();
@@ -184,7 +249,7 @@ export default function Logs() {
       }
       return true;
     });
-  }, [isLive, liveLogs, historyLogs, activeLevels, activeServices, searchText]);
+  }, [isLive, liveLogs, historyLogs, activeLevels, activeServices, scope, appSlug, searchText]);
 
   const levelCfg = (level) => LEVELS.find(l => l.key === (level || 'INFO').toUpperCase()) || LEVELS[2];
 
@@ -231,21 +296,68 @@ export default function Logs() {
 
         <div className="w-px h-5 bg-gray-700" />
 
-        {/* Service chips */}
+        {/* Scope toggle — Atelier-specific touch : split platform vs apps */}
         <div className="flex gap-1">
-          {SERVICES.map(svc => (
-            <button
-              key={svc}
-              onClick={() => toggleService(svc)}
-              className={`px-2.5 py-1 text-xs rounded-lg transition-colors border ${
-                activeServices.has(svc)
-                  ? 'bg-gray-700 text-gray-200 border-gray-600'
-                  : 'bg-gray-800 text-gray-500 border-gray-700 hover:bg-gray-700'
-              }`}
-            >
-              {svc}
-            </button>
-          ))}
+          {SCOPES.map(s => {
+            const Icon = s.icon;
+            const active = scope === s.key;
+            return (
+              <button
+                key={s.key}
+                onClick={() => { setScope(s.key); if (s.key !== 'apps') setAppSlug(''); }}
+                className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition-colors border ${
+                  active
+                    ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                    : 'bg-gray-800 text-gray-400 border-gray-700 hover:bg-gray-700'
+                }`}
+              >
+                {Icon ? <Icon className="w-3 h-3" /> : null}
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* App selector — visible only when scope=apps */}
+        {scope === 'apps' && availableApps.length > 0 && (
+          <select
+            value={appSlug}
+            onChange={(e) => setAppSlug(e.target.value)}
+            className="px-2 py-1 text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500"
+          >
+            <option value="">Toutes les apps</option>
+            {availableApps.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        )}
+
+        <div className="w-px h-5 bg-gray-700" />
+
+        {/* Service chips (dynamic, populated from /api/logs/stats) */}
+        <div className="flex gap-1 flex-wrap">
+          {availableServices.map(svc => {
+            const active = !activeServices || activeServices.has(svc);
+            return (
+              <button
+                key={svc}
+                onClick={() => {
+                  setActiveServices(prev => {
+                    const next = new Set(prev || availableServices);
+                    if (next.has(svc)) next.delete(svc); else next.add(svc);
+                    return next.size === availableServices.length ? null : next;
+                  });
+                }}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-colors border ${
+                  active
+                    ? 'bg-gray-700 text-gray-200 border-gray-600'
+                    : 'bg-gray-800 text-gray-500 border-gray-700 hover:bg-gray-700'
+                }`}
+              >
+                {svc}
+              </button>
+            );
+          })}
         </div>
 
         <div className="w-px h-5 bg-gray-700" />

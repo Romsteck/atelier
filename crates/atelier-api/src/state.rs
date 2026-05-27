@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use atelier_logging::LogIngestService;
 use hr_apps::{AppRegistry, AppSupervisor, PortRegistry, db_manager::DbManager, todos::TodosManager};
 use hr_apps::context::ContextGenerator;
 use hr_common::events::EventBus;
@@ -41,6 +42,11 @@ pub struct ApiState {
     /// never fires.
     pub build_locks:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+
+    /// Centralized logging — Postgres-backed ring/flush ingest service. Used
+    /// by the in-process tracing layer, the HTTP `/api/logs/ingest` endpoint,
+    /// and the WebSocket live stream.
+    pub logs: LogIngestService,
 }
 
 impl ApiState {
@@ -61,6 +67,7 @@ impl ApiState {
         db_manager: Arc<DbManager>,
         todos_manager: Arc<TodosManager>,
         context_generator: Arc<ContextGenerator>,
+        logs: LogIngestService,
     ) -> Self {
         Self {
             docs_dir,
@@ -79,6 +86,7 @@ impl ApiState {
             todos_manager,
             context_generator,
             build_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            logs,
         }
     }
 }
