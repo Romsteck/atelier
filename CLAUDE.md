@@ -1,12 +1,12 @@
 # Atelier — Plateforme applicative HomeRoute
 
-## Statut migration (2026-05-09)
+## Statut migration (2026-05-27)
 
-> ✅ **Atelier rapatrié sur Medion** — supervisor + 6 apps running (`atelier-app-*.service`) tournent désormais sur Medion. CloudMaster ne fait plus que servir `code-server` (Studio) pour l'édition des sources.
+> ✅ **Studio Atelier + sources apps rapatriés sur Medion** — `atelier-studio.service` (code-server, 127.0.0.1:8443) tourne sur Medion, route hr-edge `codeserver.mynetwk.biz → 127.0.0.1:8443`. Les sources canoniques des 6 apps vivent désormais à `/var/lib/atelier/apps/<slug>/src/` (source = runtime, plus de copie interne).
 >
-> Précédemment : Phase 9 cutover Medion→CloudMaster + 9.5 slim (10 crates internalisés `crates/hr-XXX`). Voir [memory/project_atelier_cutover_done.md](/home/romain/.claude/projects/-nvme-homeroute/memory/project_atelier_cutover_done.md).
+> Précédemment (2026-05-09) : Atelier supervisor + apps rapatriés sur Medion. CloudMaster ne servait plus que le Studio + sources apps.
 >
-> Détail rapatriement : [docs/plan-rapatriement.md](docs/plan-rapatriement.md) (plan local, source `/home/romain/.claude/plans/le-but-de-la-encapsulated-moler.md`).
+> **Maintenant CloudMaster héberge encore** : (a) le code source d'Atelier (`/nvme/atelier/`) — édité, buildé et déployé via `make deploy` ; (b) le code-server perso (port 9080, `code.mynetwk.biz`).
 
 ### Restant à faire (différé)
 
@@ -30,33 +30,35 @@ Plateforme applicative autonome (post-rapatriement 2026-05-09). Contient :
 - **Git** : bare repos.
 - **MCP** : exposition des tools `app.*`, `db.*`, `docs.*`.
 
-Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME (ces concerns restent dans `hr-edge` + `hr-netcore` sur Medion). `code-server` (Studio) reste sur CloudMaster.
+Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME (ces concerns restent dans `hr-edge` + `hr-netcore` sur Medion). Le **Studio** (code-server pour éditer les apps) tourne désormais aussi sur Medion (`atelier-studio.service`).
 
-## Architecture (post-rapatriement, 2026-05-09)
+## Architecture (post-rapatriement Studio, 2026-05-27)
 
 ```
 Internet → Cloudflare → Medion (10.0.0.254)
                           ├─ hr-edge (proxy + ACME + auth + tunnel)
-                          │   ├─ {slug}.mynetwk.biz → 127.0.0.1:port-app  (Medion loopback)
-                          │   ├─ app.mynetwk.biz   → 127.0.0.1:4100      (Atelier)
-                          │   ├─ studio.mynetwk.biz → 10.0.0.10:8443     (code-server, CloudMaster)
-                          │   └─ proxy.mynetwk.biz  → 127.0.0.1:4000     (homeroute network API)
+                          │   ├─ app.mynetwk.biz       → 127.0.0.1:4100      (Atelier API + frontend)
+                          │   ├─ codeserver.mynetwk.biz → 127.0.0.1:8443     (Studio code-server)
+                          │   ├─ atelier.mynetwk.biz    → 127.0.0.1:4100     (Atelier)
+                          │   └─ code.mynetwk.biz       → 10.0.0.10:9080     (code-server perso CM)
                           ├─ atelier.service (4100) — supervisor + apps API + frontend
+                          ├─ atelier-studio.service (127.0.0.1:8443) — code-server pour apps
                           ├─ atelier-app-{files,home,myfrigo,trader,wallet,www}.service
                           ├─ hr-edge.service / hr-orchestrator.service / homeroute.service
                           └─ Postgres-dataverse (5432)
 
-CloudMaster (10.0.0.10)
-  ├─ hr-studio.service (8443) — code-server (édition sources)
-  └─ /opt/homeroute/apps/{slug}/src/ — sources canoniques (édition + build)
+CloudMaster (10.0.0.10)  ← reste allumé
+  ├─ /nvme/atelier/  — sources Atelier (édition + make deploy)
+  └─ code-server@romain.service (9080, code.mynetwk.biz) — usage perso (édite Atelier, etc.)
 ```
 
 ## Stockage
 
 | Données | Chemin |
 |---------|--------|
-| Sources canoniques des apps | `/opt/homeroute/apps/{slug}/src/` (CloudMaster, édition via code-server) |
-| Apps runtime (artefacts compilés) | `/var/lib/atelier/apps/{slug}/{src,bin,.env,db.sqlite,runs}` (Medion) |
+| Sources canoniques apps (= runtime) | `/var/lib/atelier/apps/{slug}/{src,bin,.env,db.sqlite,runs,todos.json}` (Medion) — édition via Studio |
+| Studio code-server user-data | `/var/lib/atelier/studio/code-server/` (Medion, hr-studio:hr-studio 750) |
+| Studio user HOME | `/var/lib/hr-studio/` (Medion, user `hr-studio` UID 993) |
 | Atelier registry canonical | `/opt/atelier/data/{apps.json, port-registry.json}` (Medion) |
 | Atelier binaire + frontend | `/opt/atelier/{bin/atelier,web/dist}` (Medion) |
 | Atelier env | `/opt/atelier/.env` (Medion) |
@@ -64,6 +66,7 @@ CloudMaster (10.0.0.10)
 | Postgres-dataverse | Medion 127.0.0.1:5432 (local depuis Atelier) |
 | dataverse-secrets.json | `/var/lib/atelier/state/dataverse-secrets.json` (Medion) |
 | **Files data (raid0)** | `/ssd_pool/homecloud/data/{files,thumbnails,downloads,films}` (Medion zfs pool) |
+| Sources Atelier (code) | `/nvme/atelier/` (CloudMaster — édition + `make deploy`) |
 
 ## Ports & sockets
 
@@ -72,7 +75,8 @@ CloudMaster (10.0.0.10)
 | 4100 | Medion | Atelier HTTP API |
 | /run/atelier.sock | Medion | Atelier IPC |
 | 3005-3010 | Medion (loopback) | Apps |
-| 8443 | CloudMaster | code-server (hr-studio.service) |
+| 8443 | Medion (loopback) | atelier-studio.service (code-server) |
+| 9080 | CloudMaster | code-server perso (`code.mynetwk.biz`) |
 
 ## Variables d'environnement Atelier (Medion `/opt/atelier/.env`)
 
@@ -84,24 +88,35 @@ ATELIER_DV_HOST=127.0.0.1
 # Defaults: ATELIER_APP_UNIT_PREFIX=atelier-app, ATELIER_APP_SLICE=atelier-apps.slice
 ```
 
-## Build & deploy (depuis CloudMaster)
+## Build & deploy
+
+### Atelier lui-même (depuis CloudMaster)
+
+Le code source d'Atelier (`/nvme/atelier/`) vit sur CloudMaster, édité via le code-server perso (`code.mynetwk.biz`).
 
 ```bash
 make help              # tous les targets
-make atelier           # cargo build --release -p atelier (local)
+make atelier           # cargo build --release -p atelier (local CM)
 make web               # build frontend (web/dist)
-make deploy            # build all + push binary + frontend vers Medion + restart atelier.service
-make deploy-app SLUG=x # build + rsync app x vers Medion + restart via API
+make deploy            # build CM + push binary + frontend vers Medion + restart atelier.service
 make logs              # tail journalctl atelier sur Medion (via SSH)
 ```
 
-Build et édition des sources : **CloudMaster**. Runtime + supervisor : **Medion**. Pas de rsync inverse — Medion ne renvoie rien à CloudMaster.
+### Apps HomeRoute (depuis CM ou Studio Medion)
+
+Les sources des 6 apps vivent désormais sur Medion (`/var/lib/atelier/apps/<slug>/src/`). On les édite via le Studio (`codeserver.mynetwk.biz`). Le `make deploy-app` se lance soit depuis CM (mode SSH automatique vers Medion), soit directement sur Medion via un terminal Studio.
+
+```bash
+make deploy-app SLUG=files   # build sur Medion (local ou via SSH) + restart via API + healthcheck
+```
+
+Le script (`scripts/deploy-app.sh`) détecte `hostname == medion` → build in-place, sinon → SSH vers Medion. Plus de rsync transversal source/runtime (source = runtime depuis le 2026-05-27).
 
 ## Règles obligatoires
 
 - **JAMAIS** `cargo run` directement — utiliser `make deploy`.
 - **TOUJOURS** `make deploy` après modification du code Atelier (build CM → rsync Medion → restart).
-- **TOUJOURS** `make deploy-app SLUG=<x>` après modification d'une app (build CM → rsync Medion → restart via API).
+- **TOUJOURS** `make deploy-app SLUG=<x>` après modification d'une app (build Medion + restart via API).
 - **TOUJOURS** vérifier visuellement après deploy frontend (SW cache-first peut masquer le résultat).
 - **TOUJOURS** tester e2e les endpoints créés/modifiés (cf. `.claude/rules/testing.md`).
 - **TOUJOURS** logger structuré (cf. `.claude/rules/logging.md`).
@@ -140,6 +155,6 @@ Override possible via env vars `ATELIER_APP_UNIT_PREFIX` / `ATELIER_APP_SLICE` /
 À chaque fois que tu travailles dans Atelier :
 
 1. Lire `MEMORY.md` global (auto-chargé) et les rules dans `.claude/rules/`.
-2. Si la tâche concerne une app HomeRoute existante (`/opt/homeroute/apps/{slug}/` sur CloudMaster), suivre la doctrine **DOC-FIRST** : `mcp__studio__docs_overview` d'abord.
+2. Si la tâche concerne une app HomeRoute existante (`/var/lib/atelier/apps/{slug}/src/` sur Medion, éditée via Studio), suivre la doctrine **DOC-FIRST** : `mcp__studio__docs_overview` d'abord.
 3. Pour toute fonctionnalité ajoutée à Atelier : doc + tests e2e + logging structuré.
-4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier sur Medion (`https://app.mynetwk.biz/api/...` ou `ssh romain@10.0.0.254 "sudo journalctl -u atelier..."`). Pas d'accès direct à `/opt/homeroute/apps/` côté Medion (n'existe plus depuis le rapatriement).
+4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier sur Medion (`https://app.mynetwk.biz/api/...` ou `ssh romain@10.0.0.254 "sudo journalctl -u atelier..."`).

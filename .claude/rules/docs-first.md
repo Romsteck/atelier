@@ -1,6 +1,6 @@
 # Docs-first — Atelier
 
-Pour toute tâche dans une app HomeRoute existante (sous `/opt/homeroute/apps/{slug}/`), le système docs est la source de vérité de l'intention. Lire AVANT de coder.
+Pour toute tâche dans une app HomeRoute existante (sources sur Medion à `/var/lib/atelier/apps/{slug}/src/`, éditées via Studio), le système docs est la source de vérité de l'intention. Lire AVANT de coder.
 
 ## Workflow obligatoire
 

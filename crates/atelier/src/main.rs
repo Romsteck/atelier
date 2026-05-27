@@ -18,7 +18,7 @@ const DEFAULT_DOCS_DIR: &str = "/var/lib/atelier/docs";
 const DEFAULT_DOCS_INDEX: &str = "/var/lib/atelier/docs-index.sqlite";
 const DEFAULT_GIT_REPOS_DIR: &str = "/var/lib/atelier/git/repos";
 const DEFAULT_APPS_STATE_DIR: &str = "/var/lib/atelier/state";
-const DEFAULT_APPS_SRC_ROOT: &str = "/opt/homeroute/apps";
+const DEFAULT_APPS_SRC_ROOT: &str = "/var/lib/atelier/apps";
 const DEFAULT_APPS_RUNTIME_ROOT: &str = "/var/lib/atelier/apps";
 const DEFAULT_WEB_DIST: &str = "/opt/atelier/web/dist";
 /// Données canoniques d'Atelier post-cutover (Atelier owns these files).

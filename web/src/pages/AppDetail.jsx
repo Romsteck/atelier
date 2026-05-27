@@ -165,12 +165,12 @@ function OverviewTab({ app, status, busy, onControl }) {
 }
 
 function CodeTab({ slug }) {
-  const codeServerUrl = `https://codeserver.mynetwk.biz/?folder=/opt/homeroute/apps/${slug}/src`;
+  const codeServerUrl = `https://codeserver.mynetwk.biz/?folder=/var/lib/atelier/apps/${slug}/src`;
   return (
     <div className="flex flex-col h-full" style={{ minHeight: '70vh' }}>
       <div className="flex items-center justify-between mb-2">
         <p className="text-sm text-gray-400">
-          Code-server workspace : <code className="text-blue-400">/opt/homeroute/apps/{slug}/src</code>
+          Code-server workspace : <code className="text-blue-400">/var/lib/atelier/apps/{slug}/src</code>
         </p>
         <a
           href={codeServerUrl}

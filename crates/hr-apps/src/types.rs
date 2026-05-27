@@ -50,21 +50,15 @@ pub enum AppState {
     Unknown,
 }
 
-/// Where the canonical `src/` tree of this app lives. Determines whether the
-/// `app.build` pipeline must rsync sources up to CloudMaster or whether the
-/// sources already live there (post wave-2 migration).
-///
-/// The default is `CloudMaster`: nouvelles apps sont scaffoldées directement
-/// sur CloudMaster (workspace agent + build remote sans rsync UP). Les apps
-/// existantes (legacy) ont leur valeur explicite dans `apps.json`.
+/// DEPRECATED post-rapatriement 2026-05-27 — kept for forward-compat deserialise
+/// of legacy `apps.json` files. The per-app value is now ignored: build location
+/// is read from the `ATELIER_BUILD_HOST` env var at instance level (empty/`local`
+/// = build in-place on Medion, otherwise SSH to `user@host`). To be removed once
+/// the apps_ops.rs refactor lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SourcesLocation {
-    /// Sources live on Medion under `/opt/homeroute/apps/{slug}/src/` (legacy
-    /// pre-migration layout). Build must rsync them up to CloudMaster first.
     Medion,
-    /// Sources live on CloudMaster under `/opt/homeroute/apps/{slug}/src/`.
-    /// Build skips the rsync-up step — only the artefact is rsynced back down.
     #[default]
     CloudMaster,
 }

@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-# Deploy a single app from CloudMaster (sources + build) to Medion (runtime).
+# Deploy a single app: trigger build on Medion (local or via SSH) + restart via Atelier API.
 #
 # Usage: scripts/deploy-app.sh <slug> [--build|--no-build]
 #
-# - <slug>    : files | home | myfrigo | trader | wallet | www | ...
-# - --build   : run the app's build_command before rsync (default)
-# - --no-build: skip build, only rsync existing artefacts
+# Layout post-rapatriement (2026-05-27):
+#   Sources canoniques + runtime : /var/lib/atelier/apps/<slug>/  (sur Medion)
+#   Atelier API                  : http://10.0.0.254:4100
 #
-# Layout assumptions:
-#   CloudMaster  : sources at /opt/homeroute/apps/<slug>/src/  (+ .env, db.sqlite)
-#   Medion       : runtime at /var/lib/atelier/apps/<slug>/
-#   Atelier API  : http://10.0.0.254:4100 (or via app.mynetwk.biz)
-#
-# Safety invariants:
-#   - Only /src/ is mirrored with --delete ; Medion-only runtime state
-#     (db.sqlite, runs/, bin/) is NEVER touched by this script.
-#   - The CloudMaster db.sqlite is a stale snapshot — it is explicitly
-#     excluded so a deploy can never clobber the live production DB.
+# Behaviour :
+#   - Quand le script tourne SUR Medion : build in-place (cd src/ && build_cmd).
+#   - Ailleurs (CM, dev workstation)    : build via SSH vers Medion.
+#   - Plus de rsync transversal — source = runtime depuis le cutover.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -29,21 +23,21 @@ BUILD="${2:---build}"
 
 MEDION="${ATELIER_MEDION:-romain@10.0.0.254}"
 ATELIER_API="${ATELIER_API:-http://10.0.0.254:4100}"
-APP_DIR="/opt/homeroute/apps/$SLUG"
-MEDION_APP="/var/lib/atelier/apps/$SLUG"
+APP_SRC="/var/lib/atelier/apps/$SLUG/src"
 
-if [[ ! -d "$APP_DIR/src" ]]; then
-  echo "error: $APP_DIR/src not found on CloudMaster" >&2
-  exit 1
-fi
-# Guard against an empty source tree producing a destructive --delete mirror.
-if [[ -z "$(find "$APP_DIR/src" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-  echo "error: $APP_DIR/src is empty — refusing to deploy (would wipe Medion src/)" >&2
-  exit 1
-fi
+is_local_medion() { [[ "$(uname -n)" == "medion" ]]; }
 
-# Serialise concurrent deploys of the same slug — two parallel rsync into the
-# same Medion directory would interleave artefacts.
+# bash -lc charges the login profile so cargo / corepack / pnpm are on PATH.
+run_on_medion() {
+  local cmd="$1"
+  if is_local_medion; then
+    bash -lc "$cmd"
+  else
+    ssh "$MEDION" "bash -lc $(printf '%q' "$cmd")"
+  fi
+}
+
+# Serialise concurrent deploys of the same slug.
 LOCKFILE="/tmp/atelier-deploy-${SLUG}.lock"
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
@@ -51,8 +45,8 @@ if ! flock -n 9; then
   exit 1
 fi
 
-# Fetch the registry once. A failure here must abort — a silent fallback
-# would mis-detect the stack and exclude node_modules from a NextJS deploy.
+# Fetch the registry for build_command + health_path + stack. A failure aborts —
+# a silent fallback would mis-detect the stack or skip the build.
 APPS_JSON="$(curl -fsS --max-time 10 "$ATELIER_API/api/apps")" || {
   echo "error: cannot reach Atelier API at $ATELIER_API/api/apps — aborting" >&2
   exit 1
@@ -64,41 +58,25 @@ if [[ -z "$STACK" || "$STACK" == "null" ]]; then
 fi
 BUILD_CMD="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .build_command // empty' <<<"$APPS_JSON")"
 HEALTH_PATH="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .health_path // "/"' <<<"$APPS_JSON")"
-echo "→ deploy-app slug=$SLUG stack=$STACK build=$BUILD"
 
-# Stack-aware rsync excludes, anchored at the src/ root. NextJS apps need the
-# source node_modules (the .next/standalone bundle is incomplete and falls
-# back to the parent tree).
-EXCLUDES=(
-  --exclude='/target/'
-  --exclude='/.git/'
-  --exclude='/.pnpm-store/'
-  --exclude='/.cache/'
-  --exclude='/.next/cache/'
-  --exclude='/.vite/'
-  --exclude='/.claude/'
-  --exclude='/mobile/'
-  --exclude='/desktop/'
-  --exclude='/devices-code/'
-  --exclude='/server/target/'
-  --exclude='/api/target/'
-  --exclude='*.log'
-)
-if [[ "$STACK" != "next-js" ]]; then
-  EXCLUDES+=(
-    --exclude='/node_modules/'
-    --exclude='/web/node_modules/'
-    --exclude='/client/node_modules/'
-    --exclude='/api/node_modules/'
-  )
+if is_local_medion; then
+  echo "→ deploy-app slug=$SLUG stack=$STACK build=$BUILD (local on Medion)"
+else
+  echo "→ deploy-app slug=$SLUG stack=$STACK build=$BUILD (via SSH to $MEDION)"
 fi
 
-# Build (optional)
+# Sanity check: source tree exists on Medion.
+if ! run_on_medion "[[ -d '$APP_SRC' ]]"; then
+  echo "error: $APP_SRC missing on Medion — aborting" >&2
+  exit 1
+fi
+
+# Build.
 if [[ "$BUILD" == "--build" ]]; then
   if [[ -n "$BUILD_CMD" ]]; then
-    echo "→ build: cd $APP_DIR/src && $BUILD_CMD"
-    if ! (cd "$APP_DIR/src" && bash -c "$BUILD_CMD"); then
-      echo "error: build_command failed for $SLUG — aborting (nothing rsynced)" >&2
+    echo "→ build: cd $APP_SRC && $BUILD_CMD"
+    if ! run_on_medion "cd '$APP_SRC' && $BUILD_CMD"; then
+      echo "error: build_command failed for $SLUG — aborting" >&2
       exit 1
     fi
   else
@@ -106,21 +84,7 @@ if [[ "$BUILD" == "--build" ]]; then
   fi
 fi
 
-# Rsync src/ with --delete so removed files do not linger on Medion. The
-# destination is scoped to <app>/src/ — --delete can therefore never reach
-# the Medion-only runtime state (db.sqlite, runs/, bin/).
-echo "→ rsync $APP_DIR/src/ → $MEDION:$MEDION_APP/src/"
-rsync -a --rsync-path='sudo rsync' --delete --info=stats1 \
-  "${EXCLUDES[@]}" \
-  "$APP_DIR/src/" "$MEDION:$MEDION_APP/src/"
-
-# Sync the app .env (no --delete, never the stale db.sqlite).
-if [[ -f "$APP_DIR/.env" ]]; then
-  echo "→ rsync .env"
-  rsync -a --rsync-path='sudo rsync' "$APP_DIR/.env" "$MEDION:$MEDION_APP/.env"
-fi
-
-# Restart via Atelier API. curl -f + set -e abort the script on a non-2xx.
+# Restart via Atelier API.
 echo "→ POST $ATELIER_API/api/apps/$SLUG/control restart"
 curl -fsS -X POST "$ATELIER_API/api/apps/$SLUG/control" \
   -H 'content-type: application/json' \
@@ -131,8 +95,9 @@ curl -fsS -X POST "$ATELIER_API/api/apps/$SLUG/control" \
   exit 1
 }
 
-# Healthcheck — poll readiness instead of a blind sleep, and FAIL the deploy
-# if the app never answers 2xx/3xx.
+# Healthcheck: poll the public app URL — exercises the full chain (hr-edge
+# route + auth bypass for healthchecks + app TCP listener). A 3xx is accepted
+# because `auth_required: true` apps redirect anonymous calls to /login.
 DOMAIN="${SLUG}.mynetwk.biz"
 echo "→ healthcheck https://$DOMAIN$HEALTH_PATH"
 HEALTH_CODE="000"

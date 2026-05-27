@@ -104,7 +104,7 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
 // ── Code Tab ──
 
 function CodeTab({ slug }) {
-  return <StudioIframe folder={`/opt/homeroute/apps/${slug}/src`} title={`Code - ${slug}`} />;
+  return <StudioIframe folder={`/var/lib/atelier/apps/${slug}/src`} title={`Code - ${slug}`} />;
 }
 
 // ── Logs Tab ──

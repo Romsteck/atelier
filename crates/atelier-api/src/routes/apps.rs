@@ -195,8 +195,9 @@ struct ShipBody {
 /// `POST /api/apps/{slug}/ship`
 ///
 /// Thin HTTP wrapper around the MCP `app.ship` op. Stops the supervised
-/// process, rsyncs pre-built artefacts from CloudMaster (`/opt/homeroute/apps/<slug>/src/`)
-/// to Medion (`/var/lib/atelier/apps/<slug>/src/`), and restarts.
+/// process, ensures the canonical `src/` tree at `/var/lib/atelier/apps/<slug>/src/`
+/// is in place (legacy code paths still SSH/rsync from CloudMaster — to be
+/// removed in the SourcesLocation refactor), and restarts.
 ///
 /// Body: `{"timeout_secs": u64}` (optional, clamped 60..=7200, default 900).
 async fn ship_app(

@@ -133,7 +133,7 @@ function StudioHeaderInfo() {
             : 'CloudMaster offline — démarrer depuis le Studio';
         return cmOnline ? (
           <a
-            href={`${CODESERVER_BASE}/?folder=/opt/homeroute/apps/${selectedSlug}/src`}
+            href={`${CODESERVER_BASE}/?folder=/var/lib/atelier/apps/${selectedSlug}/src`}
             target="_blank"
             rel="noopener noreferrer"
             className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700 shrink-0"
