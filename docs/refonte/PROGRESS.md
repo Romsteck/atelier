@@ -16,12 +16,12 @@ Dernière mise à jour : 2026-05-26
 |---|---|---|
 | Phase 0 — Préconditions | In-progress | [00-preconditions.md](./00-preconditions.md) |
 | Phase 1 — Logging infrastructure | DONE (UI à vérifier navigateur) | [01-logging-infra.md](./01-logging-infra.md) |
-| Phase 2.1 — Refonte files | DONE (smoke tests OK) | [02-apps/files.md](./02-apps/files.md) |
-| Phase 2.2 — Refonte www | DONE (smoke tests OK) | [02-apps/www.md](./02-apps/www.md) |
-| Phase 2.3 — Refonte home | DONE (smoke tests OK) | [02-apps/home.md](./02-apps/home.md) |
-| Phase 2.4 — Refonte trader | DONE (smoke tests OK) | [02-apps/trader.md](./02-apps/trader.md) |
-| Phase 2.5 — Refonte myfrigo | DONE (smoke tests OK) | [02-apps/myfrigo.md](./02-apps/myfrigo.md) |
-| Phase 2.6 — Refonte wallet | DONE (smoke tests OK) | [02-apps/wallet.md](./02-apps/wallet.md) |
+| Phase 2.1 — Refonte files | DONE + Reverify J+1 OK | [02-apps/files.md](./02-apps/files.md) |
+| Phase 2.2 — Refonte www | DONE + Reverify J+1 OK | [02-apps/www.md](./02-apps/www.md) |
+| Phase 2.3 — Refonte home | DONE + Reverify J+1 OK | [02-apps/home.md](./02-apps/home.md) |
+| Phase 2.4 — Refonte trader | DONE + Reverify J+1 OK | [02-apps/trader.md](./02-apps/trader.md) |
+| Phase 2.5 — Refonte myfrigo | DONE + Reverify J+1 OK | [02-apps/myfrigo.md](./02-apps/myfrigo.md) |
+| Phase 2.6 — Refonte wallet | DONE + Reverify J+1 OK | [02-apps/wallet.md](./02-apps/wallet.md) |
 | Phase 3 — Teardown infra flow | DONE (atelier deployed healthy) | [03-teardown-flows.md](./03-teardown-flows.md) |
 | Sub-phase — Logging shipper | DONE (6/6 apps loguent vers Postgres) | [04-logging-shipper.md](./04-logging-shipper.md) |
 | Phase 4 — UI extensions | Pending (utilité réduite, voir notes) | [04-ui-extensions.md](./04-ui-extensions.md) |
@@ -50,7 +50,44 @@ Dernière mise à jour : 2026-05-26
 - [ADR-003](./decisions/ADR-003-partitioning.md) — Partitionnement journalier
 - [ADR-004](./decisions/ADR-004-http-shipping.md) — HTTP shipping pour les apps externes
 
+## Reverify J+1 — DONE 2026-05-27
+
+Vérification 24h post-deploy (commit `23180c2`, tag `flow-eradication-complete-2026-05-26`).
+
+| App | Loopback `/api/health` | Errors DB (24h) | Errors journalctl (24h) | Régression ? |
+|---|---|---|---|---|
+| files | 200 (`:3006`) | 0 | 0 | Non |
+| home | 200 (`:3007`) | 0 | 0 | Non |
+| trader | 200 (`:3008`) | 0 | 0 | Non |
+| wallet | 200 (`:3009`) | 0 | 0 | Non |
+| myfrigo | 200 (`:3010`) | 0 | 0 | Non |
+| www | 200 (`:3005/apps/www`) | 0 | 0 | Non |
+
+Note www : pas de route `/api/health` (pré-existant, le `health_path` du registry est obsolète), mais `/apps/www` répond 200 et l'app sert ses routes normalement.
+
+### Métriques DB cohérentes
+
+| App | Tables | Counts |
+|---|---|---|
+| files | files, folders | 23647 / 5243 |
+| home | aquarium_state, aquarium_schedule, command_history, devices | 1 / 24 / 1441 / 2 |
+| trader | virtual_portfolios, alerts, recommendations, symbol_configs | 2 / 3321 / 4424 / 34 |
+| wallet | transactions, settings, import_logs | 1466 / 5 / 10 |
+| myfrigo | recipes, recipe_favorites, recipe_adjustments, recipe_ingredients | 92 / 6 / 1 / 1002 |
+| www | contact_requests, legal_contents | 9 / 5 |
+
+Aucun drift. Aucune régression remontée. Schedulers home/trader continuent à tourner (audit `_dv_audit` actif : 6604 entrées home, 9783 entrées trader). `hr-flowd` confirmé `inactive` + unit not found sur Medion.
+
+### Logs Postgres globaux
+
+`66 013` entries · 7 services (atelier 59 397 + 6 apps) · 2 errors total (avant J-1) · **0 dans les dernières 24h**.
+
 ## Journal
+
+### 2026-05-27 — Reverify J+1 OK
+- 6/6 apps loopback healthy, 0 erreur DB + 0 erreur journalctl sur 24h.
+- Métriques DB inchangées (pas de drift), schedulers home/trader actifs.
+- Refonte stabilisée. Aucune action corrective requise.
 
 ### 2026-05-26 — Lancement
 - Audit complet flux + apps + logging existant (3 sub-agents Explore).

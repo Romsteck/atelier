@@ -76,9 +76,9 @@ Même décision : sub-phase post-Phase 3 avec `atelier-logging-shipper` léger.
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques DB cohérentes (transactions, settings, import_logs)
-- [ ] Pas de régression remontée (Transactions, Settings, Categorize via IA, Insights, Recommendations, Import)
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques DB cohérentes (transactions, settings, import_logs)
+- [x] Pas de régression remontée (Transactions, Settings, Categorize via IA, Insights, Recommendations, Import)
 
 ## Notes
 

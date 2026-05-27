@@ -55,9 +55,9 @@ Même décision que files : on diffère à une sub-phase post-Phase 3. www conti
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques DB cohérentes (contact_requests, legal_contents)
-- [ ] Pas de régression remontée
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques DB cohérentes (contact_requests, legal_contents)
+- [x] Pas de régression remontée
 
 ## Notes
 

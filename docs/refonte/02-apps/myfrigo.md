@@ -55,9 +55,9 @@ Même décision : sub-phase post-Phase 3 avec `atelier-logging-shipper` léger.
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques DB cohérentes (recipes, recipe_favorites, recipe_adjustments, recipe_ingredients)
-- [ ] Pas de régression remontée sur la PWA (Recipes, Favoris, Ajustements, Sync)
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques DB cohérentes (recipes, recipe_favorites, recipe_adjustments, recipe_ingredients)
+- [x] Pas de régression remontée sur la PWA (Recipes, Favoris, Ajustements, Sync)
 
 ## Notes
 

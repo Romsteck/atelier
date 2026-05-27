@@ -60,10 +60,10 @@ Même décision que les autres apps Rust : sub-phase post-Phase 3 avec `atelier-
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques portfolio cohérentes (lazy : appelé par la page Portfolio dans le frontend)
-- [ ] Schedulers continuent à tourner (TieredScheduler, DailyScheduler, LiveTrader, PersistentAutoTrader, history_logger) — non impactés par la refonte
-- [ ] Pas de régression remontée
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques portfolio cohérentes (lazy : appelé par la page Portfolio dans le frontend)
+- [x] Schedulers continuent à tourner (TieredScheduler, DailyScheduler, LiveTrader, PersistentAutoTrader, history_logger) — non impactés par la refonte
+- [x] Pas de régression remontée
 
 ## Notes
 

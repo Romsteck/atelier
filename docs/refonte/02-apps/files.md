@@ -58,9 +58,9 @@
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques DB cohérentes
-- [ ] Pas de régression remontée
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques DB cohérentes (J+1 2026-05-27)
+- [x] Pas de régression remontée
 
 ## Notes
 
@@ -69,6 +69,6 @@ Le script `scripts/deploy-app.sh` exécute `pnpm install --frozen-lockfile` pour
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques DB cohérentes (pas de drift sur table `files`)
-- [ ] Pas de régression remontée
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques DB cohérentes (pas de drift sur table `files`)
+- [x] Pas de régression remontée

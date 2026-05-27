@@ -75,10 +75,10 @@ Même décision que files/www : sub-phase post-Phase 3 avec `atelier-logging-shi
 
 ## Reverify J+1
 
-- [ ] Pas d'erreur 24h
-- [ ] Métriques DB cohérentes (aquarium_state, aquarium_schedule, command_history, devices)
-- [ ] Schedulers continuent à tourner (aquarium_light_schedule_task, aquarium_feed_schedule_task, log_cleanup_task) — non impactés par la refonte
-- [ ] Pas de régression remontée (ESP32 aquarium feed, device rename, device proxy GET/POST)
+- [x] Pas d'erreur 24h (J+1 2026-05-27)
+- [x] Métriques DB cohérentes (aquarium_state, aquarium_schedule, command_history, devices)
+- [x] Schedulers continuent à tourner (aquarium_light_schedule_task, aquarium_feed_schedule_task, log_cleanup_task) — non impactés par la refonte
+- [x] Pas de régression remontée (ESP32 aquarium feed, device rename, device proxy GET/POST)
 
 ## Notes
 
