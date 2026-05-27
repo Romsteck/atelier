@@ -50,19 +50,6 @@ pub enum AppState {
     Unknown,
 }
 
-/// DEPRECATED post-rapatriement 2026-05-27 — kept for forward-compat deserialise
-/// of legacy `apps.json` files. The per-app value is now ignored: build location
-/// is read from the `ATELIER_BUILD_HOST` env var at instance level (empty/`local`
-/// = build in-place on Medion, otherwise SSH to `user@host`). To be removed once
-/// the apps_ops.rs refactor lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SourcesLocation {
-    Medion,
-    #[default]
-    CloudMaster,
-}
-
 /// Managed-DB engine for an app.
 ///
 /// Only `PostgresDataverse` exists post-migration: every app with a
@@ -133,10 +120,6 @@ pub struct Application {
     pub env_vars: BTreeMap<String, String>,
     #[serde(default)]
     pub state: AppState,
-    /// Where the canonical sources live. Defaults to `Medion` for back-compat
-    /// with the existing `apps.json` (no field present → Medion).
-    #[serde(default)]
-    pub sources_on: SourcesLocation,
     /// Which managed-DB engine this app uses. Existing apps default to
     /// `LegacySqlite`; new apps are created with `PostgresDataverse`
     /// (controlled by the registry's create flow).
@@ -175,7 +158,6 @@ impl Application {
             health_path,
             env_vars: BTreeMap::new(),
             state: AppState::Stopped,
-            sources_on: SourcesLocation::default(),
             db_backend: DbBackend::default(),
             flow_callback_url: None,
             flow_callback_token: None,

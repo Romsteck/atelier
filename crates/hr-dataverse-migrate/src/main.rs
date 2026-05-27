@@ -39,7 +39,7 @@ struct CliOpts {
 fn parse_args() -> Result<CliOpts> {
     let mut slug: Option<String> = None;
     let mut admin_url: Option<String> = std::env::var("HR_DATAVERSE_ADMIN_URL").ok();
-    let mut apps_root = PathBuf::from("/opt/homeroute/apps");
+    let mut apps_root = PathBuf::from("/var/lib/atelier/apps");
     let mut secrets_path: Option<PathBuf> = None;
     let mut pg_host = "127.0.0.1".to_string();
     let mut pg_port: u16 = 5432;

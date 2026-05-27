@@ -195,9 +195,9 @@ struct ShipBody {
 /// `POST /api/apps/{slug}/ship`
 ///
 /// Thin HTTP wrapper around the MCP `app.ship` op. Stops the supervised
-/// process, ensures the canonical `src/` tree at `/var/lib/atelier/apps/<slug>/src/`
-/// is in place (legacy code paths still SSH/rsync from CloudMaster — to be
-/// removed in the SourcesLocation refactor), and restarts.
+/// process and restarts it. Build artefacts are expected to already be in
+/// `/var/lib/atelier/apps/<slug>/src/`. If `ATELIER_BUILD_HOST` is set, an
+/// optional SSH+rsync step pulls pre-built artefacts from that host first.
 ///
 /// Body: `{"timeout_secs": u64}` (optional, clamped 60..=7200, default 900).
 async fn ship_app(

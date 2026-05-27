@@ -23,9 +23,11 @@
 - **Modifs apps non commitées** : stashées dans chaque repo, message `pre-migration medion 2026-05-27`. `git stash list` dans chaque `/var/lib/atelier/apps/<slug>/src/` pour les voir.
 - **Procédure de rollback** : cf. `.claude/rules/deploy-chain.md` section Rollback.
 
-## À faire dans session séparée
+## À faire dans session séparée — ✅ FAIT
 
 Refactor du code Atelier pour nettoyer le drapeau `SourcesLocation` (per-app) qui est devenu non-sens depuis que toutes les apps tournent au même endroit. Voir le prompt prêt-à-coller en fin de ce document.
+
+> ✅ Terminé : enum `SourcesLocation` + champ `sources_on` supprimés. Les fonctions SSH/rsync vers CloudMaster (`scaffold_on_cloudmaster`, `cleanup_cloudmaster_src`, `regen_context_on_cloudmaster`, `apply_rules_acl_remote`) éradiquées. Pipelines `build()` et `ship()` collapse en exec local par défaut, avec gating optionnel via env var `ATELIER_BUILD_HOST` (vide = local). Helper `bind_git_remote_on_cloudmaster` renommé `bind_git_remote_for_slug` + désormais wiré dans `AppCreate`. DTOs `App*` rapatriés dans `crates/atelier-api/src/mcp/dto.rs` (suite à leur suppression côté hr-ipc). `hr-dataverse-migrate` default `apps_root` migré vers `/var/lib/atelier/apps`.
 
 ### Prompt pour la session refactor
 

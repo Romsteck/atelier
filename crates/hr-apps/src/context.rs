@@ -719,7 +719,7 @@ on_err() {
 }
 trap on_err ERR
 
-emit '{"status":"started","phase":"compile","message":"local build on cloudmaster"}'
+emit '{"status":"started","phase":"compile","message":"local build"}'
 START=$(date +%s)
 echo "=== Build local: $SLUG ==="
 echo "Cwd: $SRC_DIR"
@@ -1608,10 +1608,10 @@ mod tests {
         let all = vec![trader.clone(), wallet.clone()];
 
         // Scaffold src/ pour que `app.src_dir().exists()` soit vrai dans le test.
-        // ⚠ Application::src_dir() est hardcodé en /opt/homeroute/apps/... donc on
-        // construit le path "relatif au tmp" manuellement pour les assertions,
-        // sachant que le code réel utilise le hardcoded. On valide donc le contenu
-        // renderer par renderer ici plutôt que leur écriture physique sous tmp.
+        // src_dir() résout via ATELIER_APPS_RUNTIME_ROOT, donc on construit le
+        // path "relatif au tmp" manuellement pour les assertions ; on valide
+        // ici le contenu renderer par renderer plutôt que leur écriture
+        // physique sous tmp.
         fs::create_dir_all(tmp.join("trader/src")).unwrap();
 
         // Pré-créer des vestiges au niveau parent (app_dir) : CLAUDE.md, .mcp.json, .claude/

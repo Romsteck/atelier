@@ -3,13 +3,17 @@
 //! Split out of `ipc_handler.rs` to keep that file manageable.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::dto::{
+    AppDbQueryResult, AppDbRelation, AppDbTableColumn, AppDbTableSchema,
+    AppDbTablesData, AppExecResult, AppListData, AppLogEntry, AppLogsData,
+    AppStatusData, ApplicationDto,
+};
 use super::scaffold;
 
-use hr_apps::types::{AppStack, AppState, Application, DbBackend, SourcesLocation, Visibility, valid_slug};
+use hr_apps::types::{AppStack, AppState, Application, DbBackend, Visibility, valid_slug};
 use hr_apps::todos::{TodoStatus, TodosManager};
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
 use hr_common::events::AppBuildEvent;
@@ -29,25 +33,58 @@ fn detect_level(msg: &str) -> &'static str {
     }
 }
 use hr_ipc::EdgeClient;
-use hr_ipc::types::{
-    AppDbQueryResult, AppDbRelation, AppDbTableColumn, AppDbTableSchema,
-    AppDbTablesData,
-    AppExecResult, AppListData, AppLogEntry, AppLogsData, AppStatusData, ApplicationDto,
-    IpcResponse,
-};
+use hr_ipc::types::IpcResponse;
 use tracing::{error, info, warn};
 
-/// Default remote build host (override via `HR_BUILD_HOST`).
-pub const BUILD_HOST: &str = "romain@10.0.0.10";
-/// Default SSH key path on Medion (override via `HR_BUILD_SSH_KEY`).
-pub const SSH_KEY: &str = "/opt/homeroute/data/build/ssh/id_ed25519";
-/// Base URL of the homeroute API as seen *from CloudMaster*. Used to bind
-/// the `origin` remote of each app's working tree on CloudMaster — code-server
-/// vit là-bas depuis le split DEV/PROD, donc `127.0.0.1:4000` n'atteint plus
-/// le hr-git Smart-HTTP. Override via `HR_GIT_API_BASE`.
-pub const GIT_API_BASE: &str = "http://10.0.0.254:4100";
+/// Base URL of the Atelier API as seen *from the build host*. Used to bind
+/// the `origin` remote of each app's working tree to the hr-git Smart-HTTP
+/// endpoint at scaffold time. Override via `ATELIER_GIT_API_BASE`.
+pub const GIT_API_BASE: &str = "http://127.0.0.1:4100";
 /// Cap stdout/stderr capture per pipeline stage to ~1 MB.
 const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
+
+/// Build-host configuration read from env. `None` = build locally in-process
+/// (the default on Medion since the 2026-05-27 rapatriement). `Some((user@host,
+/// key_path))` = SSH to that host for every build step. Replaces the
+/// per-app `sources_on` flag of the pre-rapatriement era.
+pub fn build_host_config() -> Option<(String, String)> {
+    let host = std::env::var("ATELIER_BUILD_HOST").ok().unwrap_or_default();
+    if host.is_empty() {
+        return None;
+    }
+    let key = std::env::var("ATELIER_BUILD_SSH_KEY").ok().unwrap_or_default();
+    Some((host, key))
+}
+
+/// Wrap a shell command for local execution. When `ATELIER_BUILD_AS_USER` is
+/// set (e.g. `romain` on Medion), the command is spawned via
+/// `sudo -H -u <user> -- bash -lc …` so the build inherits that user's PATH
+/// (cargo lives under `~/.cargo/bin/` for `romain`, not in root's PATH) and
+/// produces artefacts owned by `<user>` instead of root. `umask 002` is forced
+/// so artefacts get group-write, which lets the `hr-studio` Studio agent
+/// (member of `romain`'s group on Medion) edit/clean them.
+///
+/// When the env var is empty/unset, returns a plain `bash -lc` invocation —
+/// the right default for dev environments where atelier already runs as a
+/// regular user.
+fn wrap_local_cmd(cmd: &str) -> (&'static str, Vec<String>) {
+    let wrapped = format!("umask 002 && {cmd}");
+    match std::env::var("ATELIER_BUILD_AS_USER").ok().filter(|s| !s.is_empty()) {
+        Some(user) => (
+            "sudo",
+            vec![
+                "-H".into(),
+                "-u".into(),
+                user,
+                "--".into(),
+                "bash".into(),
+                "-lc".into(),
+                wrapped,
+            ],
+        ),
+        None => ("bash", vec!["-lc".into(), wrapped]),
+    }
+}
 
 /// Context for App* handlers.
 #[derive(Clone)]
@@ -233,42 +270,19 @@ impl AppsContext {
         if let Some(hp) = health_path {
             app.health_path = hp;
         }
-        // SourcesLocation::default() == CloudMaster (Phase 7) — `Application::new`
-        // l'a déjà appliqué. On l'expose explicitement pour que la suite du
-        // handler raisonne dessus.
-        let sources_on = app.sources_on;
-        info!(slug = %slug, sources_on = ?sources_on, "AppCreate: scaffolding new app");
+        info!(slug = %slug, "AppCreate: scaffolding new app");
 
-        // Toujours créer app_dir local (Medion) — il porte db.sqlite et .env runtime.
         let app_dir = app.app_dir();
         if let Err(e) = tokio::fs::create_dir_all(&app_dir).await {
             error!(slug = %slug, error = %e, "AppCreate: create app_dir failed");
             self.supervisor.port_registry.release(&slug).await.ok();
             return IpcResponse::err(format!("create app dir failed: {e}"));
         }
-
-        // Scaffold + contexte selon `sources_on`.
-        match sources_on {
-            SourcesLocation::Medion => {
-                // Layout legacy : src/ vit sur Medion.
-                if let Err(e) = tokio::fs::create_dir_all(&app.src_dir()).await {
-                    warn!(slug = %slug, error = %e, "AppCreate: create src_dir failed");
-                }
-                if let Err(e) = scaffold::scaffold_stack_template(&app).await {
-                    warn!(slug = %slug, error = %e, "AppCreate: scaffold template failed (non-fatal)");
-                }
-            }
-            SourcesLocation::CloudMaster => {
-                // Layout cible (Phase 7) : src/ vit sur CloudMaster. Génération
-                // dans un tmpdir local puis rsync UP, suivi d'un chown romain.
-                if let Err(e) = scaffold_on_cloudmaster(&app, &self.context_generator,
-                                                         &self.supervisor.registry.list().await).await
-                {
-                    error!(slug = %slug, error = %e, "AppCreate: cloudmaster scaffold failed");
-                    self.supervisor.port_registry.release(&slug).await.ok();
-                    return IpcResponse::err(format!("cloudmaster scaffold failed: {e}"));
-                }
-            }
+        if let Err(e) = tokio::fs::create_dir_all(&app.src_dir()).await {
+            warn!(slug = %slug, error = %e, "AppCreate: create src_dir failed");
+        }
+        if let Err(e) = scaffold::scaffold_stack_template(&app).await {
+            warn!(slug = %slug, error = %e, "AppCreate: scaffold template failed (non-fatal)");
         }
 
         // Default run_command si non fourni.
@@ -280,7 +294,7 @@ impl AppsContext {
             let _ = tokio::fs::File::create(app.db_path()).await;
         }
 
-        // Persist app (sources_on figé dans apps.json à ce moment).
+        // Persist app.
         if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
             self.supervisor.port_registry.release(&slug).await.ok();
             error!(slug = %slug, error = %e, "AppCreate: registry upsert failed");
@@ -290,6 +304,11 @@ impl AppsContext {
         // hr-git bare repo (best-effort).
         if let Err(e) = self.git.create_repo(&slug).await {
             warn!(slug = %slug, error = %e, "AppCreate: git create_repo failed (non-fatal)");
+        }
+        // Bind `origin` of the app's working tree to the Atelier Smart-HTTP
+        // endpoint so the Studio agent can `git push` out of the box.
+        if let Err(e) = bind_git_remote_for_slug(&slug).await {
+            warn!(slug = %slug, error = %e, "AppCreate: git remote bind failed (non-fatal)");
         }
 
         // hr-edge route (best-effort).
@@ -303,7 +322,6 @@ impl AppsContext {
                     "127.0.0.1".to_string(),
                     port,
                     auth_required,
-                    vec![],
                     false,
                 )
                 .await
@@ -314,27 +332,24 @@ impl AppsContext {
             warn!(slug = %slug, domain = %app.domain, "AppCreate: edge client unavailable, route not propagated");
         }
 
-        // Regen context. En CloudMaster c'est déjà fait dans scaffold_on_cloudmaster
-        // (pour rsync UP en bloc) ; on ne l'appelle ici que pour Medion.
+        // Regen context (CLAUDE.md, .mcp.json, .claude/) — always local now.
         let all = self.supervisor.registry.list().await;
-        if matches!(sources_on, SourcesLocation::Medion) {
-            let db_tables = if app.has_db {
-                self.db_manager.list_tables(&slug).await.ok()
-            } else {
-                None
-            };
-            if let Err(e) = self
-                .context_generator
-                .generate_for_app(&app, &all, db_tables)
-            {
-                warn!(slug = %slug, error = %e, "AppCreate: context generation failed (non-fatal)");
-            }
+        let db_tables = if app.has_db {
+            self.db_manager.list_tables(&slug).await.ok()
+        } else {
+            None
+        };
+        if let Err(e) = self
+            .context_generator
+            .generate_for_app(&app, &all, db_tables)
+        {
+            warn!(slug = %slug, error = %e, "AppCreate: context generation failed (non-fatal)");
         }
         if let Err(e) = self.context_generator.generate_root(&all) {
             warn!(error = %e, "AppCreate: root context generation failed (non-fatal)");
         }
 
-        info!(slug = %slug, port, sources_on = ?sources_on, duration_ms = start.elapsed().as_millis() as u64, "AppCreate ok");
+        info!(slug = %slug, port, duration_ms = start.elapsed().as_millis() as u64, "AppCreate ok");
         IpcResponse::ok_data(app_to_dto(&app))
     }
 
@@ -415,7 +430,6 @@ impl AppsContext {
                     "127.0.0.1".to_string(),
                     app.port,
                     auth_required,
-                    vec![],
                     false,
                 )
                 .await
@@ -476,29 +490,21 @@ impl AppsContext {
             warn!(slug = %slug, error = %e, "AppDelete: port release failed");
         }
         if !keep_data {
-            // 5. Cleanup CloudMaster src/ si applicable (avant Medion pour
-            // garder l'ordre symétrique de scaffold).
-            if matches!(app.sources_on, SourcesLocation::CloudMaster) {
-                if let Err(e) = cleanup_cloudmaster_src(&slug).await {
-                    warn!(slug = %slug, error = %e, "AppDelete: cloudmaster cleanup failed (non-fatal)");
-                }
-            }
-            // 6. Cleanup Medion app_dir
             let dir = app.app_dir();
             if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
                 warn!(slug = %slug, dir = %dir.display(), error = %e, "AppDelete: rm -rf failed");
             }
         } else {
-            info!(slug = %slug, "AppDelete: keep_data=true, sources préservées (Medion+CloudMaster)");
+            info!(slug = %slug, "AppDelete: keep_data=true, sources préservées");
         }
 
-        // 7. Regenerate root context
+        // Regenerate root context
         let all = self.supervisor.registry.list().await;
         if let Err(e) = self.context_generator.generate_root(&all) {
             warn!(error = %e, "AppDelete: root context regeneration failed");
         }
 
-        info!(slug = %slug, keep_data, sources_on = ?app.sources_on, "AppDelete ok");
+        info!(slug = %slug, keep_data, "AppDelete ok");
         IpcResponse::ok_data(serde_json::json!({ "ok": true }))
     }
 
@@ -699,31 +705,18 @@ impl AppsContext {
             None
         };
 
-        match app.sources_on {
-            SourcesLocation::Medion => {
-                if let Err(e) = self
-                    .context_generator
-                    .generate_for_app(&app, &all, db_tables)
-                {
-                    error!(slug = %slug, error = %e, "AppRegenerateContext failed (medion)");
-                    return IpcResponse::err(format!("generate_for_app: {e}"));
-                }
-            }
-            SourcesLocation::CloudMaster => {
-                if let Err(e) =
-                    regen_context_on_cloudmaster(&app, &self.context_generator, &all, db_tables)
-                        .await
-                {
-                    error!(slug = %slug, error = %e, "AppRegenerateContext failed (cloudmaster)");
-                    return IpcResponse::err(format!("regen on cloudmaster: {e}"));
-                }
-            }
+        if let Err(e) = self
+            .context_generator
+            .generate_for_app(&app, &all, db_tables)
+        {
+            error!(slug = %slug, error = %e, "AppRegenerateContext failed");
+            return IpcResponse::err(format!("generate_for_app: {e}"));
         }
 
         if let Err(e) = self.context_generator.generate_root(&all) {
             warn!(error = %e, "AppRegenerateContext root failed");
         }
-        info!(slug = %slug, sources_on = ?app.sources_on, "AppRegenerateContext ok");
+        info!(slug = %slug, "AppRegenerateContext ok");
         IpcResponse::ok_data(serde_json::json!({ "ok": true }))
     }
 
@@ -1328,28 +1321,31 @@ impl AppsContext {
             None,
         );
 
-        let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
-        let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
+        let host_cfg = build_host_config();
         // Clamp 1s..=2h — aligns with ship() and prevents a caller from
         // pinning an orchestrator task on a quasi-infinite timeout.
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800).clamp(1, 7200));
         let started = Instant::now();
-        let remote_src = format!("/opt/homeroute/apps/{}/src", slug);
         let local_src = app.src_dir();
+        // Mirror layout on the remote build host when SSH is used.
+        let remote_src = local_src.display().to_string();
         let local_src_str = format!("{}/", local_src.display());
 
         // SSH ControlMaster : multiplex all ssh/rsync calls of this build over a
         // single TCP connection to save ~200-300ms per call. Socket lives in
         // /tmp with slug + pid to avoid collisions between concurrent builds.
-        let ctl_socket = format!("/tmp/hr-build-ssh-{}-{}.sock", slug, std::process::id());
+        let ctl_socket = format!("/tmp/atelier-build-ssh-{}-{}.sock", slug, std::process::id());
         let ctl_path_opt = format!("ControlPath={ctl_socket}");
-        let ssh_e_arg = format!(
+        let ssh_e_arg = host_cfg.as_ref().map(|(_, key)| format!(
             "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
              -o ControlMaster=auto -o {ctl_path_opt} -o ControlPersist=30 \
              -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
-        );
+        ));
 
-        info!(slug = %slug, host = %host, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start");
+        match &host_cfg {
+            Some((host, _)) => info!(slug = %slug, host = %host, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start (remote)"),
+            None => info!(slug = %slug, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start (local)"),
+        }
 
         let app_build_tx = self.app_build_tx.clone();
         let slug_for_pipeline = slug.clone();
@@ -1370,28 +1366,16 @@ impl AppsContext {
                 );
             };
 
-            if matches!(app.sources_on, SourcesLocation::CloudMaster) {
-                // Sources canonical on CloudMaster — skip the rsync-up roundtrip.
-                // We still emit the two "step" events the UI expects so the build
-                // panel renders the full 5-step timeline consistently.
-                info!(
-                    slug = %slug,
-                    sources_on = ?app.sources_on,
-                    "build: skipping rsync-up, sources canonical on cloudmaster"
-                );
-                emit_step(
-                    1,
-                    "skipped:ssh-probe (sources on cloudmaster)",
-                    0,
-                    Some("sources on cloudmaster".to_string()),
-                );
-                emit_step(
-                    2,
-                    "skipped:rsync-up (sources on cloudmaster)",
-                    0,
-                    Some("sources on cloudmaster".to_string()),
-                );
+            if host_cfg.is_none() {
+                // Build local : pas de ssh-probe ni de rsync-up nécessaire, on
+                // émet les deux "skipped" steps pour préserver la timeline 5-step
+                // attendue par l'UI.
+                info!(slug = %slug, "build: local — skipping ssh-probe / rsync-up");
+                emit_step(1, "skipped:ssh-probe (local build)", 0, Some("local build".to_string()));
+                emit_step(2, "skipped:rsync-up (local build)", 0, Some("local build".to_string()));
             } else {
+                let (host, key) = host_cfg.as_ref().unwrap();
+                let ssh_e_arg = ssh_e_arg.as_ref().unwrap();
                 // 1) SSH probe
                 info!(slug = %slug, host = %host, "build: ssh probe");
                 let probe = run_capture(
@@ -1468,67 +1452,44 @@ impl AppsContext {
                     return acc.into_result("rsync up failed".into(), started);
                 }
 
-                // Force ownership romain:romain so subsequent build (SSH'd as
-                // romain) can write node_modules/, target/, etc. Tar-extracted
-                // files preserve original (often root) ownership. No-op if
-                // already correct.
-                let chown_remote_app = format!("/opt/homeroute/apps/{}", slug);
-                let chown_cmd = format!(
-                    "chown -R romain:romain {}",
-                    shell_quote(&chown_remote_app)
-                );
-                let chown = run_capture(
-                    "ssh",
-                    &[
-                        "-i", &key,
-                        "-o", "BatchMode=yes",
-                        "-o", "StrictHostKeyChecking=accept-new",
-                        "-o", "ControlMaster=auto",
-                        "-o", &ctl_path_opt,
-                        "-o", "ControlPersist=30",
-                        &host,
-                        &chown_cmd,
-                    ],
-                    None,
-                )
-                .await;
-                if chown.exit_code != 0 {
-                    warn!(
-                        slug = %slug,
-                        stderr = %truncate(&chown.stderr, 256),
-                        "build: chown remote failed (non-fatal — build may EACCES)"
-                    );
-                }
             }
 
-            // 4) build — wrap in `bash -lc` so the remote user's login shell
-            // sources .profile / .cargo/env (otherwise cargo/rustup aren't in PATH).
+            // 3) compile — wrap in `bash -lc` so the user's login shell sources
+            // .profile / .cargo/env (otherwise cargo/rustup aren't in PATH).
             info!(slug = %slug, "build: compile (CI=true universal)");
             // Forcer CI=true pour pnpm/npm non-interactifs (sinon
             // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY). NPM_CONFIG_FUND=false
-            // réduit le bruit. Variables exportées avant le `cd` pour persister
-            // dans le subshell via `bash -lc`.
+            // réduit le bruit.
             let inner_cmd = format!(
                 "export CI=true NPM_CONFIG_FUND=false && cd {} && {}",
                 shell_quote(&remote_src),
                 build_command
             );
-            let remote_cmd = format!("bash -lc {}", shell_quote(&inner_cmd));
-            let compile = run_capture(
-                "ssh",
-                &[
-                    "-i", &key,
-                    "-o", "BatchMode=yes",
-                    "-o", "StrictHostKeyChecking=accept-new",
-                    "-o", "ControlMaster=auto",
-                    "-o", &ctl_path_opt,
-                    "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
-                    &host,
-                    &remote_cmd,
-                ],
-                None,
-            )
-            .await;
+            let compile = match &host_cfg {
+                Some((host, key)) => {
+                    let remote_cmd = format!("bash -lc {}", shell_quote(&inner_cmd));
+                    run_capture(
+                        "ssh",
+                        &[
+                            "-i", key,
+                            "-o", "BatchMode=yes",
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            "-o", "ControlMaster=auto",
+                            "-o", &ctl_path_opt,
+                            "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+                            host,
+                            &remote_cmd,
+                        ],
+                        None,
+                    )
+                    .await
+                }
+                None => {
+                    let (prog, args) = wrap_local_cmd(&inner_cmd);
+                    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+                    run_capture(prog, &args_ref, None).await
+                }
+            };
             acc.push("compile", &compile);
             emit_step(3, "compile", compile.duration_ms, None);
             if compile.exit_code != 0 {
@@ -1536,102 +1497,109 @@ impl AppsContext {
                 return acc.into_result("build command failed".into(), started);
             }
 
-            // 4b) stop the supervised process before overwriting artefacts on disk.
+            // 3b) stop the supervised process before overwriting artefacts on disk.
             // Avoids serving a partially-rsynced .next/, target/release binary, etc.
             // Best-effort: if the app is not running, this is a no-op.
             if let Err(e) = supervisor_for_pipeline.stop(&slug_for_pipeline).await {
                 warn!(slug = %slug_for_pipeline, error = %e, "build: pre-rsync stop failed (continuing)");
             }
 
-            // 5) rsync each artefact back
+            // 4) rsync each artefact back from the build host. For local builds
+            // the artefacts are already in `local_src`, so we only check
+            // existence and skip the rsync calls.
             let rsync_back_started = Instant::now();
-            for art_spec in &artefacts {
-                let (art, optional) = parse_artefact_spec(art_spec);
-                info!(slug = %slug, artefact = %art, optional, "build: rsync down");
-                let remote_path = format!("{}/{}", remote_src, art);
-                let local_path = local_src.join(art);
-                if let Some(parent) = local_path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                // Existence check first to give a useful error.
-                let exists = run_capture(
-                    "ssh",
-                    &[
-                        "-i", &key,
-                        "-o", "BatchMode=yes",
-                        "-o", "StrictHostKeyChecking=accept-new",
-                        "-o", "ControlMaster=auto",
-                        "-o", &ctl_path_opt,
-                        "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
-                        &host,
-                        &format!("test -e {}", shell_quote(&remote_path)),
-                    ],
-                    None,
-                )
-                .await;
-                if exists.exit_code != 0 {
-                    if optional {
-                        info!(slug = %slug, artefact = %art, "build: optional artefact absent, skipping");
-                        continue;
+            if let Some((host, key)) = &host_cfg {
+                let ssh_e_arg = ssh_e_arg.as_ref().unwrap();
+                for art_spec in &artefacts {
+                    let (art, optional) = parse_artefact_spec(art_spec);
+                    info!(slug = %slug, artefact = %art, optional, "build: rsync down");
+                    let remote_path = format!("{}/{}", remote_src, art);
+                    let local_path = local_src.join(art);
+                    if let Some(parent) = local_path.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
                     }
-                    acc.push(&format!("check-{art}"), &exists);
-                    return acc.into_result(
-                        format!("artefact missing on remote: {art}"),
-                        started,
-                    );
+                    // Existence check first to give a useful error.
+                    let exists = run_capture(
+                        "ssh",
+                        &[
+                            "-i", key,
+                            "-o", "BatchMode=yes",
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            "-o", "ControlMaster=auto",
+                            "-o", &ctl_path_opt,
+                            "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+                            host,
+                            &format!("test -e {}", shell_quote(&remote_path)),
+                        ],
+                        None,
+                    )
+                    .await;
+                    if exists.exit_code != 0 {
+                        if optional {
+                            info!(slug = %slug, artefact = %art, "build: optional artefact absent, skipping");
+                            continue;
+                        }
+                        acc.push(&format!("check-{art}"), &exists);
+                        return acc.into_result(
+                            format!("artefact missing on remote: {art}"),
+                            started,
+                        );
+                    }
+                    // Detect dir vs file on remote — for dirs we use trailing slash
+                    // + --delete to mirror exact contents. Without trailing slash
+                    // rsync nests the source dir INSIDE an existing dst dir
+                    // (observed: forge.next/.next/BUILD_ID instead of forge.next/BUILD_ID).
+                    let is_dir = run_capture(
+                        "ssh",
+                        &[
+                            "-i", key,
+                            "-o", "BatchMode=yes",
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            "-o", "ControlMaster=auto",
+                            "-o", &ctl_path_opt,
+                            "-o", "ControlPersist=30",
+                            host,
+                            &format!("test -d {}", shell_quote(&remote_path)),
+                        ],
+                        None,
+                    )
+                    .await;
+                    let dir_mode = is_dir.exit_code == 0;
+                    let (src_arg, dst_arg, extra_args): (String, String, &[&str]) = if dir_mode {
+                        let _ = tokio::fs::create_dir_all(&local_path).await;
+                        (
+                            format!("{}:{}/", host, remote_path),
+                            format!("{}/", local_path.display()),
+                            &["--delete"],
+                        )
+                    } else {
+                        (
+                            format!("{}:{}", host, remote_path),
+                            local_path.display().to_string(),
+                            &[],
+                        )
+                    };
+                    let mut rsync_args: Vec<&str> = vec!["-a", "-W"];
+                    rsync_args.extend_from_slice(extra_args);
+                    rsync_args.extend_from_slice(&["-e", ssh_e_arg, &src_arg, &dst_arg]);
+                    let down = run_capture("rsync", &rsync_args, None).await;
+                    acc.push(&format!("rsync-down:{art}"), &down);
+                    if down.exit_code != 0 {
+                        return acc.into_result(
+                            format!("rsync down failed for {art}"),
+                            started,
+                        );
+                    }
                 }
-                // Detect dir vs file on remote — for dirs we use trailing slash
-                // + --delete to mirror exact contents. Without trailing slash
-                // rsync nests the source dir INSIDE an existing dst dir
-                // (observed: forge.next/.next/BUILD_ID instead of forge.next/BUILD_ID).
-                let is_dir = run_capture(
-                    "ssh",
-                    &[
-                        "-i", &key,
-                        "-o", "BatchMode=yes",
-                        "-o", "StrictHostKeyChecking=accept-new",
-                        "-o", "ControlMaster=auto",
-                        "-o", &ctl_path_opt,
-                        "-o", "ControlPersist=30",
-                        &host,
-                        &format!("test -d {}", shell_quote(&remote_path)),
-                    ],
+                emit_step(
+                    4,
+                    "rsync-back",
+                    rsync_back_started.elapsed().as_millis() as u64,
                     None,
-                )
-                .await;
-                let dir_mode = is_dir.exit_code == 0;
-                let (src_arg, dst_arg, extra_args): (String, String, &[&str]) = if dir_mode {
-                    let _ = tokio::fs::create_dir_all(&local_path).await;
-                    (
-                        format!("{}:{}/", host, remote_path),
-                        format!("{}/", local_path.display()),
-                        &["--delete"],
-                    )
-                } else {
-                    (
-                        format!("{}:{}", host, remote_path),
-                        local_path.display().to_string(),
-                        &[],
-                    )
-                };
-                let mut rsync_args: Vec<&str> = vec!["-a", "-W"];
-                rsync_args.extend_from_slice(extra_args);
-                rsync_args.extend_from_slice(&["-e", &ssh_e_arg, &src_arg, &dst_arg]);
-                let down = run_capture("rsync", &rsync_args, None).await;
-                acc.push(&format!("rsync-down:{art}"), &down);
-                if down.exit_code != 0 {
-                    return acc.into_result(
-                        format!("rsync down failed for {art}"),
-                        started,
-                    );
-                }
+                );
+            } else {
+                emit_step(4, "skipped:rsync-back (local build)", 0, Some("local build".to_string()));
             }
-            emit_step(
-                4,
-                "rsync-back",
-                rsync_back_started.elapsed().as_millis() as u64,
-                None,
-            );
 
             // 6) restart the app so the freshly rsynced artefacts are picked up.
             // A start failure means the app is down — the build must NOT report
@@ -1824,29 +1792,28 @@ impl AppsContext {
             None,
         );
 
-        let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
-        let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
+        let host_cfg = build_host_config();
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(900).max(60).min(7200));
         let started = Instant::now();
-        let remote_src = format!("/opt/homeroute/apps/{}/src", slug);
         let local_src = app.src_dir();
+        let remote_src = local_src.display().to_string();
 
-        let ctl_socket = format!("/tmp/hr-ship-ssh-{}-{}.sock", slug, std::process::id());
+        let ctl_socket = format!("/tmp/atelier-ship-ssh-{}-{}.sock", slug, std::process::id());
         let ctl_path_opt = format!("ControlPath={ctl_socket}");
-        let ssh_e_arg = format!(
+        let ssh_e_arg = host_cfg.as_ref().map(|(_, key)| format!(
             "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
              -o ControlMaster=auto -o {ctl_path_opt} -o ControlPersist=30 \
              -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
-        );
+        ));
 
-        info!(slug = %slug, host = %host, "ship: start");
+        match &host_cfg {
+            Some((host, _)) => info!(slug = %slug, host = %host, "ship: start (remote)"),
+            None => info!(slug = %slug, "ship: start (local — stop+restart only)"),
+        }
 
         let app_build_tx = self.app_build_tx.clone();
         let slug_for_pipeline = slug.clone();
         let supervisor_for_pipeline = self.supervisor.clone();
-        let key_clone = key.clone();
-        let host_clone = host.clone();
-        let ctl_path_opt_clone = ctl_path_opt.clone();
         let pipeline = async {
             let mut acc = StageAccumulator::new();
 
@@ -1867,92 +1834,109 @@ impl AppsContext {
                 None,
             );
 
-            // 2) Rsync each artefact back from CloudMaster to Medion.
+            // 2) Rsync each artefact back from the remote build host. For local
+            // builds the artefacts are already in `local_src`, so we skip the
+            // SSH/rsync loop entirely.
             let rsync_back_started = Instant::now();
-            for art_spec in &artefacts {
-                let (art, optional) = parse_artefact_spec(art_spec);
-                info!(slug = %slug_for_pipeline, artefact = %art, optional, "ship: rsync down");
-                let remote_path = format!("{}/{}", remote_src, art);
-                let local_path = local_src.join(art);
-                if let Some(parent) = local_path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                let exists = run_capture(
-                    "ssh",
-                    &[
-                        "-i", &key_clone,
-                        "-o", "BatchMode=yes",
-                        "-o", "StrictHostKeyChecking=accept-new",
-                        "-o", "ControlMaster=auto",
-                        "-o", &ctl_path_opt_clone,
-                        "-o", "ControlPersist=30",
-                        &host_clone,
-                        &format!("test -e {}", shell_quote(&remote_path)),
-                    ],
-                    None,
-                )
-                .await;
-                if exists.exit_code != 0 {
-                    if optional {
-                        info!(slug = %slug_for_pipeline, artefact = %art, "ship: optional artefact absent, skipping");
-                        continue;
+            if let Some((host, key)) = &host_cfg {
+                let ssh_e_arg = ssh_e_arg.as_ref().unwrap();
+                for art_spec in &artefacts {
+                    let (art, optional) = parse_artefact_spec(art_spec);
+                    info!(slug = %slug_for_pipeline, artefact = %art, optional, "ship: rsync down");
+                    let remote_path = format!("{}/{}", remote_src, art);
+                    let local_path = local_src.join(art);
+                    if let Some(parent) = local_path.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
                     }
-                    acc.push(&format!("check-{art}"), &exists);
-                    return acc.into_result(
-                        format!("artefact missing on remote: {art} (build it first locally on CloudMaster)"),
-                        started,
-                    );
+                    let exists = run_capture(
+                        "ssh",
+                        &[
+                            "-i", key,
+                            "-o", "BatchMode=yes",
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            "-o", "ControlMaster=auto",
+                            "-o", &ctl_path_opt,
+                            "-o", "ControlPersist=30",
+                            host,
+                            &format!("test -e {}", shell_quote(&remote_path)),
+                        ],
+                        None,
+                    )
+                    .await;
+                    if exists.exit_code != 0 {
+                        if optional {
+                            info!(slug = %slug_for_pipeline, artefact = %art, "ship: optional artefact absent, skipping");
+                            continue;
+                        }
+                        acc.push(&format!("check-{art}"), &exists);
+                        return acc.into_result(
+                            format!("artefact missing on remote: {art} (build it first on the configured ATELIER_BUILD_HOST)"),
+                            started,
+                        );
+                    }
+                    let is_dir = run_capture(
+                        "ssh",
+                        &[
+                            "-i", key,
+                            "-o", "BatchMode=yes",
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            "-o", "ControlMaster=auto",
+                            "-o", &ctl_path_opt,
+                            "-o", "ControlPersist=30",
+                            host,
+                            &format!("test -d {}", shell_quote(&remote_path)),
+                        ],
+                        None,
+                    )
+                    .await;
+                    let dir_mode = is_dir.exit_code == 0;
+                    let (src_arg, dst_arg, extra_args): (String, String, &[&str]) = if dir_mode {
+                        let _ = tokio::fs::create_dir_all(&local_path).await;
+                        (
+                            format!("{}:{}/", host, remote_path),
+                            format!("{}/", local_path.display()),
+                            &["--delete"],
+                        )
+                    } else {
+                        (
+                            format!("{}:{}", host, remote_path),
+                            local_path.display().to_string(),
+                            &[],
+                        )
+                    };
+                    let mut rsync_args: Vec<&str> = vec!["-a", "-W"];
+                    rsync_args.extend_from_slice(extra_args);
+                    rsync_args.extend_from_slice(&["-e", ssh_e_arg, &src_arg, &dst_arg]);
+                    let down = run_capture("rsync", &rsync_args, None).await;
+                    acc.push(&format!("rsync-down:{art}"), &down);
+                    if down.exit_code != 0 {
+                        return acc.into_result(format!("rsync down failed for {art}"), started);
+                    }
                 }
-                let is_dir = run_capture(
-                    "ssh",
-                    &[
-                        "-i", &key_clone,
-                        "-o", "BatchMode=yes",
-                        "-o", "StrictHostKeyChecking=accept-new",
-                        "-o", "ControlMaster=auto",
-                        "-o", &ctl_path_opt_clone,
-                        "-o", "ControlPersist=30",
-                        &host_clone,
-                        &format!("test -d {}", shell_quote(&remote_path)),
-                    ],
+                emit_build_event(
+                    &app_build_tx,
+                    &slug_for_pipeline,
+                    "step",
+                    Some(2),
+                    Some(3),
+                    Some("rsync-back".to_string()),
                     None,
-                )
-                .await;
-                let dir_mode = is_dir.exit_code == 0;
-                let (src_arg, dst_arg, extra_args): (String, String, &[&str]) = if dir_mode {
-                    let _ = tokio::fs::create_dir_all(&local_path).await;
-                    (
-                        format!("{}:{}/", host_clone, remote_path),
-                        format!("{}/", local_path.display()),
-                        &["--delete"],
-                    )
-                } else {
-                    (
-                        format!("{}:{}", host_clone, remote_path),
-                        local_path.display().to_string(),
-                        &[],
-                    )
-                };
-                let mut rsync_args: Vec<&str> = vec!["-a", "-W"];
-                rsync_args.extend_from_slice(extra_args);
-                rsync_args.extend_from_slice(&["-e", &ssh_e_arg, &src_arg, &dst_arg]);
-                let down = run_capture("rsync", &rsync_args, None).await;
-                acc.push(&format!("rsync-down:{art}"), &down);
-                if down.exit_code != 0 {
-                    return acc.into_result(format!("rsync down failed for {art}"), started);
-                }
+                    Some(rsync_back_started.elapsed().as_millis() as u64),
+                    None,
+                );
+            } else {
+                emit_build_event(
+                    &app_build_tx,
+                    &slug_for_pipeline,
+                    "step",
+                    Some(2),
+                    Some(3),
+                    Some("skipped:rsync-back (local build)".to_string()),
+                    Some("local build".to_string()),
+                    Some(0),
+                    None,
+                );
             }
-            emit_build_event(
-                &app_build_tx,
-                &slug_for_pipeline,
-                "step",
-                Some(2),
-                Some(3),
-                Some("rsync-back".to_string()),
-                None,
-                Some(rsync_back_started.elapsed().as_millis() as u64),
-                None,
-            );
 
             // 3) Restart supervisor. A start failure means the app is down —
             // ship must report failure (exit_code != 0), not success.
@@ -2339,7 +2323,6 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
             .map(|k| (k.clone(), "***".to_string()))
             .collect(),
         state: state_to_str(&app.state).to_string(),
-        sources_on: sources_location_to_str(&app.sources_on).to_string(),
         db_backend: db_backend_to_str(&app.db_backend).to_string(),
         created_at: app.created_at.to_rfc3339(),
         updated_at: app.updated_at.to_rfc3339(),
@@ -2547,13 +2530,6 @@ fn db_backend_to_str(b: &DbBackend) -> &'static str {
     }
 }
 
-fn sources_location_to_str(s: &hr_apps::SourcesLocation) -> &'static str {
-    match s {
-        hr_apps::SourcesLocation::Medion => "medion",
-        hr_apps::SourcesLocation::CloudMaster => "cloudmaster",
-    }
-}
-
 fn process_status_to_dto(slug: &str, s: &ProcessStatus) -> AppStatusData {
     AppStatusData {
         slug: slug.to_string(),
@@ -2565,342 +2541,52 @@ fn process_status_to_dto(slug: &str, s: &ProcessStatus) -> AppStatusData {
     }
 }
 
-/// AppCreate path quand `sources_on == CloudMaster` :
-/// scaffold dans un tmpdir local, puis rsync UP vers CloudMaster + chown.
-#[tracing::instrument(skip(ctx_generator, all_apps), fields(slug = %app.slug))]
-async fn scaffold_on_cloudmaster(
-    app: &Application,
-    ctx_generator: &ContextGenerator,
-    all_apps: &[Application],
-) -> anyhow::Result<()> {
-    let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
-    let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
-    let slug = app.slug.as_str();
-    let remote_app_dir = format!("/opt/homeroute/apps/{slug}");
-    let remote_src = format!("{remote_app_dir}/src");
-
-    let tmp = PathBuf::from(format!(
-        "/tmp/hr-scaffold-{slug}-{}",
-        std::process::id()
-    ));
-    if tmp.exists() {
-        let _ = tokio::fs::remove_dir_all(&tmp).await;
-    }
-    tokio::fs::create_dir_all(&tmp).await?;
-    info!(slug = %slug, tmp = %tmp.display(), "scaffold_on_cloudmaster: building locally before rsync");
-
-    let scaffold_res: anyhow::Result<()> = async {
-        scaffold::scaffold_stack_template_at(app, &tmp).await?;
-        ctx_generator.generate_for_app_at(app, &tmp, all_apps, None, false)?;
-        Ok(())
-    }
-    .await;
-    if let Err(e) = scaffold_res {
-        let _ = tokio::fs::remove_dir_all(&tmp).await;
-        return Err(e.context("local scaffold failed"));
-    }
-
-    let mkdir_cmd = format!("mkdir -p {}", shell_quote(&remote_src));
-    let mkdir = run_capture(
-        "ssh",
-        &[
-            "-i", &key,
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10",
-            &host,
-            &mkdir_cmd,
-        ],
-        None,
-    )
-    .await;
-    if mkdir.exit_code != 0 {
-        let _ = tokio::fs::remove_dir_all(&tmp).await;
-        anyhow::bail!(
-            "remote mkdir failed (exit={}): {}",
-            mkdir.exit_code,
-            truncate(&mkdir.stderr, 256)
-        );
-    }
-
-    let ssh_e_arg = format!(
-        "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-    );
-    let local_src_str = format!("{}/", tmp.display());
-    let dest = format!("{host}:{remote_src}/");
-    let up = run_capture(
-        "rsync",
-        &["-a", "-W", "-e", &ssh_e_arg, &local_src_str, &dest],
-        None,
-    )
-    .await;
-    if up.exit_code != 0 {
-        let _ = tokio::fs::remove_dir_all(&tmp).await;
-        anyhow::bail!(
-            "rsync up failed (exit={}): {}",
-            up.exit_code,
-            truncate(&up.stderr, 256)
-        );
-    }
-
-    // Owner stays `romain` (Studio editor identity). Group → `hr-studio` so
-    // the code-server agent (running as `hr-studio`) can edit. Fallback to
-    // `romain` group if `hr-studio` doesn't exist on the remote host.
-    // setfacl bundle below makes the agent permissions resilient against
-    // future `chmod` operations that would otherwise clamp the ACL mask.
-    let chown_cmd = format!(
-        "chown -R romain:hr-studio {p} 2>/dev/null || chown -R romain:romain {p}",
-        p = shell_quote(&remote_app_dir)
-    );
-    let chown = run_capture(
-        "ssh",
-        &[
-            "-i", &key,
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            &host,
-            &chown_cmd,
-        ],
-        None,
-    )
-    .await;
-    if chown.exit_code != 0 {
-        warn!(
-            slug = %slug,
-            stderr = %truncate(&chown.stderr, 256),
-            "scaffold_on_cloudmaster: chown failed (non-fatal — build SSH may not be able to write)"
-        );
-    }
-
-    apply_rules_acl_remote(&host, &key, &remote_src).await;
-
-    if let Err(e) = bind_git_remote_on_cloudmaster(slug, &host, &key, &remote_src).await {
-        warn!(slug = %slug, error = %e, "scaffold_on_cloudmaster: git remote bind failed (non-fatal)");
-    }
-
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-
-    info!(
-        slug = %slug,
-        host = %host,
-        remote_src = %remote_src,
-        "scaffold_on_cloudmaster: done"
-    );
-    Ok(())
-}
-
-/// Variante "à la racine" : résout `host`, `key` et `remote_src` à partir des
-/// valeurs par défaut + slug. Utilisée par le pass boot-heal.
-pub(crate) async fn bind_git_remote_on_cloudmaster_for_slug(slug: &str) -> anyhow::Result<()> {
-    let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
-    let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
-    let remote_src = format!("/opt/homeroute/apps/{slug}/src");
-    bind_git_remote_on_cloudmaster(slug, &host, &key, &remote_src).await
-}
-
-/// Initialise (idempotent) le working tree git de l'app sur CloudMaster et
-/// pointe `origin` vers le bare repo hr-git côté Medion. Sans ça, code-server
-/// (qui tourne sur CloudMaster) tape sur `127.0.0.1:4000` et n'atteint pas
-/// l'API homeroute (toujours sur Medion). Idempotent : safe à re-rouler.
-pub(crate) async fn bind_git_remote_on_cloudmaster(
-    slug: &str,
-    host: &str,
-    key: &str,
-    remote_src: &str,
-) -> anyhow::Result<()> {
-    let api_base = std::env::var("HR_GIT_API_BASE").unwrap_or_else(|_| GIT_API_BASE.to_string());
+/// Initialise (idempotent) le working tree git de l'app et pointe `origin`
+/// vers le bare repo hr-git servi par Atelier (Smart-HTTP). Idempotent : safe
+/// à re-rouler. Si `ATELIER_BUILD_HOST` est défini, exécute via SSH ; sinon
+/// localement dans le src_dir de l'app.
+pub(crate) async fn bind_git_remote_for_slug(slug: &str) -> anyhow::Result<()> {
+    let api_base = std::env::var("ATELIER_GIT_API_BASE").unwrap_or_else(|_| GIT_API_BASE.to_string());
     let origin_url = format!("{api_base}/api/git/repos/{slug}.git");
+    let apps_root = std::env::var("ATELIER_APPS_RUNTIME_ROOT")
+        .unwrap_or_else(|_| "/var/lib/atelier/apps".to_string());
+    let src = format!("{apps_root}/{slug}/src");
     // `git init` est idempotent ; `remote set-url` (fallback `add`) garantit la
     // bonne URL même si un remote `origin` existait déjà.
     let cmd = format!(
         "set -e; cd {src}; git init -q; \
          git remote set-url origin {url} 2>/dev/null || git remote add origin {url}",
-        src = shell_quote(remote_src),
+        src = shell_quote(&src),
         url = shell_quote(&origin_url),
     );
-    let out = run_capture(
-        "ssh",
-        &[
-            "-i", key,
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            host,
-            &cmd,
-        ],
-        None,
-    )
-    .await;
+    let out = match build_host_config() {
+        Some((host, key)) => {
+            run_capture(
+                "ssh",
+                &[
+                    "-i", &key,
+                    "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    &host,
+                    &cmd,
+                ],
+                None,
+            )
+            .await
+        }
+        None => {
+            let (prog, args) = wrap_local_cmd(&cmd);
+            let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+            run_capture(prog, &args_ref, None).await
+        }
+    };
     if out.exit_code != 0 {
         anyhow::bail!(
-            "ssh git remote bind failed (exit={}): {}",
+            "git remote bind failed (exit={}): {}",
             out.exit_code,
             truncate(&out.stderr, 256)
         );
     }
-    info!(slug, host, origin = %origin_url, "git origin bound on cloudmaster");
-    Ok(())
-}
-
-/// AppRegenerateContext path quand `sources_on == CloudMaster` :
-/// régénère CLAUDE.md / .claude/ / .mcp.json dans un tmpdir local puis
-/// rsync UP vers CloudMaster sans toucher au reste du src/. On utilise
-/// `--include` pour ne pousser que les fichiers de contexte.
-#[tracing::instrument(skip(ctx_generator, all_apps, db_tables), fields(slug = %app.slug))]
-pub async fn regen_context_on_cloudmaster(
-    app: &Application,
-    ctx_generator: &ContextGenerator,
-    all_apps: &[Application],
-    db_tables: Option<Vec<String>>,
-) -> anyhow::Result<()> {
-    let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
-    let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
-    let slug = app.slug.as_str();
-    let remote_src = format!("/opt/homeroute/apps/{slug}/src");
-
-    let tmp = PathBuf::from(format!(
-        "/tmp/hr-regen-{slug}-{}",
-        std::process::id()
-    ));
-    if tmp.exists() {
-        let _ = tokio::fs::remove_dir_all(&tmp).await;
-    }
-    tokio::fs::create_dir_all(&tmp).await?;
-
-    let res = ctx_generator.generate_for_app_at(app, &tmp, all_apps, db_tables, false);
-    if let Err(e) = res {
-        let _ = tokio::fs::remove_dir_all(&tmp).await;
-        return Err(e.context("local regen failed"));
-    }
-
-    // Rsync UP only the agent context files, not the whole tmpdir.
-    // -R is implicit through trailing slash semantics; we filter via --include.
-    let ssh_e_arg = format!(
-        "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-    );
-    let local_src_str = format!("{}/", tmp.display());
-    let dest = format!("{host}:{remote_src}/");
-    let up = run_capture(
-        "rsync",
-        &[
-            "-a", "-W",
-            "--include=CLAUDE.md",
-            "--include=.mcp.json",
-            "--include=.claude/",
-            "--include=.claude/**",
-            "--exclude=*",
-            "-e", &ssh_e_arg,
-            &local_src_str,
-            &dest,
-        ],
-        None,
-    )
-    .await;
-
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-
-    if up.exit_code != 0 {
-        anyhow::bail!(
-            "rsync regen up failed (exit={}): {}",
-            up.exit_code,
-            truncate(&up.stderr, 256)
-        );
-    }
-
-    apply_rules_acl_remote(&host, &key, &remote_src).await;
-
-    info!(
-        slug = %slug,
-        host = %host,
-        remote_src = %remote_src,
-        "regen_context_on_cloudmaster: done"
-    );
-    Ok(())
-}
-
-/// Best-effort chown + setfacl on the agent context files on a remote host.
-/// rsync `-a` doesn't preserve ACLs by default, and post-rsync `chmod` would
-/// clamp the ACL mask via the group bits, so we explicitly fix both the
-/// owner/group AND set an explicit ACL mask=rwx + `hr-studio:rwx` entry so
-/// the agent can edit the regenerated context files. Failures are logged but
-/// non-fatal — Studio still works, just with stale perms.
-async fn apply_rules_acl_remote(host: &str, key: &str, remote_src: &str) {
-    let claude_dir = format!("{remote_src}/.claude");
-    let claude_md = format!("{remote_src}/CLAUDE.md");
-    let mcp_json = format!("{remote_src}/.mcp.json");
-    // - chown ag-readable: romain owns, hr-studio is editable group.
-    // - setfacl on .claude (recursive + default ACL) so any file the agent
-    //   adds inside also inherits hr-studio rwx.
-    // - setfacl on CLAUDE.md / .mcp.json individually (they're files, no
-    //   default ACL applies).
-    // The `|| true` clamps non-zero exit on hosts without setfacl/hr-studio.
-    let cmd = format!(
-        "set +e; \
-         chown -R romain:hr-studio {cd} {cm} {mj} 2>/dev/null || true; \
-         setfacl -R -m u::rwX,g::rwX,g:hr-studio:rwX,m::rwx {cd} 2>/dev/null || true; \
-         setfacl -R -d -m u::rwX,g::rwX,g:hr-studio:rwX,m::rwx {cd} 2>/dev/null || true; \
-         setfacl -m u::rw-,g::rw-,g:hr-studio:rw-,m::rwx {cm} {mj} 2>/dev/null || true; \
-         exit 0",
-        cd = shell_quote(&claude_dir),
-        cm = shell_quote(&claude_md),
-        mj = shell_quote(&mcp_json),
-    );
-    let out = run_capture(
-        "ssh",
-        &[
-            "-i", key,
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            host,
-            &cmd,
-        ],
-        None,
-    )
-    .await;
-    if out.exit_code != 0 {
-        warn!(
-            host = %host,
-            remote_src = %remote_src,
-            stderr = %truncate(&out.stderr, 256),
-            "apply_rules_acl_remote: ssh exit non-zero (non-fatal)"
-        );
-    }
-}
-
-/// AppDelete path quand `sources_on == CloudMaster` :
-/// supprime le dossier de l'app sur CloudMaster (src/ + tout le reste).
-#[tracing::instrument]
-async fn cleanup_cloudmaster_src(slug: &str) -> anyhow::Result<()> {
-    let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
-    let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
-    let remote_app_dir = format!("/opt/homeroute/apps/{slug}");
-    let cmd = format!("rm -rf {}", shell_quote(&remote_app_dir));
-
-    let rm = run_capture(
-        "ssh",
-        &[
-            "-i", &key,
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10",
-            &host,
-            &cmd,
-        ],
-        None,
-    )
-    .await;
-    if rm.exit_code != 0 {
-        anyhow::bail!(
-            "remote rm -rf failed (exit={}): {}",
-            rm.exit_code,
-            truncate(&rm.stderr, 256)
-        );
-    }
-
-    info!(
-        slug = %slug,
-        host = %host,
-        remote_app_dir = %remote_app_dir,
-        "cleanup_cloudmaster_src: done"
-    );
+    info!(slug, origin = %origin_url, "git origin bound");
     Ok(())
 }
