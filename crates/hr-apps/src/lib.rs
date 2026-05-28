@@ -5,7 +5,6 @@ pub mod db_manager;
 pub mod port_registry;
 pub mod registry;
 pub mod supervisor;
-pub mod todos;
 pub mod types;
 
 pub use context::ContextGenerator;

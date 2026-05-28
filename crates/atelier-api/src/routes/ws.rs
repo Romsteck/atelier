@@ -33,10 +33,25 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut logs_pg_rx = state.logs.subscribe();
     let mut app_state_rx = state.events.app_state.subscribe();
     let mut app_build_rx = state.events.app_build.subscribe();
-    let mut app_todos_rx = state.events.app_todos.subscribe();
+    let mut surveillance_rx = state.surveillance.subscribe();
 
     loop {
         tokio::select! {
+            result = surveillance_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "surveillance:event", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "surveillance:event", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
             result = app_state_rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -62,21 +77,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "app:build", dropped = n, "ws subscriber lagged");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-
-            result = app_todos_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({ "type": "app:todos", "data": event });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(topic = "app:todos", dropped = n, "ws subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

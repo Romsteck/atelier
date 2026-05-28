@@ -3,13 +3,13 @@ import { useSearchParams } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
-import TodosPanel from '../components/TodosPanel';
 import StudioIframe from '../components/StudioIframe';
 import DocsTab from '../components/docs/DocsTab';
+import SurveillanceTab from '../components/SurveillanceTab';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
-  Eye, EyeOff, ChevronDown,
+  Eye, EyeOff, ChevronDown, ShieldAlert,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
@@ -30,6 +30,7 @@ const TABS = [
   { id: 'db', label: 'DB', icon: Database, requiresDb: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'docs', label: 'Docs', icon: BookOpen },
+  { id: 'surveillance', label: 'Surveillance', icon: ShieldAlert },
   { id: 'env', label: 'Env', icon: KeyRound },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -525,6 +526,7 @@ export default function Studio() {
                   {activeTab === 'db' && currentApp?.has_db && <DbExplorer appSlug={selectedSlug} embedded />}
                   {activeTab === 'logs' && <LogsTab slug={selectedSlug} />}
                   {activeTab === 'docs' && <DocsTab slug={selectedSlug} />}
+                  {activeTab === 'surveillance' && <SurveillanceTab slug={selectedSlug} />}
                   {activeTab === 'env' && <EnvTab slug={selectedSlug} />}
                   {activeTab === 'settings' && <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />}
                 </div>
@@ -533,8 +535,6 @@ export default function Studio() {
           )}
         </div>
       </div>
-
-      {selectedSlug && <TodosPanel slug={selectedSlug} />}
 
       {showCreate && <CreateAppModal onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); fetchApps(); }} />}
     </div>

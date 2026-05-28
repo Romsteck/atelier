@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use atelier_api::state::ApiState;
 use atelier_logging::{LogIngestConfig, LogIngestService, LoggingLayer};
+use atelier_watcher::{SurveillanceConfig, SurveillanceService};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -98,10 +99,6 @@ async fn main() -> Result<()> {
         events.app_state.clone(),
     ));
     let db_manager = Arc::new(hr_apps::db_manager::DbManager::new(apps_src_root.clone()));
-    let todos_manager = Arc::new(hr_apps::todos::TodosManager::new(
-        apps_src_root.clone(),
-        events.clone(),
-    ));
     let context_generator = Arc::new(hr_apps::context::ContextGenerator::new(
         apps_src_root.clone(),
         base_domain.clone(),
@@ -119,6 +116,12 @@ async fn main() -> Result<()> {
         warn!(?err, "supervisor.start_all_running failed");
     }
 
+    // Surveillance IA (Codex code-review + suggestions + sécurité). Migrate
+    // schema, seed config, spawn git_watcher loop. Runs manuels uniquement (pas
+    // de scheduler). Inert tant que le binaire `codex` n'est pas installé. Noop
+    // si pas de DSN.
+    let surveillance = init_surveillance(&app_registry, &apps_src_root).await;
+
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
@@ -133,9 +136,9 @@ async fn main() -> Result<()> {
         port_registry,
         supervisor,
         db_manager,
-        todos_manager,
         context_generator,
         logs,
+        surveillance,
     );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
@@ -170,6 +173,70 @@ async fn main() -> Result<()> {
 
     info!("atelier stopped");
     Ok(())
+}
+
+/// Bootstrap the surveillance service. Reuses `ATELIER_DV_ADMIN_URL` (the
+/// dataverse admin DSN) to CREATE DATABASE `atelier_meta` on first boot,
+/// run its migrations, seed `surveillance_config` for every app of the
+/// registry (crons OFF by default), and spawn the cron + git_watcher loops.
+/// If the env var is missing, the service starts in noop mode.
+///
+/// Codex CLI invocation is configured via env (all optional, sane defaults):
+///   - `ATELIER_CODEX_BIN`         (default "codex")
+///   - `ATELIER_CODEX_ARGS`        (default "exec --sandbox read-only", space-split)
+///   - `ATELIER_CODEX_TIMEOUT_SECS`(default 600)
+///   - `ATELIER_CODEX_MAX_CONCURRENT` (default 2)
+///
+/// The Atelier MCP server is registered once in `~/.codex/config.toml` via
+/// `codex mcp add atelier --url http://127.0.0.1:4100/mcp --bearer-token-env-var MCP_TOKEN`.
+async fn init_surveillance(
+    registry: &hr_apps::AppRegistry,
+    apps_src_root: &PathBuf,
+) -> SurveillanceService {
+    let admin_dsn = std::env::var("ATELIER_DV_ADMIN_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if admin_dsn.is_none() {
+        warn!("ATELIER_DV_ADMIN_URL absent — surveillance in noop mode");
+    }
+    let seed_apps: Vec<atelier_watcher::AppMeta> = registry
+        .list()
+        .await
+        .into_iter()
+        .map(|a| atelier_watcher::AppMeta {
+            slug: a.slug,
+            stack: a.stack.display_name().to_string(),
+        })
+        .collect();
+
+    let codex_bin = std::env::var("ATELIER_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    let codex_args: Vec<String> = std::env::var("ATELIER_CODEX_ARGS")
+        .unwrap_or_else(|_| "exec --sandbox read-only".to_string())
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let timeout_secs = std::env::var("ATELIER_CODEX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600u64);
+    let max_concurrent = std::env::var("ATELIER_CODEX_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2usize);
+
+    SurveillanceService::start(SurveillanceConfig {
+        admin_dsn,
+        db_name: None,
+        seed_apps,
+        apps_src_root: apps_src_root.clone(),
+        codex: atelier_watcher::CodexConfig {
+            bin: codex_bin,
+            args: codex_args,
+            timeout: Duration::from_secs(timeout_secs),
+        },
+        max_concurrent,
+    })
+    .await
 }
 
 fn init_tracing(logs: LogIngestService) {

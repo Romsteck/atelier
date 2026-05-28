@@ -26,6 +26,7 @@ hr-ipc       = { workspace = true }
 hr-dataverse = { workspace = true }
 hr-apps      = { workspace = true }
 atelier-logging = { workspace = true }
+atelier-watcher = { workspace = true }
 sqlx-core    = { workspace = true }
 sqlx-postgres = { workspace = true }
 reqwest      = { workspace = true }

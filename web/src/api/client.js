@@ -235,3 +235,20 @@ export const getDocsDiagram = (appId, type, name) =>
   api.get(`/docs/${appId}/${type}/${encodeURIComponent(name)}/diagram`);
 export const searchDocs = (params) => api.get('/docs/search', { params });
 export const getDocsCompleteness = (appId) => api.get(`/docs/${appId}/completeness`);
+
+// ========== Surveillance IA (per-app code-review + suggestions) ==========
+export const getFindings = (params = {}) => api.get('/findings', { params });
+export const getAppFindings = (slug, params = {}) =>
+  api.get(`/apps/${slug}/findings`, { params });
+export const dismissFinding = (slug, id, reason) =>
+  api.post(`/apps/${slug}/findings/${id}/dismiss`, { reason });
+export const resolveFinding = (slug, id, commit_sha) =>
+  api.post(`/apps/${slug}/findings/${id}/resolve`, { commit_sha });
+export const runSurveillance = (slug, kind) =>
+  api.post(`/apps/${slug}/surveillance/run`, { kind });
+export const listSurveillanceRuns = (slug, params = {}) =>
+  api.get(`/apps/${slug}/surveillance/runs`, { params });
+export const getSurveillanceConfig = (slug) =>
+  api.get(`/apps/${slug}/surveillance/config`);
+export const updateSurveillanceConfig = (slug, body) =>
+  api.put(`/apps/${slug}/surveillance/config`, body);

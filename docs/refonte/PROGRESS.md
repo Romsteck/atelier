@@ -10,7 +10,9 @@
 
 ## Statut global
 
-Dernière mise à jour : 2026-05-26
+Dernière mise à jour : 2026-05-28
+
+> ⚠️ **Régression puis récupération (2026-05-27 → 2026-05-28)** : la refonte des apps `files`/`home`/`myfrigo`/`wallet` (faite directement sur le filesystem CloudMaster le 2026-05-26, jamais committée en git) a été **perdue** lors du rapatriement Studio CM→Medion du 2026-05-27 : le déménagement a transféré l'état git stale (pré-refonte) et stashé le working tree (`stash@{0}: pre-migration medion 2026-05-27`). Le 2026-05-28, le travail a été **récupéré depuis ces stash**, rebuildé sur Medion, committé app par app. Détails dans le Journal ci-dessous (entrée 2026-05-28).
 
 | Phase | Statut | Fichier |
 |---|---|---|
@@ -83,6 +85,26 @@ Aucun drift. Aucune régression remontée. Schedulers home/trader continuent à 
 `66 013` entries · 7 services (atelier 59 397 + 6 apps) · 2 errors total (avant J-1) · **0 dans les dernières 24h**.
 
 ## Journal
+
+### 2026-05-28 — Récupération de la refonte perdue (4 apps)
+
+**Constat** : sur Medion, les sources de `files`/`home`/`myfrigo`/`wallet` (`/var/lib/atelier/apps/<slug>/src/`, mtime 2026-05-27 11:14) contenaient encore `hr_flow` dans leur `Cargo.toml` et leur code — la refonte du 2026-05-26 n'y figurait pas. Cause : refonte faite sur le filesystem CM **sans commit git** ; le rapatriement Studio (2026-05-27) a transféré le HEAD git (pré-refonte) et stashé le working tree non committé. Conséquence : binaires prod OK (figés du 2026-05-26) mais toute reconstruction impossible (`hr-flow` crate absente de Medion).
+
+**Récupération** : la refonte intégrale était dans `stash@{0}` de chaque repo (créé avec `-u`, donc tracked + untracked). Pour chaque app : `git stash apply` → rebuild Medion → deploy → smoke tests lecture → commit → `git stash drop`. Volumes restaurés conformes (~6000 LOC supprimées).
+
+| App | Commit | Binaire | Smoke |
+|---|---|---|---|
+| files | `87581d7` | `bin/files` (home-cloud) | sync/check + files/check-exists OK |
+| home | `14b69b8` | `target/release/smart-home` | aquarium/status + devices (lecture) OK |
+| myfrigo | `3cbbc4d` | `target/release/my-frigo-api` | recipes + favorites OK |
+| wallet | `c4835c6` | `target/release/wallet-server` | transactions + recommendations monthly/health OK |
+
+**Corrections d'infra nécessaires** (le stash réintroduisait l'intégration `atelier-logging-shipper` via un chemin `/nvme/atelier/...` inexistant sur Medion) :
+1. **Vendoring du crate `atelier-logging-shipper`** sur Medion à `/opt/atelier/crates/atelier-logging-shipper/` (crate standalone, deps `tracing`+`reqwest`). Les 4 `Cargo.toml` repointés `/nvme/...` → `/opt/atelier/...`.
+2. **`build_command` du registre (`/opt/atelier/data/apps.json`) corrigés** pour installer le binaire après build : `files` lance `./bin/files` → ajout `cp target/release/home-cloud ../bin/files.new && mv -f ...` (rename atomique, évite `Text file busy`) ; `home`/`wallet`/`myfrigo` lancent `target/release/<bin>` directement (le rebuild cargo = le déploiement, pas de copie). Atelier stoppé pendant l'édition pour éviter le clobber mémoire du registre.
+3. **Units transients stale** : après redémarrage d'atelier, `myfrigo`/`wallet` (units transients du 2026-05-26 non ré-adoptés) renvoyaient 500 au restart API (`systemd-run` en conflit avec l'unit existant). Résolu par `systemctl stop atelier-app-<slug>` avant le re-deploy → atelier recrée un unit propre.
+
+**Vérif finale** : aucun `.rs`/`.ts` ne référence `hr_flow` ; 4 services `active`, health OK, 0 erreur journalctl. Résidus non bloquants (hors code) : docs/skills agent obsolètes (`.claude/rules/flows-first.md`, skill `flow-build`, mentions dans `CLAUDE.md`/`db.md`) + vieux binaires relics `bin/myfrigo`/`bin/wallet` (inutilisés, les units tournent depuis `target/release`).
 
 ### 2026-05-27 — Reverify J+1 OK
 - 6/6 apps loopback healthy, 0 erreur DB + 0 erreur journalctl sur 24h.

@@ -8,5 +8,6 @@ pub mod health;
 pub mod hooks;
 pub mod logs;
 pub mod mcp;
+pub mod surveillance;
 pub mod tasks;
 pub mod ws;

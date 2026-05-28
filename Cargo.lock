@@ -89,6 +89,7 @@ dependencies = [
  "anyhow",
  "atelier-api",
  "atelier-logging",
+ "atelier-watcher",
  "axum",
  "hr-apps",
  "hr-common",
@@ -109,6 +110,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atelier-logging",
+ "atelier-watcher",
  "axum",
  "chrono",
  "futures-util",
@@ -148,6 +150,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-watcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sqlx-core",
+ "sqlx-postgres",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use atelier_logging::LogIngestService;
-use hr_apps::{AppRegistry, AppSupervisor, PortRegistry, db_manager::DbManager, todos::TodosManager};
+use atelier_watcher::SurveillanceService;
+use hr_apps::{AppRegistry, AppSupervisor, PortRegistry, db_manager::DbManager};
 use hr_apps::context::ContextGenerator;
 use hr_common::events::EventBus;
 use hr_common::task_store::TaskStore;
@@ -33,7 +34,6 @@ pub struct ApiState {
     pub port_registry: PortRegistry,
     pub supervisor: Arc<AppSupervisor>,
     pub db_manager: Arc<DbManager>,
-    pub todos_manager: Arc<TodosManager>,
     pub context_generator: Arc<ContextGenerator>,
 
     /// Per-slug build/ship locks, created once at boot and shared by the HTTP
@@ -47,6 +47,11 @@ pub struct ApiState {
     /// by the in-process tracing layer, the HTTP `/api/logs/ingest` endpoint,
     /// and the WebSocket live stream.
     pub logs: LogIngestService,
+
+    /// Surveillance IA service (findings / cron / memory). Endpoints under
+    /// `/api/findings` and `/api/apps/:slug/surveillance/*` return 503 when
+    /// this service is in noop mode (Postgres unreachable at boot).
+    pub surveillance: SurveillanceService,
 }
 
 impl ApiState {
@@ -65,9 +70,9 @@ impl ApiState {
         port_registry: PortRegistry,
         supervisor: Arc<AppSupervisor>,
         db_manager: Arc<DbManager>,
-        todos_manager: Arc<TodosManager>,
         context_generator: Arc<ContextGenerator>,
         logs: LogIngestService,
+        surveillance: SurveillanceService,
     ) -> Self {
         Self {
             docs_dir,
@@ -83,10 +88,10 @@ impl ApiState {
             port_registry,
             supervisor,
             db_manager,
-            todos_manager,
             context_generator,
             build_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             logs,
+            surveillance,
         }
     }
 }

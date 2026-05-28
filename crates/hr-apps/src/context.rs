@@ -18,7 +18,6 @@
 //!   - `src/.claude/rules/mcp-tools.md`        — tools MCP disponibles
 //!   - `src/.claude/rules/workflow.md`         — workflow dev
 //!   - `src/.claude/rules/docs.md`             — usage obligatoire de `docs.*`
-//!   - `src/.claude/rules/todos.md`            — usage obligatoire de `todos.*` (panneau Studio)
 //!   - `src/.claude/rules/claude-md-upkeep.md` — règle de maintenance de CLAUDE.md
 //!   - `src/.claude/skills/app-build/{SKILL.md,build.sh}`
 //!   - `src/.claude/skills/{app-status,app-logs,app-db-info}/SKILL.md`
@@ -158,8 +157,8 @@ impl ContextGenerator {
                   &render_mcp_tools_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("workflow.md"),
                   &self.render_workflow_md(app))?;
-        log_write(&app.slug, &src_rules_dir.join("todos.md"),
-                  &render_todos_md(app))?;
+        log_write(&app.slug, &src_rules_dir.join("surveillance.md"),
+                  &render_surveillance_rule_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
                   &render_claude_md_upkeep_md())?;
 
@@ -222,6 +221,13 @@ impl ContextGenerator {
         let claude_md_path = src_dir.join("CLAUDE.md");
         if write_if_missing(&claude_md_path, &render_initial_claude_md(app))? {
             info!(slug = %app.slug, file = %claude_md_path.display(), "CLAUDE.md skeleton created");
+        }
+
+        // Step 9 — AGENTS.md (Codex), write-once comme CLAUDE.md. La calibration
+        // dynamique de chaque run passe par le prompt embarqué côté atelier-watcher.
+        let agents_md_path = src_dir.join("AGENTS.md");
+        if write_if_missing(&agents_md_path, &render_agents_md(app))? {
+            info!(slug = %app.slug, file = %agents_md_path.display(), "AGENTS.md skeleton created");
         }
 
         info!(slug = %app.slug, "context files generated");
@@ -481,12 +487,6 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `dv.audit_list` — who changed what/when\n\
          - Schema mutations (`db.create_table`, `db.add_column`, `db.create_relation`, `db.drop_table`, `db.remove_column`) — not auto-approved\n\
          - **No GraphQL, no raw SQL.** See `.claude/rules/db.md`.\n\
-         \n\
-         ## Todos (`todos_*`) — visibles dans le panneau droit du Studio\n\
-         - `todos_list` — lister les todos (filtre optionnel par `status` : `pending` ou `in_progress`)\n\
-         - `todos_create` — créer (`name`, `description?`) — démarre en `pending`\n\
-         - `todos_update` — modifier (`id`, `status?` parmi `pending`/`in_progress`)\n\
-         - `todos_delete` — supprimer (`id`) — c'est ainsi qu'on clôt une tâche (pas de statut « done »)\n\
          \n\
          ## Build\n\
          Pour builder cette app, utilise la skill **app-build** (lazy-loaded). Elle appelle l'endpoint HTTP bloquant via Bash.\n\
@@ -1017,91 +1017,90 @@ fn render_initial_claude_md(app: &Application) -> String {
     )
 }
 
-/// Rule obligatoire pour l'usage des tools MCP `todos_*` — les todos sont
-/// visibles en live dans le panneau latéral droit du Studio de l'app.
-fn render_todos_md(app: &Application) -> String {
+/// Rule courte pour la surveillance IA : pointeurs MCP + convention de commit.
+/// Volontairement minimale (coût context permanent) — le détail du workflow
+/// vit dans les skills `surveillance-bugs` / `surveillance-improvements`.
+fn render_surveillance_rule_md(app: &Application) -> String {
     format!(
-        "# Todos — {name} (OBLIGATOIRE)\n\
+        "# Surveillance IA — {slug}\n\
          \n\
-         Cette app possède une todolist **vivante** scopée à `{slug}`, exposée via les \
-         tools MCP `todos_*`. Elle s'affiche **en temps réel** dans le panneau latéral \
-         droit du Studio ({slug}.mynetwk.biz via studio.mynetwk.biz). C'est un \
-         compagnon de travail **visible par l'utilisateur**, pas ton bloc-notes interne.\n\
+         Cette app est surveillée par un agent Codex via 3 scans dédiés \
+         (code-review, sécurité, suggestions). Les findings sont catégorisées et \
+         apparaissent dans le tab **Surveillance** du Studio et via les tools MCP \
+         `findings_*`.\n\
          \n\
-         ## Réflexes obligatoires\n\
+         ## Quand l'utilisateur veut traiter les findings\n\
          \n\
-         Ces trois moments ne sont pas négociables :\n\
+         - Bugs / code-review → skill **surveillance-bugs** (`kind=code_review`).\n\
+         - Sécurité → skill **surveillance-security** (`kind=security`).\n\
+         - Améliorations → skill **surveillance-improvements** (`kind=suggestion`).\n\
          \n\
-         1. **Au début de chaque session** — `todos_list` immédiatement. Toujours. Tu \
-         prends connaissance de ce qui traîne avant d'attaquer.\n\
-         2. **À chaque transition naturelle** — fin d'une étape, blocage, changement \
-         de focus, après avoir résolu un truc : reconsulte la liste. Une tâche que tu \
-         viens de finir est probablement **dedans** — `todos_delete` avant de poursuivre. \
-         Ne laisse jamais un todo livré derrière toi entre deux étapes.\n\
-         3. **Avant de rendre ton rapport final à l'utilisateur** — ouvre `todos_list` \
-         une dernière fois. Tout ce qui est livré : `delete`. Tout ce qui n'a plus de \
-         raison d'être : `delete`. La liste finale ne doit contenir QUE ce qui reste \
-         réellement à faire ou en cours.\n\
+         ## Tools MCP disponibles\n\
          \n\
-         Si tu termines un tour sans avoir fait ce dernier balayage, l'utilisateur \
-         voit des fantômes dans son panneau. C'est un échec.\n\
+         - `findings_list` (filtre kind/severity/status), `findings_dismiss`, `findings_resolve`\n\
+         - `memory_get`, `memory_remember` (préférences durables)\n\
+         - `runs_list` (historique des runs)\n\
          \n\
-         ## Anti-patterns à proscrire\n\
+         ## Convention de commit\n\
          \n\
-         - ❌ **Créé-puis-oublié** : tu crées un todo pour tracer un diagnostic, tu \
-         fixes le problème dans la même session, tu rends le rapport sans toucher au \
-         todo. → `todos_delete` **immédiatement** après la résolution, pas après le \
-         rapport.\n\
-         - ❌ **Hors scope** : tu bosses dans `{slug}`, tu découvres un follow-up qui \
-         concerne `hr-apps`, `homeroute`, ou une autre app. Ne crée PAS un todo ici. \
-         Ce panneau est dédié à `{slug}`. Mentionne le follow-up **dans la conversation \
-         avec l'utilisateur** — c'est lui qui décidera où le tracer.\n\
-         - ❌ **Surutilisation** : un todo s'adresse à **l'utilisateur qui regarde le \
-         Studio**. Pour des notes purement techniques destinées au prochain agent \
-         (chemins de code, hypothèses internes, conventions locales), `CLAUDE.md` à la \
-         racine de l'app est mieux. Critère : « Est-ce que l'utilisateur veut savoir \
-         que je laisse ça pour plus tard ? » Si non → pas un todo.\n\
-         - ❌ **Statut décoratif** : pas de « done », « completed », « archived ». \
-         Terminé = supprimé.\n\
-         \n\
-         ## Sémantique des statuts\n\
-         \n\
-         Seuls deux statuts existent :\n\
-         \n\
-         - **`pending`** — note « à penser plus tard ». Pas encore en cours.\n\
-         - **`in_progress`** — la tâche que tu fais **maintenant**. **Une seule à la \
-         fois**. Si tu démarres un nouveau todo sans clore le précédent, le backend \
-         demote automatiquement l'ancien à `pending` — évite-toi la surprise et fais-le \
-         consciemment.\n\
-         \n\
-         Une tâche **terminée** est **supprimée** (`todos_delete`). Pas de status \
-         « done ». Une tâche dont la suppression est demandée par l'utilisateur est \
-         aussi supprimée — pas marquée d'une autre façon.\n\
-         \n\
-         ## Mapping action → tool (référence)\n\
-         \n\
-         - **Démarrer une tâche** → `todos_update(id, status: \"in_progress\")` ou \
-         `todos_create(name, description)` puis update.\n\
-         - **Tâche terminée** → `todos_delete(id)` ⚠ supprimer, ne pas « compléter ».\n\
-         - **Note / follow-up à garder en tête** → `todos_create(name, description)` \
-         (le statut par défaut est `pending`).\n\
-         - **Progrès partiel sur in_progress** → `todos_update(id, description)` avec \
-         des notes.\n\
-         - **Suppression demandée par l'utilisateur** → `todos_delete(id)`.\n\
-         \n\
-         ## Tools MCP\n\
-         \n\
-         | Tool | Usage |\n\
-         |---|---|\n\
-         | `todos_list` | Lister (filtre optionnel par `status`) |\n\
-         | `todos_create` | Créer (`name`, `description?`) — démarre en `pending` |\n\
-         | `todos_update` | Modifier (`id`, puis les champs à changer) |\n\
-         | `todos_delete` | Supprimer (`id`) — c'est ainsi qu'on clôt |\n\
-         \n\
-         Le `slug` de l'app (`{slug}`) est injecté automatiquement par le MCP projet — \
-         ne le passe pas dans les arguments.\n",
-        name = app.name,
+         Quand tu corriges une finding, commit avec le message \
+         `fix(surveillance:<id>): <résumé>` (ex. `fix(surveillance:42): valide le content-type`). \
+         Atelier détecte ce pattern et marque la finding `resolved` automatiquement. \
+         Appelle aussi `findings_resolve(id, commit_sha)` pour fiabiliser.\n",
         slug = app.slug,
+    )
+}
+
+/// AGENTS.md — instruction-file lu automatiquement par Codex CLI à la racine du
+/// workspace. Écrit une seule fois (write-once, comme CLAUDE.md) : l'utilisateur
+/// peut l'adapter sans craindre l'écrasement. La calibration dynamique de chaque
+/// run Codex passe par le prompt embarqué côté atelier-watcher.
+fn render_agents_md(app: &Application) -> String {
+    format!(
+        "# AGENTS.md — {name} ({stack})\n\
+         \n\
+         Instructions pour les agents Codex opérant sur cette app HomeRoute.\n\
+         \n\
+         ## Rôle\n\
+         \n\
+         Tu fais de la **revue de code** (recherche de bugs / régressions) et des \
+         **suggestions d'amélioration**. Tu ne modifies PAS le code toi-même : tu \
+         écris des findings via les tools MCP `mcp__atelier__*`. L'utilisateur les \
+         exécute ensuite dans Claude Code.\n\
+         \n\
+         ## Préférences projet (à respecter strictement)\n\
+         \n\
+         - **Code minimal.** Pas de defensive coding, pas de validation pour des cas \
+         impossibles, pas de fallback spéculatif.\n\
+         - **Pas de comments redondants.** Un comment explique le POURQUOI non-évident, \
+         jamais le QUOI.\n\
+         - **Aucune dépendance externe nouvelle.** L'utilisateur préfère du code natif.\n\
+         - **Respecte le style du codebase existant.** Pas de migration stylistique globale, \
+         pas de modernisation gratuite.\n\
+         - La doc (`docs_*`) peut être périmée : le **code est la source de vérité**.\n\
+         \n\
+         ## Sévérité (calibrée — ne pas gonfler)\n\
+         \n\
+         - `critical` : bug bloquant en prod, faille, secret hardcodé.\n\
+         - `high` : bug visible par l'utilisateur.\n\
+         - `medium` : régression silencieuse, edge case non géré.\n\
+         - `low` : cosmétique, lisibilité.\n\
+         \n\
+         Max 1 `critical` et 3 `high` par run. Si tu n'as rien de qualité à signaler, \
+         ne crée aucune finding.\n\
+         \n\
+         ## Sortie\n\
+         \n\
+         Pour chaque problème réel : `findings_upsert` avec tous les champs requis \
+         (kind, severity, title, summary, plan markdown, fingerprint stable). Le `plan` \
+         est ce que l'utilisateur exécutera — rends-le actionnable. Si tu cites un \
+         fichier ou une fonction, vérifie qu'il existe.\n\
+         \n\
+         ## Convention de commit (pour la résolution côté Claude)\n\
+         \n\
+         `fix(surveillance:<id>): <résumé>`.\n",
+        name = app.name,
+        stack = app.stack.display_name(),
     )
 }
 
@@ -1381,6 +1380,73 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
         )),
     ];
 
+    // ── Surveillance : process des findings (équivalent des slash-commands
+    // /bugs et /improvements, en skills pour rester aligné avec la convention
+    // "tout est skill" du workspace). ──
+    skills.push(("surveillance-bugs", format!(
+        "---\n\
+         name: surveillance-bugs\n\
+         description: Traite une à une les findings de CODE REVIEW (bugs/régressions) de l'app {slug} repérées par la surveillance IA. Utilise-moi quand l'utilisateur dit \"traite les bugs\", \"/bugs\", \"corrige les findings\", \"fix le code-review\".\n\
+         allowed-tools: \n\
+         ---\n\
+         \n\
+         # Traiter les findings de code-review — `{slug}`\n\
+         \n\
+         1. `findings_list` avec `kind=code_review`, `status=open`. Trie par sévérité décroissante.\n\
+         2. Pour chaque finding :\n\
+         \x20  a. Affiche titre + summary + plan à l'utilisateur.\n\
+         \x20  b. Demande confirmation avant d'appliquer.\n\
+         \x20  c. Si OK : implémente le plan (lis les fichiers, fais les edits).\n\
+         \x20  d. Lance les vérifs (build / typecheck selon la stack — voir `.claude/rules/workflow.md`).\n\
+         \x20  e. Si tout passe : commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`.\n\
+         \x20  f. Si l'utilisateur juge la finding non pertinente : `findings_dismiss(id, reason)`.\n\
+         3. Récap final : N résolues, M dismiss, K laissées ouvertes.\n\
+         \n\
+         **Ne lance JAMAIS `make deploy` toi-même** — l'utilisateur livre après revue des commits.\n",
+        slug = app.slug,
+    )));
+    skills.push(("surveillance-improvements", format!(
+        "---\n\
+         name: surveillance-improvements\n\
+         description: Traite une à une les SUGGESTIONS d'amélioration de l'app {slug} repérées par la surveillance IA. Utilise-moi quand l'utilisateur dit \"traite les améliorations\", \"/improvements\", \"applique les suggestions\".\n\
+         allowed-tools: \n\
+         ---\n\
+         \n\
+         # Traiter les suggestions d'amélioration — `{slug}`\n\
+         \n\
+         1. `findings_list` avec `kind=suggestion`, `status=open`. Trie par sévérité décroissante.\n\
+         2. Pour chaque suggestion :\n\
+         \x20  a. Affiche titre + summary + plan.\n\
+         \x20  b. Demande confirmation (les suggestions sont optionnelles — l'utilisateur tranche).\n\
+         \x20  c. Si OK : implémente, commit atomique `fix(surveillance:<id>): <résumé>`, puis `findings_resolve(id, commit_sha)`.\n\
+         \x20  d. Sinon : `findings_dismiss(id, reason)`.\n\
+         3. Préfère des commits petits et séparés (une suggestion = un commit).\n\
+         \n\
+         **Ne lance JAMAIS `make deploy` toi-même.**\n",
+        slug = app.slug,
+    )));
+    skills.push(("surveillance-security", format!(
+        "---\n\
+         name: surveillance-security\n\
+         description: Traite une à une les failles de SÉCURITÉ de l'app {slug} repérées par le scan sécurité de la surveillance IA. Utilise-moi quand l'utilisateur dit \"traite la sécurité\", \"/security\", \"corrige les failles\".\n\
+         allowed-tools: \n\
+         ---\n\
+         \n\
+         # Traiter les failles de sécurité — `{slug}`\n\
+         \n\
+         1. `findings_list` avec `kind=security`, `status=open`. Trie par sévérité décroissante (critical d'abord).\n\
+         2. Pour chaque faille :\n\
+         \x20  a. Affiche titre + summary (vecteur + impact) + plan.\n\
+         \x20  b. Demande confirmation avant d'appliquer (un correctif sécurité peut changer un comportement).\n\
+         \x20  c. Si OK : implémente, lance les vérifs (build/typecheck selon stack).\n\
+         \x20  d. Commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`.\n\
+         \x20  e. Si faux positif : `findings_dismiss(id, reason)`.\n\
+         3. Récap : N corrigées, M dismiss, K ouvertes.\n\
+         \n\
+         **Ne lance JAMAIS `make deploy` toi-même.**\n",
+        slug = app.slug,
+    )));
+
     if app.has_db {
         skills.push(("app-db-info", format!(
             "---\n\
@@ -1418,7 +1484,15 @@ const OBSOLETE_SLASH_COMMANDS: &[&str] = &[
 
 /// Noms de skills auxiliaires potentiellement obsolètes à nettoyer si la stack
 /// de l'app change.
-const ALL_EXTRA_SKILL_NAMES: &[&str] = &["app-status", "app-logs", "app-db-info", "flow-build"];
+const ALL_EXTRA_SKILL_NAMES: &[&str] = &[
+    "app-status",
+    "app-logs",
+    "app-db-info",
+    "flow-build",
+    "surveillance-bugs",
+    "surveillance-improvements",
+    "surveillance-security",
+];
 
 /// Fichiers `rules/*.md` obsolètes à nettoyer à chaque génération.
 const OBSOLETE_RULE_FILES: &[&str] = &[
@@ -1435,6 +1509,7 @@ const OBSOLETE_RULE_FILES: &[&str] = &[
     "homeroute-store.md",
     "store-publishing.md",
     "flows-first.md",
+    "todos.md",
 ];
 
 /// Nettoie les fichiers de contexte agent qui traînent au niveau `app_dir`
@@ -1473,7 +1548,7 @@ fn render_db_section(app: &crate::types::Application, db_tables: &Option<Vec<Str
             "PostgreSQL Dataverse (`app_{slug}`).\n\
              {tables}\n\
              - Connexion : `DATABASE_URL` injecté dans ton env runtime\n\
-             - Surfaces : REST OData `/api/dv/{slug}/<table>` (app), connecteur `dataverse` (flows), tools MCP `dv_*` (agent)\n\
+             - Surfaces : REST OData `/api/dv/{slug}/<table>` (app), tools MCP `dv_*` (agent)\n\
              - Voir `.claude/rules/db.md` pour les règles d'usage.\n",
             slug = app.slug,
             tables = tables_block,
@@ -1546,11 +1621,8 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          ## ❌ Ne PAS faire\n\
          \n\
          - **Pas de GraphQL.** L'ancienne surface `db_graphql` / `db_introspect`\n\
-           a été supprimée. Utilise REST (app), connecteur `dataverse` (flows)\n\
-           ou MCP `dv_*` (agent).\n\
+           a été supprimée. Utilise REST (app) ou MCP `dv_*` (agent).\n\
          - **Pas de SQL brut** (`db_query` / `db_exec`) — n'existent pas.\n\
-         - **Pas d'appel `http` direct vers `/api/dv/...` depuis un flow** —\n\
-           utilise le connecteur `dataverse` natif.\n\
          - **Pas d'ouverture directe d'un fichier `.db`** — il n'y en a plus.\n\
          \n\
          ## 🧹 Nettoyage post-migration\n\

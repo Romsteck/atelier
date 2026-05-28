@@ -9,6 +9,7 @@ import Git from './pages/Git';
 import Studio from './pages/Studio';
 import DbExplorer from './pages/DbExplorer';
 import SchemaPage from './pages/SchemaPage';
+import Surveillance from './pages/Surveillance';
 
 // Atelier sert le groupe "Applications" du dashboard homeroute, en read-only
 // pour la migration parallèle (Phase 2-9 du plan d'extraction).
@@ -37,6 +38,7 @@ function App() {
             <Route path="/database" element={<DbExplorer />} />
             <Route path="/schema" element={<SchemaPage />} />
             <Route path="/git" element={<Git />} />
+            <Route path="/surveillance" element={<Surveillance />} />
 
             {/* Tasks panel */}
             <Route path="/tasks" element={<Tasks />} />

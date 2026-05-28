@@ -55,6 +55,8 @@ pub struct McpState {
     /// Docs filesystem root. Mirrors `ApiState::docs_dir`; required because
     /// `hr_docs::DEFAULT_DOCS_DIR` is a homeroute-era path absent on Medion.
     pub docs_dir: PathBuf,
+    /// Surveillance IA service — exposes findings_* / memory_* / runs_* tools.
+    pub surveillance: atelier_watcher::SurveillanceService,
 }
 
 impl McpState {
@@ -74,7 +76,6 @@ impl McpState {
             supervisor: (*state.supervisor).clone(),
             db_manager: (*state.db_manager).clone(),
             dataverse_manager: state.dv.clone(),
-            todos: (*state.todos_manager).clone(),
             context_generator: state.context_generator.clone(),
             edge,
             git: state.git.clone(),
@@ -88,6 +89,7 @@ impl McpState {
             apps_ctx: Some(apps_ctx),
             docs_index: state.docs_index.clone(),
             docs_dir: state.docs_dir.clone(),
+            surveillance: state.surveillance.clone(),
         })
     }
 }
@@ -131,7 +133,7 @@ pub async fn mcp_handler(
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
     body: String,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let project_slug = query.get("project").cloned();
     // ── Auth ──
     let authorized = headers
@@ -147,7 +149,8 @@ pub async fn mcp_handler(
             Json(
                 json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32000, "message": "Unauthorized"}}),
             ),
-        );
+        )
+            .into_response();
     }
 
     // ── Parse JSON-RPC request ──
@@ -161,9 +164,20 @@ pub async fn mcp_handler(
                     PARSE_ERROR,
                     format!("Parse error: {e}"),
                 )),
-            );
+            )
+                .into_response();
         }
     };
+
+    // ── Notifications (no `id`) get NO JSON-RPC response. The MCP Streamable
+    // HTTP transport expects 202 Accepted with an empty body. Replying with a
+    // JSON-RPC error here (e.g. "method not found" for notifications/initialized)
+    // breaks strict clients like Codex's rmcp (deserialize fatal on the
+    // initialized handshake). See incident: codex MCP worker quit.
+    if request.id.is_none() {
+        debug!(method = %request.method, "MCP notification (no response)");
+        return StatusCode::ACCEPTED.into_response();
+    }
 
     let id = request.id.clone().unwrap_or(Value::Null);
 
@@ -175,7 +189,8 @@ pub async fn mcp_handler(
                 INVALID_REQUEST,
                 "Invalid JSON-RPC version".into(),
             )),
-        );
+        )
+            .into_response();
     }
 
     debug!(method = %request.method, "MCP request");
@@ -192,7 +207,7 @@ pub async fn mcp_handler(
         ),
     };
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 // ── Tool definitions ────────────────────────────────────────────────
@@ -210,7 +225,29 @@ fn tool_definitions() -> Value {
         .as_array_mut()
         .unwrap()
         .extend(tool_definitions_apps().as_array().unwrap().iter().cloned());
+    tools.as_array_mut().unwrap().extend(
+        tool_definitions_surveillance()
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
     tools
+}
+
+/// Global-scope surveillance tools (explicit `slug`). The project-scope
+/// variants in `tool_definitions_project()` omit `slug` (auto-injected).
+fn tool_definitions_surveillance() -> Value {
+    json!([
+        { "name": "findings_list", "description": "List surveillance findings across apps (or one app via slug). Filter by kind/category/severity/status.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
+        { "name": "findings_upsert", "description": "Create/update a finding for an app (dedup by fingerprint). `category` is coerced to the kind's allowed set.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string" }, "summary": { "type": "string" }, "plan": { "type": "string" }, "fingerprint": { "type": "string" }, "evidence": { "type": "object" } }, "required": ["slug", "kind", "category", "severity", "title", "summary", "plan", "fingerprint"] } },
+        { "name": "findings_dismiss", "description": "Dismiss a finding as false positive (records dismissed_pattern memory).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "id": { "type": "integer" }, "reason": { "type": "string" } }, "required": ["slug", "id"] } },
+        { "name": "findings_resolve", "description": "Mark a finding resolved (records applied_fix memory).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "id": { "type": "integer" }, "commit_sha": { "type": "string" } }, "required": ["slug", "id"] } },
+        { "name": "surveillance_run", "description": "Trigger a surveillance run for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["code_review", "suggestions", "security"] } }, "required": ["slug", "kind"] } },
+        { "name": "memory_get", "description": "Read an app's surveillance memory.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" } }, "required": ["slug"] } },
+        { "name": "memory_remember", "description": "Store a surveillance memory entry for an app (upsert by kind+key).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" }, "key": { "type": "string" }, "value": {} }, "required": ["slug", "kind", "key", "value"] } },
+        { "name": "runs_list", "description": "List recent surveillance runs for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } }
+    ])
 }
 
 fn tool_definitions_core() -> Value {
@@ -423,7 +460,9 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
             | "git_log" | "git_branches"
-            | "todos_list" | "todos_create" | "todos_update" | "todos_delete"
+            | "findings_list" | "findings_upsert" | "findings_dismiss"
+            | "findings_resolve" | "surveillance_run"
+            | "memory_get" | "memory_remember" | "runs_list"
     )
 }
 
@@ -446,7 +485,9 @@ fn is_dispatched_project_tool(name: &str) -> bool {
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
             | "git_log" | "git_branches"
-            | "todos_list" | "todos_create" | "todos_update" | "todos_delete"
+            | "findings_list" | "findings_upsert" | "findings_dismiss"
+            | "findings_resolve" | "surveillance_run"
+            | "memory_get" | "memory_remember" | "runs_list"
     )
 }
 
@@ -487,11 +528,15 @@ fn tool_definitions_project() -> Value {
         // ── Git ──
         { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
         { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
-        // ── Todos (per-app, live in Studio right-panel) ──
-        { "name": "todos_list", "description": "List the app's todos (optionally filtered by status). Visible live in the Studio right-side panel — consult it at session start, at every transition, and before reporting back to the user.", "inputSchema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["pending", "in_progress"] } } } },
-        { "name": "todos_create", "description": "Create a new todo for this app (starts as pending). Appears instantly in the Studio panel — visible to the user. Use only for items the user should see; for internal technical notes, prefer the app's CLAUDE.md.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "Short action-oriented title (≤80 chars)" }, "description": { "type": "string" } }, "required": ["name"] } },
-        { "name": "todos_update", "description": "Update a todo's fields. Only two statuses exist: `pending` (note) and `in_progress` (current task — only one at a time, others are auto-demoted). To complete or abandon a task, use `todos_delete` — there is no `done` status.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "in_progress"] } }, "required": ["id"] } },
-        { "name": "todos_delete", "description": "Delete a todo by id. This is how todos are completed — there is no 'done' status, finished tasks must be deleted. Also use this when the user asks to drop a todo.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }
+        // ── Surveillance IA (findings de code-review / suggestions + mémoire) ──
+        { "name": "findings_list", "description": "List the app's surveillance findings (code-review bugs, improvement suggestions, security issues). Filter by kind/category/severity/status. Read this at the start of a /bugs, /improvements or /security session.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
+        { "name": "findings_upsert", "description": "Create or update a finding (dedup by fingerprint). For the Codex reviewer: emit one call per genuine issue. `category` MUST be one of the kind's allowed categories (see the prompt). `plan` is markdown the user will execute later in Claude Code. Do NOT inflate severity.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string", "description": "One of the kind's allowed categories; anything else is coerced to 'autres'." }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string", "description": "≤120 chars" }, "summary": { "type": "string", "description": "markdown" }, "plan": { "type": "string", "description": "markdown actionable steps" }, "fingerprint": { "type": "string", "description": "stable hash of the issue for dedup" }, "evidence": { "type": "object", "description": "{file_path?, diff?, ...}" } }, "required": ["kind", "category", "severity", "title", "summary", "plan", "fingerprint"] } },
+        { "name": "findings_dismiss", "description": "Dismiss a finding as a false positive. Records a dismissed_pattern in memory so future runs skip it. Use when the user (or you) judge the finding irrelevant.", "inputSchema": { "type": "object", "properties": { "id": { "type": "integer" }, "reason": { "type": "string" } }, "required": ["id"] } },
+        { "name": "findings_resolve", "description": "Mark a finding as resolved after applying its fix. Records an applied_fix in memory. Pass the commit_sha if you committed the fix (convention: `fix(surveillance:<id>): ...`).", "inputSchema": { "type": "object", "properties": { "id": { "type": "integer" }, "commit_sha": { "type": "string" } }, "required": ["id"] } },
+        { "name": "surveillance_run", "description": "Trigger a surveillance run (code_review, suggestions or security) for this app. Async — findings appear via findings_list once Codex finishes.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["code_review", "suggestions", "security"] } }, "required": ["kind"] } },
+        { "name": "memory_get", "description": "Read the app's surveillance memory (user_preference, dismissed_pattern, applied_fix, recurring_issue). Codex reads this at run start to avoid re-suggesting dismissed/applied items and to respect user preferences.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["dismissed_pattern", "recurring_issue", "user_preference", "last_run", "applied_fix", "notified"] } } } },
+        { "name": "memory_remember", "description": "Store a surveillance memory entry. Use kind=user_preference to record a durable preference (e.g. key='no_new_deps', value='user prefers native code'). Upserts by (kind, key).", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["dismissed_pattern", "recurring_issue", "user_preference", "applied_fix"] }, "key": { "type": "string" }, "value": {} }, "required": ["kind", "key", "value"] } },
+        { "name": "runs_list", "description": "List recent surveillance runs for this app (status, skip_reason, findings_count, tokens). Use to debug why a cron produced nothing.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } }
     ])
 }
 
@@ -612,10 +657,16 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "docs_diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
         "git_log" => tool_git_log(id, &arguments, state).await,
         "git_branches" => tool_git_branches(id, &arguments, state).await,
-        "todos_list" => tool_todos_list(id, &arguments, state).await,
-        "todos_create" => tool_todos_create(id, &arguments, state).await,
-        "todos_update" => tool_todos_update(id, &arguments, state).await,
-        "todos_delete" => tool_todos_delete(id, &arguments, state).await,
+
+        // ── Surveillance IA ──
+        "findings_list" => tool_findings_list(id, &arguments, state).await,
+        "findings_upsert" => tool_findings_upsert(id, &arguments, state).await,
+        "findings_dismiss" => tool_findings_dismiss(id, &arguments, state).await,
+        "findings_resolve" => tool_findings_resolve(id, &arguments, state).await,
+        "surveillance_run" => tool_surveillance_run(id, &arguments, state).await,
+        "memory_get" => tool_memory_get(id, &arguments, state).await,
+        "memory_remember" => tool_memory_remember(id, &arguments, state).await,
+        "runs_list" => tool_runs_list(id, &arguments, state).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
@@ -1918,87 +1969,219 @@ async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
     tool_success(id, json!({ "refreshed": refreshed, "total": apps.len() }))
 }
 
-// ── Todos tools ─────────────────────────────────────────────────────
+// ── Surveillance IA tools ───────────────────────────────────────────
 
-async fn tool_todos_list(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
+async fn tool_findings_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.findings() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    let filter = atelier_watcher::FindingFilter {
+        slug: args.get("slug").and_then(|v| v.as_str()).map(String::from),
+        kind: args.get("kind").and_then(|v| v.as_str()).map(String::from),
+        severity: args.get("severity").and_then(|v| v.as_str()).map(String::from),
+        status: args.get("status").and_then(|v| v.as_str()).map(String::from),
+        category: args.get("category").and_then(|v| v.as_str()).map(String::from),
+        limit: args.get("limit").and_then(|v| v.as_i64()),
     };
-    let status = args.get("status").and_then(|v| v.as_str()).map(String::from);
-    ipc_resp_to_mcp(id, ctx.todos_list(slug.to_string(), status).await)
+    match store.list(filter).await {
+        Ok(items) => tool_success(id, json!({ "findings": items, "total": items.len() })),
+        Err(e) => tool_error(id, &format!("findings_list failed: {e}")),
+    }
 }
 
-async fn tool_todos_create(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
+async fn tool_findings_upsert(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.findings() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    let (Some(kind), Some(severity), Some(title), Some(summary), Some(plan), Some(fingerprint)) = (
+        args.get("kind").and_then(|v| v.as_str()),
+        args.get("severity").and_then(|v| v.as_str()),
+        args.get("title").and_then(|v| v.as_str()),
+        args.get("summary").and_then(|v| v.as_str()),
+        args.get("plan").and_then(|v| v.as_str()),
+        args.get("fingerprint").and_then(|v| v.as_str()),
+    ) else {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            "Missing one of: kind, severity, title, summary, plan, fingerprint".into(),
+        );
     };
-    let description = args
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    ipc_resp_to_mcp(
-        id,
-        ctx.todos_create(slug.to_string(), name.to_string(), description)
-            .await,
-    )
+    if !matches!(kind, "code_review" | "suggestion" | "security") {
+        return tool_error(id, "kind must be code_review|suggestion|security");
+    }
+    if !matches!(severity, "critical" | "high" | "medium" | "low") {
+        return tool_error(id, "severity must be critical|high|medium|low");
+    }
+    // Coerce the category to the kind's allowed set (unknown → "autres").
+    let category = atelier_watcher::RunKind::from_finding_kind(kind)
+        .map(|rk| rk.normalize_category(args.get("category").and_then(|v| v.as_str())))
+        .unwrap_or_else(|| "autres".to_string());
+    let draft = atelier_watcher::NewFinding {
+        slug: slug.to_string(),
+        kind: kind.to_string(),
+        severity: severity.to_string(),
+        title: title.to_string(),
+        summary: summary.to_string(),
+        plan: plan.to_string(),
+        fingerprint: fingerprint.to_string(),
+        category,
+        evidence: args.get("evidence").cloned(),
+    };
+    match store.upsert(draft).await {
+        Ok(f) => {
+            state.surveillance.emit("finding", &f.slug, "upsert");
+            tool_success(id, json!(f))
+        }
+        Err(e) => tool_error(id, &format!("findings_upsert failed: {e}")),
+    }
 }
 
-async fn tool_todos_update(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
+async fn tool_findings_dismiss(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.findings() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(todo_id) = args.get("id").and_then(|v| v.as_str()) else {
+    let Some(fid) = args.get("id").and_then(|v| v.as_i64()) else {
         return error_response(id, INVALID_PARAMS, "Missing id".into());
     };
-    let name = args.get("name").and_then(|v| v.as_str()).map(String::from);
-    let description = args
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let status = args.get("status").and_then(|v| v.as_str()).map(String::from);
-    ipc_resp_to_mcp(
-        id,
-        ctx.todos_update(
-            slug.to_string(),
-            todo_id.to_string(),
-            name,
-            description,
-            status,
-        )
-        .await,
-    )
+    // Record dismissed_pattern memory so future runs skip it.
+    let item = match store.get(fid).await {
+        Ok(Some(f)) => Some(f),
+        Ok(None) => return tool_error(id, "finding not found"),
+        Err(e) => return tool_error(id, &format!("findings_dismiss get failed: {e}")),
+    };
+    match store.dismiss(fid).await {
+        Ok(_) => {}
+        Err(e) => return tool_error(id, &format!("findings_dismiss failed: {e}")),
+    }
+    if let (Some(item), Some(memory)) = (item.clone(), state.surveillance.memory()) {
+        let value = json!({
+            "fingerprint": item.fingerprint,
+            "title": item.title,
+            "reason": args.get("reason").and_then(|v| v.as_str()),
+            "dismissed_at": chrono::Utc::now(),
+        });
+        let _ = memory
+            .upsert(&item.slug, "dismissed_pattern", &item.fingerprint, &value, None)
+            .await;
+    }
+    if let Some(item) = item {
+        state.surveillance.emit("finding", &item.slug, "dismiss");
+    }
+    tool_success(id, json!({ "ok": true }))
 }
 
-async fn tool_todos_delete(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
+async fn tool_findings_resolve(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.findings() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
+    };
+    let Some(fid) = args.get("id").and_then(|v| v.as_i64()) else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    let commit_sha = args.get("commit_sha").and_then(|v| v.as_str());
+    let item = match store.get(fid).await {
+        Ok(Some(f)) => Some(f),
+        Ok(None) => return tool_error(id, "finding not found"),
+        Err(e) => return tool_error(id, &format!("findings_resolve get failed: {e}")),
+    };
+    match store.resolve(fid, commit_sha).await {
+        Ok(_) => {}
+        Err(e) => return tool_error(id, &format!("findings_resolve failed: {e}")),
+    }
+    if let (Some(item), Some(memory)) = (item.clone(), state.surveillance.memory()) {
+        let value = json!({
+            "finding_id": fid,
+            "title": item.title,
+            "commit_sha": commit_sha,
+            "completed_at": chrono::Utc::now(),
+        });
+        let key = format!("finding:{fid}");
+        let _ = memory.upsert(&item.slug, "applied_fix", &key, &value, None).await;
+    }
+    if let Some(item) = item {
+        state.surveillance.emit("finding", &item.slug, "resolve");
+    }
+    tool_success(id, json!({ "ok": true }))
+}
+
+async fn tool_surveillance_run(id: Value, args: &Value, state: &McpState) -> Value {
+    if state.surveillance.findings().is_none() {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
+    }
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(kind) = atelier_watcher::RunKind::from_str(kind_str) else {
+        return tool_error(id, "kind must be code_review|suggestions");
+    };
+    match state
+        .surveillance
+        .run_now(slug.to_string(), kind, "manual")
+        .await
+    {
+        Ok(run_id) => tool_success(id, json!({ "ok": true, "run_id": run_id, "status": "running" })),
+        Err(e) => tool_error(id, &format!("surveillance_run failed: {e}")),
+    }
+}
+
+async fn tool_memory_get(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.memory() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    let Some(todo_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    let kind = args.get("kind").and_then(|v| v.as_str());
+    match store.get(slug, kind, None).await {
+        Ok(items) => tool_success(id, json!({ "memory": items, "total": items.len() })),
+        Err(e) => tool_error(id, &format!("memory_get failed: {e}")),
+    }
+}
+
+async fn tool_memory_remember(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.memory() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    ipc_resp_to_mcp(
-        id,
-        ctx.todos_delete(slug.to_string(), todo_id.to_string()).await,
-    )
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if !matches!(
+        kind,
+        "dismissed_pattern" | "recurring_issue" | "user_preference" | "applied_fix"
+    ) {
+        return tool_error(
+            id,
+            "kind must be dismissed_pattern|recurring_issue|user_preference|applied_fix",
+        );
+    }
+    let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing key".into());
+    };
+    let value = match args.get("value") {
+        Some(v) => v.clone(),
+        None => return error_response(id, INVALID_PARAMS, "Missing value".into()),
+    };
+    match store.upsert(slug, kind, key, &value, None).await {
+        Ok(_) => tool_success(id, json!({ "ok": true })),
+        Err(e) => tool_error(id, &format!("memory_remember failed: {e}")),
+    }
+}
+
+async fn tool_runs_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.surveillance.runs() else {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
+    };
+    let slug = args.get("slug").and_then(|v| v.as_str());
+    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    match store.list(slug, limit).await {
+        Ok(items) => tool_success(id, json!({ "runs": items, "total": items.len() })),
+        Err(e) => tool_error(id, &format!("runs_list failed: {e}")),
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ members = [
     "crates/atelier",
     "crates/atelier-api",
     "crates/atelier-logging",
+    "crates/atelier-watcher",
     "crates/hr-apps",
     "crates/hr-dataverse",
     "crates/hr-dataverse-migrate",
@@ -94,6 +95,7 @@ async-graphql = { version = "7.0", default-features = false, features = ["dynami
 # Crates internes Atelier
 atelier-api     = { path = "crates/atelier-api" }
 atelier-logging = { path = "crates/atelier-logging" }
+atelier-watcher = { path = "crates/atelier-watcher" }
 
 [profile.release]
 lto = "thin"

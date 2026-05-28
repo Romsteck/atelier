@@ -10,6 +10,10 @@ ATELIER_API ?= http://10.0.0.254:4100
 ATELIER_BIN_LOCAL := target/release/atelier
 ATELIER_FLOWD_BIN_LOCAL := target/release/atelier-flowd
 WEB_DIST_LOCAL := web/dist
+# App-side logging SDK. Standalone crate (not a workspace member) consumed by
+# the apps as a path-dep; apps build on Medion so its source must live there.
+# Canonical source is here in the Atelier repo; deploy syncs it to Medion.
+SHIPPER_CRATE_LOCAL := crates/atelier-logging-shipper
 
 help:
 	@echo "Targets:"
@@ -42,6 +46,11 @@ deploy-medion: atelier web
 	@echo "→ rsync atelier binary + web/dist to Medion"
 	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):/opt/atelier/bin/atelier.new
 	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):/opt/atelier/web/dist/
+	@echo "→ rsync app-SDK crate (atelier-logging-shipper) to Medion"
+	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
+	ssh $(MEDION) 'sudo mkdir -p /opt/atelier/crates'
+	rsync -a --rsync-path='sudo rsync' --delete --exclude=target --exclude=Cargo.lock \
+	  $(SHIPPER_CRATE_LOCAL)/ $(MEDION):/opt/atelier/crates/atelier-logging-shipper/
 	@echo "→ atomic swap + restart atelier.service on Medion"
 	ssh $(MEDION) 'sudo install -o root -g root -m 0755 /opt/atelier/bin/atelier.new /opt/atelier/bin/atelier && sudo rm /opt/atelier/bin/atelier.new && sudo systemctl restart atelier.service'
 	@echo "→ healthcheck (poll /api/health)"
