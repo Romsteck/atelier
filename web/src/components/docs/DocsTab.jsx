@@ -136,8 +136,8 @@ export default function DocsTab({ slug }) {
   if (overviewError) {
     return (
       <div className="h-full flex items-center justify-center p-6">
-        <div className="max-w-md p-4 bg-red-500/10 border border-red-500/30 rounded text-red-300 flex items-start gap-2">
-          <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+        <div className="max-w-md p-4 bg-red-500/10 border border-red-500/30 rounded-sm text-red-300 flex items-start gap-2">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
           <div>
             <div className="font-medium">Erreur</div>
             <div className="text-sm mt-1">{overviewError}</div>
@@ -175,7 +175,7 @@ export default function DocsTab({ slug }) {
               <Loader2 className="w-5 h-5 animate-spin text-blue-400" />
             </div>
           ) : entryError ? (
-            <div className="p-4 bg-red-500/10 border border-red-500/30 rounded text-red-300">
+            <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-sm text-red-300">
               {entryError}
             </div>
           ) : entry ? (

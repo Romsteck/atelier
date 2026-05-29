@@ -130,7 +130,7 @@ const Certificates = () => {
             <span className="text-sm font-medium">Let's Encrypt</span>
             <CheckCircle className="w-4 h-4 text-green-400" />
             <span className="text-sm text-green-400">Actif</span>
-            <span className="px-1.5 py-0.5 bg-blue-900/30 text-blue-300 text-xs rounded">
+            <span className="px-1.5 py-0.5 bg-blue-900/30 text-blue-300 text-xs rounded-sm">
               Wildcards
             </span>
             <span className="text-xs text-gray-500">Renouvellement auto 30j avant expiration</span>
@@ -210,7 +210,7 @@ const Certificates = () => {
                       </div>
                     </td>
                     <td className="py-1.5">
-                      <span className={`px-1.5 py-0.5 text-xs rounded ${
+                      <span className={`px-1.5 py-0.5 text-xs rounded-sm ${
                         cert.type === 'app'
                           ? 'bg-purple-900/30 text-purple-300'
                           : cert.type === 'global'

@@ -154,7 +154,7 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
         {isScanning && (
           <div className="mt-2 flex items-center gap-2">
             <div className="h-1.5 w-24 overflow-hidden rounded-full bg-gray-950/60">
-              <div className="h-full w-full animate-pulse rounded-full bg-gradient-to-r from-blue-500/60 to-cyan-400/60" />
+              <div className="h-full w-full animate-pulse rounded-full bg-linear-to-r from-blue-500/60 to-cyan-400/60" />
             </div>
             <span className="text-xs text-blue-100/80">Scan des fichiers…</span>
             {progress?.files_total != null && progress.files_total > 0 && (
@@ -166,7 +166,7 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
         {isVerifying && (
           <div className="mt-2 flex items-center gap-2">
             <div className="h-1.5 w-24 overflow-hidden rounded-full bg-gray-950/60">
-              <div className="h-full w-full animate-pulse rounded-full bg-gradient-to-r from-amber-500/60 to-yellow-400/60" />
+              <div className="h-full w-full animate-pulse rounded-full bg-linear-to-r from-amber-500/60 to-yellow-400/60" />
             </div>
             <span className="text-xs text-amber-100/80">Vérification…</span>
           </div>
@@ -176,7 +176,7 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
           <div className="mt-2">
             <div className="h-2 overflow-hidden rounded-full bg-gray-950/60">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-150"
+                className="h-full rounded-full bg-linear-to-r from-blue-500 to-cyan-400 transition-all duration-150"
                 style={{ width: `${progressPct}%` }}
               />
             </div>

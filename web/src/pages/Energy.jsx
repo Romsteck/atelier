@@ -415,7 +415,7 @@ function PerCoreGrid({ cores, hostId }) {
                 />
               </div>
               {/* Hover tooltip with governor buttons */}
-              <div className="hidden group-hover:flex absolute z-10 bottom-full left-1/2 -translate-x-1/2 mb-1 bg-gray-900 border border-gray-600 rounded p-1 gap-0.5 shadow-lg">
+              <div className="hidden group-hover:flex absolute z-10 bottom-full left-1/2 -translate-x-1/2 mb-1 bg-gray-900 border border-gray-600 rounded-sm p-1 gap-0.5 shadow-lg">
                 {GOVERNORS.map(gov => (
                   <button
                     key={gov}

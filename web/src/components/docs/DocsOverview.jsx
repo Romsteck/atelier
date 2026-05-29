@@ -5,7 +5,7 @@ import { Layout, Layers, Boxes, GitBranch } from 'lucide-react';
 function StatCard({ icon: Icon, label, value, sub }) {
   return (
     <div className="px-4 py-3 bg-gray-800/40 border border-gray-700 rounded-lg flex items-center gap-3">
-      <Icon className="w-5 h-5 text-blue-400 flex-shrink-0" />
+      <Icon className="w-5 h-5 text-blue-400 shrink-0" />
       <div>
         <div className="text-2xl font-bold text-white leading-none">{value}</div>
         <div className="text-xs text-gray-400 mt-0.5">{label}</div>
@@ -72,7 +72,7 @@ export default function DocsOverview({ overview, diagram }) {
             Aucune vue d'ensemble pour cette app.
           </p>
           <p className="text-sm">
-            L'agent peut la créer via <code className="px-1 py-0.5 bg-gray-900 rounded text-xs text-blue-300">docs_update(type=overview, name=overview, …)</code>.
+            L'agent peut la créer via <code className="px-1 py-0.5 bg-gray-900 rounded-sm text-xs text-blue-300">docs_update(type=overview, name=overview, …)</code>.
           </p>
         </div>
       )}

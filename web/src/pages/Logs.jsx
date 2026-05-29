@@ -323,7 +323,7 @@ export default function Logs() {
           <select
             value={appSlug}
             onChange={(e) => setAppSlug(e.target.value)}
-            className="px-2 py-1 text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500"
+            className="px-2 py-1 text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg focus:outline-hidden focus:border-blue-500"
           >
             <option value="">Toutes les apps</option>
             {availableApps.map(s => (
@@ -370,7 +370,7 @@ export default function Logs() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Rechercher..."
-            className="w-full pl-8 pr-8 py-1.5 text-xs bg-gray-700 border border-gray-600 text-white rounded-lg placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="w-full pl-8 pr-8 py-1.5 text-xs bg-gray-700 border border-gray-600 text-white rounded-lg placeholder-gray-500 focus:outline-hidden focus:border-blue-500"
           />
           {searchInput && (
             <button onClick={() => { setSearchInput(''); setSearchText(''); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
@@ -448,16 +448,16 @@ export default function Logs() {
                     onClick={() => setExpandedId(isExpanded ? null : id)}
                     className={`w-full text-left px-4 py-1.5 flex items-start gap-2 hover:bg-gray-700/30 transition-colors ${cfg.rowBg}`}
                   >
-                    <ChevronRight className={`w-3 h-3 mt-0.5 text-gray-600 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
-                    <span className="text-gray-500 flex-shrink-0 w-[85px]">{formatTimestamp(log.timestamp)}</span>
-                    <span className={`inline-flex items-center px-1.5 py-0 rounded text-[10px] font-medium flex-shrink-0 w-[46px] justify-center ${cfg.bg} ${cfg.color}`}>
+                    <ChevronRight className={`w-3 h-3 mt-0.5 text-gray-600 shrink-0 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    <span className="text-gray-500 shrink-0 w-[85px]">{formatTimestamp(log.timestamp)}</span>
+                    <span className={`inline-flex items-center px-1.5 py-0 rounded-sm text-[10px] font-medium shrink-0 w-[46px] justify-center ${cfg.bg} ${cfg.color}`}>
                       {(log.level || 'INFO').toUpperCase()}
                     </span>
-                    <span className="inline-flex items-center px-1.5 py-0 rounded text-[10px] text-gray-400 bg-gray-700/50 flex-shrink-0">
+                    <span className="inline-flex items-center px-1.5 py-0 rounded-sm text-[10px] text-gray-400 bg-gray-700/50 shrink-0">
                       {log.service || '-'}
                     </span>
                     {log.source && (
-                      <span className="text-gray-500 flex-shrink-0 truncate max-w-[250px]">
+                      <span className="text-gray-500 shrink-0 truncate max-w-[250px]">
                         {typeof log.source === 'object'
                           ? [log.source.crate_name, log.source.module?.split('::').slice(1).join('::'), log.source.function].filter(Boolean).join(' > ')
                           : log.source}
@@ -480,7 +480,7 @@ export default function Logs() {
                       {log.data && (
                         <div>
                           <span className="text-gray-500">data:</span>
-                          <pre className="mt-1 text-gray-300 whitespace-pre-wrap break-all bg-gray-900/50 rounded p-2">
+                          <pre className="mt-1 text-gray-300 whitespace-pre-wrap break-all bg-gray-900/50 rounded-sm p-2">
                             {typeof log.data === 'string' ? log.data : JSON.stringify(log.data, null, 2)}
                           </pre>
                         </div>

@@ -116,7 +116,7 @@ export default function Tasks() {
                 onClick={() => navigate(`/tasks/${task.id}`)}
                 className="w-full text-left p-4 hover:bg-gray-700/50 transition-colors border-b border-gray-700/50 flex items-center gap-4"
               >
-                <div className={`p-1.5 rounded ${cfg.bg}`}>
+                <div className={`p-1.5 rounded-sm ${cfg.bg}`}>
                   <Icon className={`w-5 h-5 ${cfg.color} ${cfg.spin ? 'animate-spin' : ''}`} />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -131,7 +131,7 @@ export default function Tasks() {
                     )}
                   </div>
                 </div>
-                <div className="text-right flex-shrink-0">
+                <div className="text-right shrink-0">
                   <p className="text-xs text-gray-500">{timeAgo(task.created_at)}</p>
                   {task.started_at && (
                     <p className="text-xs text-gray-600 mt-0.5">
@@ -139,7 +139,7 @@ export default function Tasks() {
                     </p>
                   )}
                 </div>
-                <ChevronRight className="w-4 h-4 text-gray-600 flex-shrink-0" />
+                <ChevronRight className="w-4 h-4 text-gray-600 shrink-0" />
               </button>
             );
           })

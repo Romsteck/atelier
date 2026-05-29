@@ -84,7 +84,7 @@ function StepTimeline({ steps }) {
                 <p className="text-xs text-gray-400 mt-0.5">{step.message}</p>
               )}
               {step.details && (
-                <pre className="text-xs text-gray-500 mt-1 bg-gray-900 rounded p-2 overflow-x-auto">
+                <pre className="text-xs text-gray-500 mt-1 bg-gray-900 rounded-sm p-2 overflow-x-auto">
                   {typeof step.details === 'string' ? step.details : JSON.stringify(step.details, null, 2)}
                 </pre>
               )}
@@ -169,11 +169,11 @@ export default function TaskDetail() {
           <div className="flex-1">
             <h1 className="text-lg font-bold text-white">{task.title}</h1>
             <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-gray-400">
-              <span className="bg-gray-700 px-2 py-0.5 rounded">
+              <span className="bg-gray-700 px-2 py-0.5 rounded-sm">
                 {TYPE_LABELS[task.task_type] || task.task_type}
               </span>
               {task.target && (
-                <span className="bg-gray-700 px-2 py-0.5 rounded">{task.target}</span>
+                <span className="bg-gray-700 px-2 py-0.5 rounded-sm">{task.target}</span>
               )}
               <span>{formatDate(task.created_at)}</span>
               {task.started_at && (
@@ -181,7 +181,7 @@ export default function TaskDetail() {
               )}
             </div>
             {task.error && (
-              <div className="mt-3 p-3 bg-red-500/10 border border-red-500/20 rounded text-sm text-red-400">
+              <div className="mt-3 p-3 bg-red-500/10 border border-red-500/20 rounded-sm text-sm text-red-400">
                 {task.error}
               </div>
             )}

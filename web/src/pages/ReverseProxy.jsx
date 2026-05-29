@@ -414,7 +414,7 @@ Verification rapide (sans les details utilisateur).
       {/* Vertical Tabs Layout */}
       <div className="flex flex-col md:flex-row flex-1">
         {/* Tab Sidebar */}
-        <div className="flex md:flex-col md:w-56 border-b md:border-b-0 md:border-r border-gray-700 bg-gray-800/50 flex-shrink-0 overflow-x-auto">
+        <div className="flex md:flex-col md:w-56 border-b md:border-b-0 md:border-r border-gray-700 bg-gray-800/50 shrink-0 overflow-x-auto">
           {tabs.map(tab => (
             <button
               key={tab.id}
@@ -600,9 +600,9 @@ Verification rapide (sans les details utilisateur).
                       </td>
                       <td className="py-3">
                         {route.auth_required ? (
-                          <span className="text-xs bg-yellow-900/30 text-yellow-400 px-2 py-0.5 rounded">Auth</span>
+                          <span className="text-xs bg-yellow-900/30 text-yellow-400 px-2 py-0.5 rounded-sm">Auth</span>
                         ) : (
-                          <span className="text-xs bg-green-900/30 text-green-400 px-2 py-0.5 rounded">Public</span>
+                          <span className="text-xs bg-green-900/30 text-green-400 px-2 py-0.5 rounded-sm">Public</span>
                         )}
                       </td>
                     </tr>

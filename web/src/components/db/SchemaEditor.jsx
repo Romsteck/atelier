@@ -147,10 +147,10 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
       <div className="w-56 border-r border-gray-700 flex flex-col bg-gray-800/30 shrink-0">
         <div className="flex items-center gap-1 px-3 py-2 border-b border-gray-700">
           <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex-1">Tables</span>
-          <button onClick={handleSync} className="p-1 text-gray-500 hover:text-yellow-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Sync">
+          <button onClick={handleSync} className="p-1 text-gray-500 hover:text-yellow-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Sync">
             <RefreshCw className="w-3 h-3" />
           </button>
-          <button onClick={() => setShowCreateTable(true)} className="p-1 text-gray-500 hover:text-green-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Nouvelle table">
+          <button onClick={() => setShowCreateTable(true)} className="p-1 text-gray-500 hover:text-green-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Nouvelle table">
             <Plus className="w-3 h-3" />
           </button>
         </div>
@@ -202,19 +202,19 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
                 <div className="flex-1" />
                 <button
                   onClick={() => setShowAddColumn(table.name)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-400 hover:bg-green-500/10 rounded border-none bg-transparent cursor-pointer"
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-400 hover:bg-green-500/10 rounded-sm border-none bg-transparent cursor-pointer"
                 >
                   <Plus className="w-3 h-3" /> Colonne
                 </button>
                 <button
                   onClick={() => setShowCreateRelation(true)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-purple-400 hover:bg-purple-500/10 rounded border-none bg-transparent cursor-pointer"
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-purple-400 hover:bg-purple-500/10 rounded-sm border-none bg-transparent cursor-pointer"
                 >
                   <Link2 className="w-3 h-3" /> Relation
                 </button>
                 <button
                   onClick={() => handleDropTable(table.name)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-red-400 hover:bg-red-500/10 rounded border-none bg-transparent cursor-pointer"
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-red-400 hover:bg-red-500/10 rounded-sm border-none bg-transparent cursor-pointer"
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>
@@ -248,7 +248,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
                           </td>
                           <td className="px-3 py-1.5 font-mono">{col.name}</td>
                           <td className="px-3 py-1.5">
-                            <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${fieldTypeBadge(col.field_type)}`}>
+                            <span className={`px-1.5 py-0.5 rounded-sm text-[11px] font-medium ${fieldTypeBadge(col.field_type)}`}>
                               {col.field_type}
                             </span>
                           </td>
@@ -417,7 +417,7 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
           <h3 className="text-sm font-semibold text-white flex items-center gap-2">
             <Database className="w-4 h-4 text-blue-400" /> Nouvelle table
           </h3>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700 border-none bg-transparent cursor-pointer">
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -425,13 +425,13 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
           <div>
             <label className="block text-xs text-gray-400 mb-1">Nom de la table <span className="text-red-400">*</span></label>
             <input type="text" value={name} onChange={e => setName(e.target.value)} required
-              className="w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600 outline-none focus:border-blue-500"
+              className="w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden focus:border-blue-500"
               placeholder="ex: products" />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Description</label>
             <input type="text" value={description} onChange={e => setDescription(e.target.value)}
-              className="w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600 outline-none focus:border-blue-500"
+              className="w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden focus:border-blue-500"
               placeholder="Optionnel" />
           </div>
 
@@ -444,14 +444,14 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
             </div>
             <div className="space-y-2">
               {columns.map((col, idx) => (
-                <div key={idx} className="flex items-start gap-2 bg-gray-900/50 rounded p-2">
+                <div key={idx} className="flex items-start gap-2 bg-gray-900/50 rounded-sm p-2">
                   <div className="flex-1 space-y-1">
                     <input type="text" value={col.name} onChange={e => updateColumn(idx, 'name', e.target.value)}
-                      className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1 border border-gray-700 outline-none"
+                      className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-gray-700 outline-hidden"
                       placeholder="nom_colonne" />
                     <div className="flex gap-2">
                       <select value={col.field_type} onChange={e => updateColumn(idx, 'field_type', e.target.value)}
-                        className="bg-gray-900 text-white text-xs rounded px-2 py-1 border border-gray-700 flex-1">
+                        className="bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-gray-700 flex-1">
                         {FIELD_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
                       <label className="flex items-center gap-1 text-[10px] text-gray-400">
@@ -465,12 +465,12 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
                     </div>
                     {(col.field_type === 'Choice' || col.field_type === 'MultiChoice') && (
                       <input type="text" value={col.choices} onChange={e => updateColumn(idx, 'choices', e.target.value)}
-                        className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1 border border-gray-700 outline-none"
+                        className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-gray-700 outline-hidden"
                         placeholder="choix1, choix2, choix3" />
                     )}
                     {col.field_type === 'Formula' && (
                       <input type="text" value={col.formula_expression} onChange={e => updateColumn(idx, 'formula_expression', e.target.value)}
-                        className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1 border border-gray-700 outline-none font-mono"
+                        className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-gray-700 outline-hidden font-mono"
                         placeholder="price * quantity" />
                     )}
                   </div>
@@ -483,8 +483,8 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
           </div>
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded border-none bg-transparent cursor-pointer hover:text-white">Annuler</button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-white">Annuler</button>
+          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded-sm border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1">
             {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
             Creer
           </button>
@@ -535,18 +535,18 @@ function AddColumnModal({ appSlug, table, onAdded, onClose, showToast }) {
       <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-xl w-full max-w-sm">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
           <h3 className="text-sm font-semibold text-white">Ajouter colonne a "{table}"</h3>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700 border-none bg-transparent cursor-pointer"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
           <div>
             <label className="block text-xs text-gray-400 mb-1">Nom</label>
             <input type="text" value={name} onChange={e => setName(e.target.value)} required
-              className="w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600 outline-none focus:border-blue-500" />
+              className="w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden focus:border-blue-500" />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Type</label>
             <select value={fieldType} onChange={e => setFieldType(e.target.value)}
-              className="w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600">
+              className="w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600">
               {FIELD_TYPES.filter(t => t !== 'Formula').map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
@@ -562,20 +562,20 @@ function AddColumnModal({ appSlug, table, onAdded, onClose, showToast }) {
             <div>
               <label className="block text-xs text-gray-400 mb-1">Valeur par defaut (requis pour NOT NULL)</label>
               <input type="text" value={defaultValue} onChange={e => setDefaultValue(e.target.value)}
-                className="w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600 outline-none" />
+                className="w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden" />
             </div>
           )}
           {(fieldType === 'Choice' || fieldType === 'MultiChoice') && (
             <div>
               <label className="block text-xs text-gray-400 mb-1">Choix (separes par virgule)</label>
               <input type="text" value={choices} onChange={e => setChoices(e.target.value)}
-                className="w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600 outline-none" />
+                className="w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden" />
             </div>
           )}
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded border-none bg-transparent cursor-pointer hover:text-white">Annuler</button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-white">Annuler</button>
+          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded-sm border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50">
             {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Ajouter'}
           </button>
         </div>
@@ -628,21 +628,21 @@ function CreateRelationModal({ appSlug, tables, onCreated, onClose, showToast })
           <h3 className="text-sm font-semibold text-white flex items-center gap-2">
             <Link2 className="w-4 h-4 text-purple-400" /> Nouvelle relation
           </h3>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700 border-none bg-transparent cursor-pointer"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Table source</label>
               <select value={fromTable} onChange={e => setFromTable(e.target.value)}
-                className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+                className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
                 {tables.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-xs text-gray-400 mb-1">Colonne source</label>
               <select value={fromColumn} onChange={e => setFromColumn(e.target.value)}
-                className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+                className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
                 <option value="">--</option>
                 {fromCols.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
               </select>
@@ -650,14 +650,14 @@ function CreateRelationModal({ appSlug, tables, onCreated, onClose, showToast })
             <div>
               <label className="block text-xs text-gray-400 mb-1">Table cible</label>
               <select value={toTable} onChange={e => setToTable(e.target.value)}
-                className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+                className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
                 {tables.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-xs text-gray-400 mb-1">Colonne cible</label>
               <select value={toColumn} onChange={e => setToColumn(e.target.value)}
-                className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+                className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
                 {toCols.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
               </select>
             </div>
@@ -665,7 +665,7 @@ function CreateRelationModal({ appSlug, tables, onCreated, onClose, showToast })
           <div>
             <label className="block text-xs text-gray-400 mb-1">Type</label>
             <select value={relationType} onChange={e => setRelationType(e.target.value)}
-              className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+              className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
               {RELATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
@@ -673,22 +673,22 @@ function CreateRelationModal({ appSlug, tables, onCreated, onClose, showToast })
             <div>
               <label className="block text-xs text-gray-400 mb-1">On delete</label>
               <select value={onDelete} onChange={e => setOnDelete(e.target.value)}
-                className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+                className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
                 {CASCADE_ACTIONS.map(a => <option key={a} value={a}>{a}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-xs text-gray-400 mb-1">On update</label>
               <select value={onUpdate} onChange={e => setOnUpdate(e.target.value)}
-                className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600">
+                className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600">
                 {CASCADE_ACTIONS.map(a => <option key={a} value={a}>{a}</option>)}
               </select>
             </div>
           </div>
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded border-none bg-transparent cursor-pointer hover:text-white">Annuler</button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-purple-500 rounded border-none cursor-pointer hover:bg-purple-600 disabled:opacity-50">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-white">Annuler</button>
+          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-purple-500 rounded-sm border-none cursor-pointer hover:bg-purple-600 disabled:opacity-50">
             {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Creer'}
           </button>
         </div>

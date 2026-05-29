@@ -54,7 +54,7 @@ export function FilterDropdown({ column, fieldType, choices, currentFilter, onFi
     <div className="relative inline-block" ref={ref}>
       <button
         onClick={() => setOpen(!open)}
-        className={`p-0.5 rounded border-none bg-transparent cursor-pointer ${
+        className={`p-0.5 rounded-sm border-none bg-transparent cursor-pointer ${
           hasFilter ? 'text-blue-400' : 'text-gray-600 hover:text-gray-400'
         }`}
         title={hasFilter ? `Filtre: ${currentFilter.op} ${currentFilter.value ?? ''}` : 'Filtrer'}
@@ -67,7 +67,7 @@ export function FilterDropdown({ column, fieldType, choices, currentFilter, onFi
           <select
             value={op}
             onChange={e => setOp(e.target.value)}
-            className="w-full bg-gray-700 text-white text-xs rounded px-2 py-1.5 border border-gray-600 mb-2"
+            className="w-full bg-gray-700 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600 mb-2"
           >
             {OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
@@ -75,7 +75,7 @@ export function FilterDropdown({ column, fieldType, choices, currentFilter, onFi
             <select
               value={value}
               onChange={e => setValue(e.target.value)}
-              className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600 mb-2"
+              className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600 mb-2"
             >
               <option value="1">Vrai</option>
               <option value="0">Faux</option>
@@ -85,7 +85,7 @@ export function FilterDropdown({ column, fieldType, choices, currentFilter, onFi
             <select
               value={value}
               onChange={e => setValue(e.target.value)}
-              className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600 mb-2"
+              className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600 mb-2"
             >
               <option value="">--</option>
               {choices.map(c => <option key={c} value={c}>{c}</option>)}
@@ -98,7 +98,7 @@ export function FilterDropdown({ column, fieldType, choices, currentFilter, onFi
               onChange={e => setValue(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && apply()}
               placeholder="Valeur..."
-              className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600 mb-2 outline-none"
+              className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1.5 border border-gray-600 mb-2 outline-hidden"
               autoFocus
             />
           )}

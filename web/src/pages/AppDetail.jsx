@@ -53,7 +53,7 @@ function statusBadge(state) {
   };
   const cls = map[s] || map.stopped;
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${cls}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium border ${cls}`}>
       {s.charAt(0).toUpperCase() + s.slice(1) || 'Stopped'}
     </span>
   );
@@ -115,11 +115,11 @@ function OverviewTab({ app, status, busy, onControl }) {
         <div className="text-xs text-gray-400 uppercase tracking-wider mb-3">Health Check</div>
         <div className="flex items-center gap-2">
           {status?.health === 'ok' ? (
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-500/15 text-green-400 border border-green-500/20">OK</span>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-500/15 text-green-400 border border-green-500/20">OK</span>
           ) : status?.health === 'fail' ? (
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-500/15 text-red-400 border border-red-500/20">Échec</span>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-500/15 text-red-400 border border-red-500/20">Échec</span>
           ) : (
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-600/30 text-gray-300 border border-gray-600">Inconnu</span>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-gray-600/30 text-gray-300 border border-gray-600">Inconnu</span>
           )}
           {app.health_path && (
             <span className="text-xs text-gray-500 font-mono">{app.health_path}</span>
@@ -183,7 +183,7 @@ function CodeTab({ slug }) {
       </div>
       <iframe
         src={codeServerUrl}
-        className="flex-1 w-full rounded border border-gray-700 bg-gray-900"
+        className="flex-1 w-full rounded-sm border border-gray-700 bg-gray-900"
         style={{ minHeight: '65vh' }}
         title={`Code-server - ${slug}`}
         allow="clipboard-read; clipboard-write"
@@ -384,7 +384,7 @@ function EnvTab({ slug }) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           spellCheck={false}
-          className="w-full h-96 px-3 py-2 text-xs font-mono bg-gray-900 border border-gray-700 text-gray-300 rounded-md focus:outline-none focus:border-blue-500"
+          className="w-full h-96 px-3 py-2 text-xs font-mono bg-gray-900 border border-gray-700 text-gray-300 rounded-md focus:outline-hidden focus:border-blue-500"
           placeholder="KEY=value"
         />
       ) : (
@@ -453,7 +453,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-none focus:border-blue-500"
+          className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-hidden focus:border-blue-500"
         />
       </div>
 
@@ -488,7 +488,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
           value={runCommand}
           onChange={(e) => setRunCommand(e.target.value)}
           placeholder="./app"
-          className="w-full px-3 py-2 text-sm font-mono bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-none focus:border-blue-500"
+          className="w-full px-3 py-2 text-sm font-mono bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-hidden focus:border-blue-500"
         />
       </div>
 
@@ -499,7 +499,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
           value={buildCommand}
           onChange={(e) => setBuildCommand(e.target.value)}
           placeholder="cargo build --release"
-          className="w-full px-3 py-2 text-sm font-mono bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-none focus:border-blue-500"
+          className="w-full px-3 py-2 text-sm font-mono bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-hidden focus:border-blue-500"
         />
       </div>
 
@@ -510,7 +510,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
           value={healthPath}
           onChange={(e) => setHealthPath(e.target.value)}
           placeholder="/health"
-          className="w-full px-3 py-2 text-sm font-mono bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-none focus:border-blue-500"
+          className="w-full px-3 py-2 text-sm font-mono bg-gray-900 border border-gray-700 text-white rounded-md focus:outline-hidden focus:border-blue-500"
         />
       </div>
 
@@ -670,10 +670,10 @@ export default function AppDetail() {
             <div className="flex items-center gap-3 flex-wrap">
               <h1 className="text-xl font-semibold text-white">{app.name || slug}</h1>
               {statusBadge(status?.state || app.state)}
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20">
                 {app.stack || '-'}
               </span>
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium border ${
+              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-sm text-xs font-medium border ${
                 app.visibility === 'public'
                   ? 'bg-blue-500/10 text-blue-300 border-blue-500/20'
                   : 'bg-gray-700 text-gray-300 border-gray-600'

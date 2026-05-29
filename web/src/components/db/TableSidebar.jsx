@@ -5,7 +5,7 @@ export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, o
     return (
       <div className="w-56 min-w-[224px] border-r border-gray-700 p-4">
         <div className="animate-pulse space-y-3">
-          {[1, 2, 3].map(i => <div key={i} className="h-6 bg-gray-700 rounded" />)}
+          {[1, 2, 3].map(i => <div key={i} className="h-6 bg-gray-700 rounded-sm" />)}
         </div>
       </div>
     );
@@ -35,7 +35,7 @@ export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, o
                 <button
                   key={name}
                   onClick={() => onSelectTable(app.slug, name)}
-                  className={`flex items-center justify-between w-full px-3 py-1.5 ml-2 rounded text-xs text-left cursor-pointer border-none transition-colors ${
+                  className={`flex items-center justify-between w-full px-3 py-1.5 ml-2 rounded-sm text-xs text-left cursor-pointer border-none transition-colors ${
                     sel ? 'bg-blue-500/15 text-blue-400' : 'bg-transparent text-gray-400 hover:bg-gray-700/50 hover:text-gray-200'
                   }`}
                 >

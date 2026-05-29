@@ -63,20 +63,20 @@ function FindingCard({ finding, onDismiss, onResolve }) {
   const [open, setOpen] = useState(false);
   const sev = sevMeta(finding.severity);
   return (
-    <div className="border border-gray-700 bg-gray-800/40 rounded">
+    <div className="border border-gray-700 bg-gray-800/40 rounded-sm">
       <button onClick={() => setOpen((v) => !v)} className="w-full flex items-start gap-3 px-3 py-2 text-left hover:bg-gray-800/70">
         {open ? <ChevronDown className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" />}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className={`text-xs px-1.5 py-0.5 rounded border ${sev.bg} ${sev.color}`}>{sev.label}</span>
+            <span className={`text-xs px-1.5 py-0.5 rounded-sm border ${sev.bg} ${sev.color}`}>{sev.label}</span>
             <span className="text-sm text-white truncate">{finding.title}</span>
           </div>
           <div className="text-xs text-gray-500 mt-0.5">Vu il y a {timeSince(finding.last_seen)}</div>
         </div>
         {finding.status === 'open' && (
           <div className="flex gap-1 shrink-0">
-            <button onClick={(e) => { e.stopPropagation(); onDismiss(finding); }} className="px-2 py-1 text-xs text-gray-300 hover:text-white hover:bg-gray-700 rounded flex items-center gap-1"><X className="w-3 h-3" /> Dismiss</button>
-            <button onClick={(e) => { e.stopPropagation(); onResolve(finding); }} className="px-2 py-1 text-xs text-emerald-300 hover:text-emerald-200 hover:bg-emerald-900/30 rounded flex items-center gap-1"><Check className="w-3 h-3" /> Résolu</button>
+            <button onClick={(e) => { e.stopPropagation(); onDismiss(finding); }} className="px-2 py-1 text-xs text-gray-300 hover:text-white hover:bg-gray-700 rounded-sm flex items-center gap-1"><X className="w-3 h-3" /> Dismiss</button>
+            <button onClick={(e) => { e.stopPropagation(); onResolve(finding); }} className="px-2 py-1 text-xs text-emerald-300 hover:text-emerald-200 hover:bg-emerald-900/30 rounded-sm flex items-center gap-1"><Check className="w-3 h-3" /> Résolu</button>
           </div>
         )}
       </button>
@@ -183,7 +183,7 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
           <button
             onClick={onStop}
             disabled={stopping}
-            className="px-2 py-0.5 text-xs border border-red-500/40 text-red-200 hover:bg-red-500/20 rounded flex items-center gap-1 disabled:opacity-50"
+            className="px-2 py-0.5 text-xs border border-red-500/40 text-red-200 hover:bg-red-500/20 rounded-sm flex items-center gap-1 disabled:opacity-50"
           >
             <Square className="w-3 h-3" /> Arrêter
           </button>
@@ -196,7 +196,7 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
           entries.map((e, i) => (
             <div key={i} className="flex gap-1.5 text-[11px] leading-relaxed font-mono">
               {e.icon && <span className="shrink-0 select-none">{e.icon}</span>}
-              <span className={`whitespace-pre-wrap break-words min-w-0 ${TONE_CLS[e.tone] || 'text-gray-300'}`}>{e.text}</span>
+              <span className={`whitespace-pre-wrap wrap-break-word min-w-0 ${TONE_CLS[e.tone] || 'text-gray-300'}`}>{e.text}</span>
             </div>
           ))
         )}
@@ -238,13 +238,13 @@ function ConfigPanel({ slug, onClose }) {
       <div className="text-gray-500">Runs manuels uniquement — gates appliqués à chaque lancement.</div>
       <label className="flex items-center gap-2">
         <span className="w-40">Throttle (findings open max)</span>
-        <input type="number" min={1} max={100} value={cfg.throttle_threshold} onChange={(e) => setCfg({ ...cfg, throttle_threshold: parseInt(e.target.value, 10) || 5 })} className="ml-auto bg-gray-900 border border-gray-700 px-1 py-0.5 rounded text-gray-200 w-20" />
+        <input type="number" min={1} max={100} value={cfg.throttle_threshold} onChange={(e) => setCfg({ ...cfg, throttle_threshold: parseInt(e.target.value, 10) || 5 })} className="ml-auto bg-gray-900 border border-gray-700 px-1 py-0.5 rounded-sm text-gray-200 w-20" />
       </label>
       <label className="flex items-center gap-2">
         <span className="w-40">Budget tokens / jour</span>
-        <input type="number" min={1000} step={1000} value={cfg.max_tokens_per_day} onChange={(e) => setCfg({ ...cfg, max_tokens_per_day: parseInt(e.target.value, 10) || 100000 })} className="ml-auto bg-gray-900 border border-gray-700 px-1 py-0.5 rounded text-gray-200 w-24" />
+        <input type="number" min={1000} step={1000} value={cfg.max_tokens_per_day} onChange={(e) => setCfg({ ...cfg, max_tokens_per_day: parseInt(e.target.value, 10) || 100000 })} className="ml-auto bg-gray-900 border border-gray-700 px-1 py-0.5 rounded-sm text-gray-200 w-24" />
       </label>
-      <button onClick={save} disabled={saving} className="mt-2 px-3 py-1.5 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded flex items-center gap-1 disabled:opacity-50">
+      <button onClick={save} disabled={saving} className="mt-2 px-3 py-1.5 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded-sm flex items-center gap-1 disabled:opacity-50">
         <Save className="w-3 h-3" /> {saving ? 'Sauvegarde…' : 'Sauvegarder'}
       </button>
     </div>
@@ -397,12 +397,12 @@ export default function SurveillanceTab({ slug }) {
       {/* Action bar */}
       <div className="px-4 py-2 border-b border-gray-700 bg-gray-800/30 flex items-center gap-2 flex-wrap">
         {activeRun ? (
-          <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30">
+          <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30">
             {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
             Arrêter {kindMeta.label.toLowerCase()}
           </button>
         ) : (
-          <button onClick={handleRun} disabled={busy} className={`px-2.5 py-1 text-xs border rounded flex items-center gap-1 disabled:opacity-50 ${kindMeta.btn}`}>
+          <button onClick={handleRun} disabled={busy} className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 ${kindMeta.btn}`}>
             {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
             Lancer {kindMeta.label.toLowerCase()}
           </button>
@@ -410,15 +410,15 @@ export default function SurveillanceTab({ slug }) {
         <div className="flex-1" />
         <div className="flex items-center gap-1 text-xs">
           {STATUSES.map((s) => (
-            <button key={s.key} onClick={() => setStatusFilter(statusFilter === s.key ? null : s.key)} className={`px-2 py-0.5 rounded border transition ${statusFilter === s.key ? `${s.color} bg-gray-700 border-gray-600` : 'text-gray-400 border-gray-700 hover:text-white hover:border-gray-600'}`}>
+            <button key={s.key} onClick={() => setStatusFilter(statusFilter === s.key ? null : s.key)} className={`px-2 py-0.5 rounded-sm border transition ${statusFilter === s.key ? `${s.color} bg-gray-700 border-gray-600` : 'text-gray-400 border-gray-700 hover:text-white hover:border-gray-600'}`}>
               {s.label}
             </button>
           ))}
         </div>
-        <button onClick={reload} disabled={loading} className="px-2 py-1 text-xs text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded flex items-center gap-1 disabled:opacity-50">
+        <button onClick={reload} disabled={loading} className="px-2 py-1 text-xs text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded-sm flex items-center gap-1 disabled:opacity-50">
           <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
         </button>
-        <button onClick={() => setShowConfig((v) => !v)} className={`px-2 py-1 text-xs border rounded flex items-center gap-1 ${showConfig ? 'text-amber-300 border-amber-500/40' : 'text-gray-300 border-gray-700 hover:text-white hover:border-gray-600'}`}>
+        <button onClick={() => setShowConfig((v) => !v)} className={`px-2 py-1 text-xs border rounded-sm flex items-center gap-1 ${showConfig ? 'text-amber-300 border-amber-500/40' : 'text-gray-300 border-gray-700 hover:text-white hover:border-gray-600'}`}>
           <SettingsIcon className="w-3 h-3" />
         </button>
       </div>
@@ -431,7 +431,7 @@ export default function SurveillanceTab({ slug }) {
 
       <div className="flex-1 overflow-y-auto flex">
         <div className="flex-1 p-4 space-y-4 min-w-0">
-          {err && <div className="p-3 bg-red-900/30 border border-red-700/50 text-red-300 rounded text-sm">{err}</div>}
+          {err && <div className="p-3 bg-red-900/30 border border-red-700/50 text-red-300 rounded-sm text-sm">{err}</div>}
           {!err && findings.length === 0 && !loading && (
             <div className="text-center py-12 text-gray-500 text-sm">
               Aucune finding « {kindMeta.label} » pour ce statut. Lance un scan ci-dessus.
@@ -465,7 +465,7 @@ export default function SurveillanceTab({ slug }) {
           {runs.length === 0 ? (
             <div className="text-xs text-gray-600">Aucun run.</div>
           ) : (
-            <div className="rounded border border-gray-700 bg-gray-800/30">
+            <div className="rounded-sm border border-gray-700 bg-gray-800/30">
               {runs.map((r) => <RunRow key={r.id} run={r} />)}
             </div>
           )}

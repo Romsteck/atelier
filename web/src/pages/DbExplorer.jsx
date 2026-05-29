@@ -343,7 +343,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   return (
     <>
       {!embedded && <PageHeader title="Bases de données" icon={Database} />}
-      <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded border border-gray-700'}`}>
+      <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded-sm border border-gray-700'}`}>
       {/* Sidebar */}
       <TableSidebar
         appsWithTables={propAppSlug ? appsWithTables.filter(a => a.app.slug === propAppSlug) : appsWithTables}
@@ -374,7 +374,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
           {selectedAppSlug && (
             <span
-              className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+              className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm ${
                 isPgBackend
                   ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
                   : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
@@ -396,12 +396,12 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
                 value={searchQuery}
                 onChange={e => handleSearchChange(e.target.value)}
                 placeholder="Rechercher..."
-                className="bg-gray-900 text-white text-xs rounded px-2 py-1 border border-gray-600 w-40 outline-none"
+                className="bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-gray-600 w-40 outline-hidden"
               />
               <button
                 onClick={() => setShowAddRow(true)}
                 disabled={isPgBackend}
-                className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
                 title={writesDisabledReason || 'Ajouter'}
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -410,16 +410,16 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
                 <button
                   onClick={() => setShowDeleteConfirm(true)}
                   disabled={isPgBackend}
-                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
                   title={writesDisabledReason || 'Supprimer'}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               )}
-              <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
+              <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
                 <Download className="w-3.5 h-3.5" />
               </button>
-              <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Actualiser">
+              <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Actualiser">
                 <RefreshCw className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -431,8 +431,8 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
           <div className="px-4 py-1.5 text-[11px] bg-emerald-500/5 text-emerald-200 border-b border-emerald-500/20 shrink-0">
             Cette app est sur le backend <strong>postgres-dataverse</strong>. Les
             écritures via SQL brut sont désactivées — utilise le tool MCP{' '}
-            <code className="bg-black/40 px-1 rounded">db.graphql</code> ou
-            l'endpoint <code className="bg-black/40 px-1 rounded">/api/apps/{selectedAppSlug}/db/graphql</code>.
+            <code className="bg-black/40 px-1 rounded-sm">db.graphql</code> ou
+            l'endpoint <code className="bg-black/40 px-1 rounded-sm">/api/apps/{selectedAppSlug}/db/graphql</code>.
           </div>
         )}
 

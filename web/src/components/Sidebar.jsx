@@ -98,7 +98,7 @@ function Sidebar({ onClose }) {
         {user && (
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 min-w-0">
-              <User className="w-4 h-4 text-gray-400 flex-shrink-0" />
+              <User className="w-4 h-4 text-gray-400 shrink-0" />
               <div className="min-w-0">
                 <p className="text-sm text-gray-300 truncate">
                   {user.displayName || user.username}

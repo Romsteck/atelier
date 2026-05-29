@@ -308,7 +308,7 @@ function Git() {
                     value={tokenInput}
                     onChange={(e) => setTokenInput(e.target.value)}
                     placeholder={config?.github_token ? 'Token configure (laisser vide pour garder)' : 'ghp_...'}
-                    className="w-full bg-gray-800 border border-gray-700 text-gray-300 text-sm font-mono px-3 py-2 pr-10 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-gray-800 border border-gray-700 text-gray-300 text-sm font-mono px-3 py-2 pr-10 focus:outline-hidden focus:border-blue-500"
                   />
                   <button
                     onClick={() => setShowToken(!showToken)}
@@ -322,7 +322,7 @@ function Git() {
                   value={orgInput}
                   onChange={(e) => setOrgInput(e.target.value)}
                   placeholder="Organisation GitHub"
-                  className="bg-gray-800 border border-gray-700 text-gray-300 text-sm px-3 py-2 w-48 focus:outline-none focus:border-blue-500"
+                  className="bg-gray-800 border border-gray-700 text-gray-300 text-sm px-3 py-2 w-48 focus:outline-hidden focus:border-blue-500"
                 />
                 <Button onClick={handleSaveConfig} loading={savingConfig} className="text-xs px-3 py-1.5">
                   <Save className="w-3.5 h-3.5" /> Sauvegarder
@@ -344,7 +344,7 @@ function Git() {
       {/* Main 3-column layout */}
       <div className="flex-1 min-h-0 flex">
         {/* Left: Repo list */}
-        <div className="w-72 flex-shrink-0 border-r border-gray-700 bg-gray-800/50 flex flex-col">
+        <div className="w-72 shrink-0 border-r border-gray-700 bg-gray-800/50 flex flex-col">
           {/* List header */}
           <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/80">
             <div className="flex items-center justify-between">
@@ -381,12 +381,12 @@ function Git() {
                         : 'border-l-transparent text-gray-300 hover:bg-gray-700/30 hover:text-gray-200'
                     }`}
                   >
-                    <GitBranch className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-blue-400' : 'text-gray-500'}`} />
+                    <GitBranch className={`w-4 h-4 shrink-0 ${isSelected ? 'text-blue-400' : 'text-gray-500'}`} />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium truncate">{repo.slug}</span>
                         {repoMc.enabled && (
-                          <ArrowUpCircle className="w-3 h-3 text-green-500 flex-shrink-0" title="Mirror actif" />
+                          <ArrowUpCircle className="w-3 h-3 text-green-500 shrink-0" title="Mirror actif" />
                         )}
                       </div>
                       <div className="flex items-center gap-3 text-[11px] text-gray-500 mt-0.5">
@@ -525,7 +525,7 @@ function Git() {
                     </div>
                     {mc.last_error && (
                       <div className="flex items-start gap-2">
-                        <span className="text-gray-500 w-20 flex-shrink-0">Erreur</span>
+                        <span className="text-gray-500 w-20 shrink-0">Erreur</span>
                         <span className="text-red-400 break-all">{mc.last_error}</span>
                       </div>
                     )}
@@ -559,7 +559,7 @@ function Git() {
                         className="px-4 sm:px-6 py-2.5 border-b border-gray-700/30 hover:bg-gray-800/50 transition-colors"
                       >
                         <div className="flex items-start gap-3">
-                          <span className="text-xs font-mono text-blue-400 bg-blue-900/20 px-1.5 py-0.5 mt-0.5 flex-shrink-0">
+                          <span className="text-xs font-mono text-blue-400 bg-blue-900/20 px-1.5 py-0.5 mt-0.5 shrink-0">
                             {(c.hash || '').substring(0, 7)}
                           </span>
                           <div className="flex-1 min-w-0">
@@ -583,7 +583,7 @@ function Git() {
         </div>
 
         {/* Right: Activity panel */}
-        <div className="w-80 flex-shrink-0 border-l border-gray-700 bg-gray-800/30 flex flex-col">
+        <div className="w-80 shrink-0 border-l border-gray-700 bg-gray-800/30 flex flex-col">
           <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/80">
             <span className="text-[11px] text-gray-500 uppercase tracking-wider">
               Activite ({activityLog.length})
@@ -598,12 +598,12 @@ function Git() {
               activityLog.map(entry => (
                 <div key={entry.id} className="px-4 py-2 border-b border-gray-700/30 text-xs">
                   <div className="flex items-center gap-2">
-                    {entry.status === 'pending' && <Loader2 className="w-3 h-3 text-blue-400 animate-spin flex-shrink-0" />}
-                    {entry.status === 'ok' && <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />}
-                    {entry.status === 'error' && <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />}
+                    {entry.status === 'pending' && <Loader2 className="w-3 h-3 text-blue-400 animate-spin shrink-0" />}
+                    {entry.status === 'ok' && <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" />}
+                    {entry.status === 'error' && <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />}
                     <span className="text-gray-300 font-medium">{entry.action}</span>
                     {entry.slug && <span className="text-gray-500 font-mono truncate">{entry.slug}</span>}
-                    <span className="text-gray-600 ml-auto flex-shrink-0">{timeAgo(entry.time)}</span>
+                    <span className="text-gray-600 ml-auto shrink-0">{timeAgo(entry.time)}</span>
                   </div>
                   {entry.detail && (
                     <p className={`mt-1 pl-5 truncate ${entry.status === 'error' ? 'text-red-400' : 'text-gray-500'}`}>

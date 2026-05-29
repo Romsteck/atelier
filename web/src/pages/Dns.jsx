@@ -56,7 +56,7 @@ function Dns() {
     return (
       <div className="space-y-px">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-px">
-          <Section title="Serveurs DNS upstream" className="!mb-0">
+          <Section title="Serveurs DNS upstream" className="mb-0!">
             <div className="space-y-1">
               {config?.dnsServers?.map(server => (
                 <div key={server} className="font-mono text-sm bg-gray-900 px-2 py-1">
@@ -66,7 +66,7 @@ function Dns() {
             </div>
           </Section>
 
-          <Section title="Cache DNS" className="!mb-0">
+          <Section title="Cache DNS" className="mb-0!">
             <div className="text-3xl font-bold text-blue-400">
               {config?.cacheSize || '-'}
             </div>
@@ -131,7 +131,7 @@ function Dns() {
     return (
       <div className="space-y-px">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-px">
-          <Section title="Configuration DHCP" className="!mb-0">
+          <Section title="Configuration DHCP" className="mb-0!">
             <dl className="space-y-3 text-sm">
               <div className="flex justify-between">
                 <dt className="text-gray-400">Interface</dt>
@@ -148,7 +148,7 @@ function Dns() {
             </dl>
           </Section>
 
-          <Section title="Configuration IPv6" contrast className="!mb-0">
+          <Section title="Configuration IPv6" contrast className="mb-0!">
             <dl className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <dt className="text-gray-400">Router Advertisement</dt>
@@ -173,7 +173,7 @@ function Dns() {
                 placeholder="Rechercher..."
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                className="w-full sm:w-auto pl-9 pr-4 py-1.5 bg-gray-900 border border-gray-600 text-sm focus:outline-none focus:border-blue-500"
+                className="w-full sm:w-auto pl-9 pr-4 py-1.5 bg-gray-900 border border-gray-600 text-sm focus:outline-hidden focus:border-blue-500"
               />
             </div>
           </div>
@@ -223,7 +223,7 @@ function Dns() {
       {/* Horizontal tabs on mobile, vertical on desktop */}
       <div className="flex flex-col md:flex-row flex-1">
         {/* Tab bar - horizontal on mobile, vertical sidebar on desktop */}
-        <div className="flex md:flex-col md:w-56 border-b md:border-b-0 md:border-r border-gray-700 bg-gray-800/50 flex-shrink-0 overflow-x-auto">
+        <div className="flex md:flex-col md:w-56 border-b md:border-b-0 md:border-r border-gray-700 bg-gray-800/50 shrink-0 overflow-x-auto">
           <button
             onClick={() => setActiveTab('dns')}
             className={`flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors whitespace-nowrap ${

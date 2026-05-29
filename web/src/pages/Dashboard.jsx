@@ -39,8 +39,8 @@ function StatSkeleton() {
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 bg-gray-700 rounded-lg" />
         <div className="flex-1">
-          <div className="h-3 bg-gray-700 rounded w-16 mb-2" />
-          <div className="h-6 bg-gray-700 rounded w-24" />
+          <div className="h-3 bg-gray-700 rounded-sm w-16 mb-2" />
+          <div className="h-6 bg-gray-700 rounded-sm w-24" />
         </div>
       </div>
     </div>

@@ -45,7 +45,7 @@ function StatusIcon({ status }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
   return (
-    <div className={`p-1 rounded ${cfg.bg}`}>
+    <div className={`p-1 rounded-sm ${cfg.bg}`}>
       <Icon className={`w-4 h-4 ${cfg.color} ${cfg.spin ? 'animate-spin' : ''}`} />
     </div>
   );
@@ -68,7 +68,7 @@ function TaskItem({ task, onClick }) {
           <span className="text-xs text-gray-500">{timeAgo(task.created_at)}</span>
         </div>
       </div>
-      <ChevronRight className="w-4 h-4 text-gray-600 flex-shrink-0" />
+      <ChevronRight className="w-4 h-4 text-gray-600 shrink-0" />
     </button>
   );
 }

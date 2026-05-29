@@ -46,7 +46,7 @@ export default function SchemaPage() {
   }, []); // eslint-disable-line
 
   return (
-    <div className="flex h-full overflow-hidden rounded border border-gray-700">
+    <div className="flex h-full overflow-hidden rounded-sm border border-gray-700">
       {/* App selector sidebar */}
       <div className="w-48 border-r border-gray-700 flex flex-col bg-gray-800/30 shrink-0">
         <div className="px-3 py-2 border-b border-gray-700">

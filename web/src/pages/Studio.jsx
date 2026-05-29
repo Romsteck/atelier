@@ -55,7 +55,7 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
         <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-500">Applications</span>
         <button
           onClick={onAdd}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md shadow-sm shadow-blue-500/20 transition-colors"
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md shadow-xs shadow-blue-500/20 transition-colors"
         >
           <Plus className="w-4 h-4" />
           Nouvelle application
@@ -80,11 +80,11 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
               <span className="flex-1 truncate">{app.name}</span>
               <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                 {isRunning ? (
-                  <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded" title="Stop">
+                  <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
                     <Square className="w-3 h-3" />
                   </button>
                 ) : (
-                  <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded" title="Start">
+                  <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
                     <Play className="w-3 h-3" />
                   </button>
                 )}
@@ -161,21 +161,21 @@ function LogsTab({ slug }) {
         <div className="flex gap-1 text-xs">
           <button
             onClick={() => setSource('atelier')}
-            className={`px-2 py-1 rounded ${source === 'atelier' ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+            className={`px-2 py-1 rounded-sm ${source === 'atelier' ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
             title="Logs structurés Postgres (atelier-logging-shipper)"
           >
             Atelier
           </button>
           <button
             onClick={() => setSource('journalctl')}
-            className={`px-2 py-1 rounded ${source === 'journalctl' ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+            className={`px-2 py-1 rounded-sm ${source === 'journalctl' ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
             title="Logs systemd bruts (journalctl)"
           >
             journalctl
           </button>
         </div>
         <input type="text" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtrer..."
-          className="flex-1 max-w-[300px] px-3 py-1 rounded text-sm outline-none bg-gray-900 text-white border border-gray-700" />
+          className="flex-1 max-w-[300px] px-3 py-1 rounded-sm text-sm outline-hidden bg-gray-900 text-white border border-gray-700" />
         <Link
           to={`/logs?app_slug=${encodeURIComponent(slug)}`}
           className="text-xs text-amber-400 hover:text-amber-300 inline-flex items-center gap-1"
@@ -189,7 +189,7 @@ function LogsTab({ slug }) {
         {filtered.map((e, i) => {
           const time = (e.timestamp||'').includes('T') ? e.timestamp.split('T')[1]?.replace('Z','').substring(0,12) : e.timestamp;
           return (
-            <div key={i} className="flex gap-3 py-0.5 hover:bg-white/[0.02]">
+            <div key={i} className="flex gap-3 py-0.5 hover:bg-white/2">
               <span className="shrink-0 w-24 text-gray-500">{time}</span>
               <span className={`shrink-0 w-12 text-right ${levelCls(e.level)}`}>{(e.level||'').toUpperCase()}</span>
               <span className="text-gray-300">{e.message}</span>
@@ -250,10 +250,10 @@ function EnvTab({ slug }) {
         value={showValues ? envText : envText.split('\n').map(l => { const [k] = l.split('='); return k ? `${k}=***` : l; }).join('\n')}
         onChange={e => { if (showValues) setEnvText(e.target.value); }}
         readOnly={!showValues}
-        className="w-full h-64 p-3 rounded text-sm font-mono bg-gray-900 text-white border border-gray-700 outline-none resize-y"
+        className="w-full h-64 p-3 rounded-sm text-sm font-mono bg-gray-900 text-white border border-gray-700 outline-hidden resize-y"
         placeholder="KEY=value"
       />
-      <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded disabled:opacity-50 flex items-center gap-1.5">
+      <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
         {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
       </button>
     </div>
@@ -290,7 +290,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
       ].map(({ label, value, set, mono }) => (
         <div key={label}>
           <label className="block text-xs text-gray-400 mb-1">{label}</label>
-          <input type="text" value={value} onChange={e => set(e.target.value)} className={`w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded outline-none focus:border-blue-500 ${mono ? 'font-mono' : ''}`} />
+          <input type="text" value={value} onChange={e => set(e.target.value)} className={`w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-sm outline-hidden focus:border-blue-500 ${mono ? 'font-mono' : ''}`} />
         </div>
       ))}
       <div>
@@ -304,11 +304,11 @@ function SettingsTab({ app, onUpdate, onDelete }) {
           ))}
         </div>
       </div>
-      <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded disabled:opacity-50 flex items-center gap-1.5">
+      <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
         {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
       </button>
       <div className="pt-6 border-t border-gray-700">
-        <button onClick={onDelete} className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Supprimer l'application</button>
+        <button onClick={onDelete} className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-sm flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Supprimer l'application</button>
       </div>
     </div>
   );
@@ -343,13 +343,13 @@ function CreateAppModal({ onClose, onCreated }) {
           <button onClick={onClose} className="text-gray-400 hover:text-white"><X className="w-5 h-5" /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-5 space-y-4">
-          {error && <div className="bg-red-500/10 border border-red-500/30 rounded px-3 py-2 text-sm text-red-400">{error}</div>}
-          <div><label className="block text-xs text-gray-400 mb-1">Nom</label><input type="text" value={name} onChange={e => { setName(e.target.value); if (!slugManual) setSlug(slugify(e.target.value)); }} autoFocus className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded outline-none" /></div>
-          <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white font-mono rounded outline-none" /></div>
-          <div><label className="block text-xs text-gray-400 mb-1">Stack</label><select value={stack} onChange={e => setStack(e.target.value)} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded outline-none">{STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></div>
+          {error && <div className="bg-red-500/10 border border-red-500/30 rounded-sm px-3 py-2 text-sm text-red-400">{error}</div>}
+          <div><label className="block text-xs text-gray-400 mb-1">Nom</label><input type="text" value={name} onChange={e => { setName(e.target.value); if (!slugManual) setSlug(slugify(e.target.value)); }} autoFocus className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-sm outline-hidden" /></div>
+          <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white font-mono rounded-sm outline-hidden" /></div>
+          <div><label className="block text-xs text-gray-400 mb-1">Stack</label><select value={stack} onChange={e => setStack(e.target.value)} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-sm outline-hidden">{STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></div>
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-700">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 bg-gray-700 rounded">Annuler</button>
-            <button type="submit" disabled={submitting} className="px-4 py-2 text-sm text-white bg-blue-500 rounded disabled:opacity-50 flex items-center gap-2">{submitting && <Loader2 className="w-4 h-4 animate-spin" />}Creer</button>
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 bg-gray-700 rounded-sm">Annuler</button>
+            <button type="submit" disabled={submitting} className="px-4 py-2 text-sm text-white bg-blue-500 rounded-sm disabled:opacity-50 flex items-center gap-2">{submitting && <Loader2 className="w-4 h-4 animate-spin" />}Creer</button>
           </div>
         </form>
       </div>
@@ -507,7 +507,7 @@ export default function Studio() {
             <div className="flex flex-col items-center justify-center h-full text-gray-500">
               <Code2 className="w-12 h-12 mb-3 opacity-20" />
               <p className="text-sm">Selectionnez un projet pour commencer</p>
-              <button onClick={() => setShowCreate(true)} className="mt-4 px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded flex items-center gap-2"><Plus className="w-4 h-4" /> Nouvelle app</button>
+              <button onClick={() => setShowCreate(true)} className="mt-4 px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Nouvelle app</button>
             </div>
           ) : (
             <>

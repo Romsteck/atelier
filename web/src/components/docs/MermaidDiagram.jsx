@@ -79,7 +79,7 @@ export default function MermaidDiagram({ code, className = '' }) {
       )}
       {error && (
         <div className="text-red-400 text-sm flex items-start gap-2">
-          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <div>
             <div className="font-medium">Erreur de rendu mermaid</div>
             <pre className="text-xs mt-1 opacity-80 whitespace-pre-wrap">{error}</pre>

@@ -22,7 +22,7 @@ function GroupHeader({ icon: Icon, label, count, open, onToggle }) {
     <button
       onClick={onToggle}
       className="w-full flex items-center justify-between px-2 py-1.5 text-xs uppercase tracking-wider
-                 text-gray-400 hover:text-gray-200 hover:bg-gray-800/40 rounded"
+                 text-gray-400 hover:text-gray-200 hover:bg-gray-800/40 rounded-sm"
     >
       <span className="flex items-center gap-1.5">
         {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
@@ -42,7 +42,7 @@ function EntryItem({ entry, selected, onSelect }) {
   return (
     <button
       onClick={() => onSelect({ type: entry.doc_type, name: entry.name })}
-      className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-start gap-2 transition-colors
+      className={`w-full text-left px-2 py-1.5 rounded-sm text-sm flex items-start gap-2 transition-colors
                   ${isSelected
                     ? 'bg-blue-500/20 text-white border-l-2 border-blue-500'
                     : 'text-gray-300 hover:bg-gray-800/60'}
@@ -102,11 +102,11 @@ export default function DocsSidebar({ overview, selected, onSelect }) {
   const isOverviewSelected = selected?.type === 'overview';
 
   return (
-    <aside className="w-60 flex-shrink-0 bg-gray-900/40 border-r border-gray-800 overflow-y-auto p-2">
+    <aside className="w-60 shrink-0 bg-gray-900/40 border-r border-gray-800 overflow-y-auto p-2">
       {/* Overview */}
       <button
         onClick={() => onSelect({ type: 'overview', name: 'overview' })}
-        className={`w-full mb-2 px-2 py-2 rounded text-sm flex items-center gap-2 transition-colors
+        className={`w-full mb-2 px-2 py-2 rounded-sm text-sm flex items-center gap-2 transition-colors
                     ${isOverviewSelected
                       ? 'bg-blue-500/20 text-white border-l-2 border-blue-500'
                       : 'text-gray-200 hover:bg-gray-800/60'}`}

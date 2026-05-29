@@ -151,7 +151,7 @@ function Ddns() {
                   value={zoneIdValue}
                   onChange={(e) => setZoneIdValue(e.target.value)}
                   placeholder="Zone ID Cloudflare"
-                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
+                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-hidden focus:border-blue-500"
                   autoFocus
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleSaveZoneId();
@@ -201,7 +201,7 @@ function Ddns() {
                   value={tokenValue}
                   onChange={(e) => setTokenValue(e.target.value)}
                   placeholder="Nouveau token API"
-                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
+                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-hidden focus:border-blue-500"
                   autoFocus
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleSaveToken();

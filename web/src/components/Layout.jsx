@@ -22,7 +22,7 @@ function BuildBadge({ build, onDismiss }) {
       <div
         role="status"
         aria-live="polite"
-        className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-blue-500/15 border border-blue-500/30 text-blue-300 shrink-0"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-blue-500/15 border border-blue-500/30 text-blue-300 shrink-0"
       >
         <Loader2 className="w-3 h-3 animate-spin" />
         <span>Build {step ?? '…'}/{total}</span>
@@ -37,7 +37,7 @@ function BuildBadge({ build, onDismiss }) {
       <div
         role="status"
         aria-live="polite"
-        className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 shrink-0 transition-opacity duration-300"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 shrink-0 transition-opacity duration-300"
       >
         <Check className="w-3 h-3" />
         <span>Build OK{secs != null ? ` · ${secs}s` : ''}</span>
@@ -51,14 +51,14 @@ function BuildBadge({ build, onDismiss }) {
         role="status"
         aria-live="polite"
         title={build.error || build.message || 'Build failed'}
-        className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-red-500/15 border border-red-500/30 text-red-300 shrink-0"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-red-500/15 border border-red-500/30 text-red-300 shrink-0"
       >
         <AlertCircle className="w-3 h-3" />
         <span>Build failed</span>
         <button
           onClick={onDismiss}
           aria-label="Dismiss build error"
-          className="ml-0.5 p-0.5 rounded hover:bg-red-500/20"
+          className="ml-0.5 p-0.5 rounded-sm hover:bg-red-500/20"
         >
           <X className="w-3 h-3" />
         </button>
@@ -106,7 +106,7 @@ function StudioHeaderInfo() {
         <span className={`w-2 h-2 rounded-full ${statusDot(state)}`} />
         <BuildBadge build={buildState} onDismiss={() => setBuildState(null)} />
         <span className="text-[13px] font-medium text-white truncate max-w-[140px]">{currentApp.name}</span>
-        <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400">{currentApp.stack}</span>
+        <span className="px-1.5 py-0.5 rounded-sm text-[10px] bg-gray-700 text-gray-400">{currentApp.stack}</span>
       </div>
       <a
         href={appPath}
@@ -136,7 +136,7 @@ function StudioHeaderInfo() {
             href={`${CODESERVER_BASE}/?folder=/var/lib/atelier/apps/${selectedSlug}/src`}
             target="_blank"
             rel="noopener noreferrer"
-            className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700 shrink-0"
+            className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 shrink-0"
             title={tooltip}
           >
             <ExternalLink className="w-3.5 h-3.5" />
@@ -144,7 +144,7 @@ function StudioHeaderInfo() {
         ) : (
           <span
             aria-disabled="true"
-            className="p-1 text-gray-400 rounded shrink-0 opacity-50 cursor-not-allowed"
+            className="p-1 text-gray-400 rounded-sm shrink-0 opacity-50 cursor-not-allowed"
             title={tooltip}
           >
             <ExternalLink className="w-3.5 h-3.5" />
@@ -157,7 +157,7 @@ function StudioHeaderInfo() {
             <button
               onClick={() => onControl('start')}
               disabled={busy}
-              className="p-1 text-green-400 hover:bg-gray-700 rounded disabled:opacity-50"
+              className="p-1 text-green-400 hover:bg-gray-700 rounded-sm disabled:opacity-50"
               title="Démarrer"
             >
               <Play className="w-3.5 h-3.5" />
@@ -166,7 +166,7 @@ function StudioHeaderInfo() {
             <button
               onClick={() => onControl('stop')}
               disabled={busy}
-              className="p-1 text-yellow-400 hover:bg-gray-700 rounded disabled:opacity-50"
+              className="p-1 text-yellow-400 hover:bg-gray-700 rounded-sm disabled:opacity-50"
               title="Arrêter"
             >
               <Square className="w-3.5 h-3.5" />
@@ -175,7 +175,7 @@ function StudioHeaderInfo() {
           <button
             onClick={() => onControl('restart')}
             disabled={busy}
-            className="p-1 text-blue-400 hover:bg-gray-700 rounded disabled:opacity-50"
+            className="p-1 text-blue-400 hover:bg-gray-700 rounded-sm disabled:opacity-50"
             title="Redémarrer"
           >
             <RefreshCw className="w-3.5 h-3.5" />

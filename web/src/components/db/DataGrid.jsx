@@ -21,7 +21,7 @@ function CellValue({ value, fieldType, displayValue }) {
   if (fieldType === 'Boolean') {
     const isTrue = value === 1 || value === true || value === 'true';
     return (
-      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+      <span className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${
         isTrue ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
       }`}>
         {isTrue ? 'Vrai' : 'Faux'}
@@ -197,7 +197,7 @@ export function DataGrid({
                             if (e.key === 'Escape') onCancelEdit();
                           }}
                           onBlur={onCommitEdit}
-                          className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1 border border-blue-500 outline-none"
+                          className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-blue-500 outline-hidden"
                           autoFocus
                         />
                       </td>

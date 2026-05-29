@@ -349,7 +349,7 @@ export default function Hosts() {
                     {/* Name */}
                     <td className="px-3 py-2 text-sm font-medium text-white">
                       <div className="flex items-center gap-2">
-                        <HardDrive className={`w-4 h-4 flex-shrink-0 ${host.is_local ? 'text-green-400' : 'text-blue-400'}`} />
+                        <HardDrive className={`w-4 h-4 shrink-0 ${host.is_local ? 'text-green-400' : 'text-blue-400'}`} />
                         {host.is_local ? 'HomeRoute' : host.name}
                         {(() => {
                           const role = host.is_local ? 'prod' : host.role;
@@ -393,7 +393,7 @@ export default function Hosts() {
                                 console.error('Failed to set role:', err);
                               }
                             }}
-                            className="bg-gray-700 border border-gray-600 text-xs px-1.5 py-0.5 text-gray-200 focus:border-blue-500 focus:outline-none"
+                            className="bg-gray-700 border border-gray-600 text-xs px-1.5 py-0.5 text-gray-200 focus:border-blue-500 focus:outline-hidden"
                           >
                             <option value="none">—</option>
                             <option value="dev">Dev</option>
@@ -422,7 +422,7 @@ export default function Hosts() {
                     <td className="px-3 py-2 text-sm">
                       {host.metrics ? (
                         <div className="flex items-center gap-1">
-                          <div className="w-12 bg-gray-700 h-1.5 rounded-sm overflow-hidden">
+                          <div className="w-12 bg-gray-700 h-1.5 rounded-xs overflow-hidden">
                             <div className="h-1.5 bg-blue-500" style={{ width: `${Math.min(host.metrics.cpuPercent, 100)}%` }} />
                           </div>
                           <span className="text-gray-400 text-xs">{host.metrics.cpuPercent.toFixed(0)}%</span>
@@ -433,7 +433,7 @@ export default function Hosts() {
                     <td className="px-3 py-2 text-sm">
                       {host.metrics ? (
                         <div className="flex items-center gap-1">
-                          <div className="w-12 bg-gray-700 h-1.5 rounded-sm overflow-hidden">
+                          <div className="w-12 bg-gray-700 h-1.5 rounded-xs overflow-hidden">
                             <div className="h-1.5 bg-green-500" style={{ width: `${(host.metrics.memoryUsedBytes / host.metrics.memoryTotalBytes * 100).toFixed(0)}%` }} />
                           </div>
                           <span className="text-gray-400 text-xs">{formatBytes(host.metrics.memoryUsedBytes)}</span>
@@ -506,7 +506,7 @@ export default function Hosts() {
 
       {/* Add Host Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-4 w-full max-w-md">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-bold text-white">Ajouter un hote</h2>
@@ -522,7 +522,7 @@ export default function Hosts() {
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
                   placeholder="Mon serveur"
                   required
                 />
@@ -535,7 +535,7 @@ export default function Hosts() {
                     type="text"
                     value={formData.host}
                     onChange={(e) => setFormData({ ...formData, host: e.target.value })}
-                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
                     placeholder="10.0.0.10"
                     required
                   />
@@ -546,7 +546,7 @@ export default function Hosts() {
                     type="number"
                     value={formData.port}
                     onChange={(e) => setFormData({ ...formData, port: e.target.value })}
-                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
                     placeholder="22"
                   />
                 </div>
@@ -558,7 +558,7 @@ export default function Hosts() {
                   type="text"
                   value={formData.username}
                   onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
                   placeholder="root"
                   required
                 />
@@ -570,7 +570,7 @@ export default function Hosts() {
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
                   placeholder="••••••••"
                   required
                 />
@@ -583,7 +583,7 @@ export default function Hosts() {
                   type="text"
                   value={formData.container_storage_path}
                   onChange={(e) => setFormData({ ...formData, container_storage_path: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
                   placeholder="/var/lib/machines"
                 />
               </div>
@@ -611,7 +611,7 @@ export default function Hosts() {
 
       {/* Host Settings Modal */}
       {settingsHost && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-4 w-full max-w-md">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-bold text-white">

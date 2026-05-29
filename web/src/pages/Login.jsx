@@ -61,12 +61,12 @@ function Login() {
         </div>
 
         {/* Login Card */}
-        <div className="bg-gray-800/50 backdrop-blur-sm  p-6 shadow-xl border border-gray-700">
+        <div className="bg-gray-800/50 backdrop-blur-xs  p-6 shadow-xl border border-gray-700">
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* Error message */}
             {error && (
               <div className="flex items-center gap-2 p-3 bg-red-500/20 border border-red-500/50  text-red-400">
-                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <AlertCircle className="w-5 h-5 shrink-0" />
                 <span className="text-sm">{error}</span>
               </div>
             )}

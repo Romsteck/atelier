@@ -53,7 +53,7 @@ function Profile() {
 
       <div className="space-y-6">
         {/* User Info Card */}
-        <div className="bg-gray-800/50 backdrop-blur-sm p-6 border border-gray-700">
+        <div className="bg-gray-800/50 backdrop-blur-xs p-6 border border-gray-700">
           <h2 className="text-lg font-semibold text-white mb-4">Informations du compte</h2>
 
           <div className="space-y-px">
@@ -80,20 +80,20 @@ function Profile() {
         </div>
 
         {/* Change Code Card */}
-        <div className="bg-gray-800/50 backdrop-blur-sm p-6 border border-gray-700">
+        <div className="bg-gray-800/50 backdrop-blur-xs p-6 border border-gray-700">
           <h2 className="text-lg font-semibold text-white mb-4">Changer le code d'acces</h2>
 
           <form onSubmit={handleChangeCode} className="space-y-4">
             {codeSuccess && (
               <div className="flex items-center gap-2 p-3 bg-green-500/20 border border-green-500/50 text-green-400">
-                <CheckCircle className="w-5 h-5 flex-shrink-0" />
+                <CheckCircle className="w-5 h-5 shrink-0" />
                 <span className="text-sm">{codeSuccess}</span>
               </div>
             )}
 
             {codeError && (
               <div className="flex items-center gap-2 p-3 bg-red-500/20 border border-red-500/50 text-red-400">
-                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <AlertCircle className="w-5 h-5 shrink-0" />
                 <span className="text-sm">{codeError}</span>
               </div>
             )}

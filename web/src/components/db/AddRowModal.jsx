@@ -54,7 +54,7 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
           <h3 className="text-sm font-semibold text-white flex items-center gap-2">
             <Plus className="w-4 h-4 text-blue-400" /> Ajouter une ligne
           </h3>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700 border-none bg-transparent cursor-pointer">
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -80,13 +80,13 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
               </div>
             );
           })}
-          {error && <div className="text-xs text-red-400 bg-red-500/10 rounded px-3 py-2">{error}</div>}
+          {error && <div className="text-xs text-red-400 bg-red-500/10 rounded-sm px-3 py-2">{error}</div>}
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded border-none bg-transparent cursor-pointer hover:text-white">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-white">
             Annuler
           </button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1">
+          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded-sm border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1">
             {saving ? <><Loader2 className="w-3 h-3 animate-spin" /> Ajout...</> : <><Plus className="w-3 h-3" /> Ajouter</>}
           </button>
         </div>
@@ -96,7 +96,7 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
 }
 
 function FieldInput({ col, cfg, relation, appSlug, value, onChange }) {
-  const baseClass = "w-full bg-gray-900 text-white text-sm rounded px-3 py-1.5 border border-gray-600 outline-none focus:border-blue-500";
+  const baseClass = "w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden focus:border-blue-500";
 
   // Boolean → toggle
   if (col.field_type === 'Boolean') {
@@ -106,7 +106,7 @@ function FieldInput({ col, cfg, relation, appSlug, value, onChange }) {
           type="checkbox"
           checked={!!value}
           onChange={e => onChange(e.target.checked)}
-          className="w-4 h-4 rounded"
+          className="w-4 h-4 rounded-sm"
         />
         <span className="text-sm text-gray-300">{value ? 'Vrai' : 'Faux'}</span>
       </label>
