@@ -33,7 +33,7 @@ fn test_host() -> String {
 }
 
 fn random_slug() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut b = [0u8; 4];
     rand::rng().fill_bytes(&mut b);
     format!("smoke_{:08x}", u32::from_be_bytes(b))

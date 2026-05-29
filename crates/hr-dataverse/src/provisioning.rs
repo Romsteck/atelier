@@ -11,7 +11,7 @@
 //! error — the caller should call [`drop_app`] first or check existence
 //! via [`app_exists`].
 
-use rand::RngCore;
+use rand::Rng;
 
 use crate::sqlx::{self, PgPool};
 use crate::engine::INIT_METADATA_SQL;

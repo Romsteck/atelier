@@ -29,14 +29,12 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP framework
 axum = { version = "0.8", features = ["ws", "multipart"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 
 # Logging
 tracing = "0.1"
@@ -47,24 +45,18 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 # DB
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-rand = "0.9"
+rand = "0.10"
 base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
 futures-util = "0.3"
-futures = "0.3"
 
-# Lock-free shared state for the flow daemon (RCU registry + per-run handles)
-arc-swap = "1.7"
-dashmap = "6"
-num_cpus = "1.16"
 tokio-util = { version = "0.7", features = ["rt"] }
-async-trait = "0.1"
 
 # HTTP client
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "stream"] }
@@ -90,7 +82,6 @@ hr-git               = { path = "crates/hr-git" }
 # Postgres + sqlx — voir commentaire dans homeroute Cargo.toml
 sqlx-core    = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json", "chrono", "uuid", "migrate"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chrono", "uuid", "json", "migrate", "bigdecimal"] }
-async-graphql = { version = "7.0", default-features = false, features = ["dynamic-schema", "dataloader", "chrono", "uuid"] }
 
 # Crates internes Atelier
 atelier-api     = { path = "crates/atelier-api" }
