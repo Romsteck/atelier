@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::RunKind;
@@ -18,11 +19,13 @@ const PROMPT_SECURITY: &str = include_str!("prompts/security.md");
 pub struct CodexConfig {
     /// Binary name or path. Default "codex".
     pub bin: String,
-    /// Args before the prompt. Default ["exec", "--sandbox", "read-only"].
+    /// Args before the prompt. Default ["exec", "--json", "--sandbox", "read-only"].
     /// Confirmed against codex-cli 0.134: `exec` reads the prompt from stdin
-    /// and `-s/--sandbox read-only` is a valid policy. The Atelier MCP server
-    /// is registered once in `~/.codex/config.toml` (via `codex mcp add`), not
-    /// passed per-invocation.
+    /// and `-s/--sandbox read-only` is a valid policy. `--json` makes Codex emit
+    /// one JSONL event per line on stdout (flushed per event) — required for the
+    /// live transcript: human mode block-buffers stdout, so nothing streams. The
+    /// Atelier MCP server is registered once in `~/.codex/config.toml` (via
+    /// `codex mcp add`), not passed per-invocation.
     pub args: Vec<String>,
     /// Per-run wall-clock timeout.
     pub timeout: Duration,
@@ -32,7 +35,12 @@ impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             bin: "codex".to_string(),
-            args: vec!["exec".into(), "--sandbox".into(), "read-only".into()],
+            args: vec![
+                "exec".into(),
+                "--json".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+            ],
             timeout: Duration::from_secs(600),
         }
     }
@@ -50,6 +58,9 @@ pub struct CodexExec {
     pub tokens_out: Option<i32>,
     /// Set when the subprocess could not be launched at all (binary missing).
     pub spawn_error: Option<String>,
+    /// True when the run was killed via its cancel oneshot (user-requested
+    /// stop). Distinct from `failed` so the caller records a clean `cancelled`.
+    pub cancelled: bool,
 }
 
 #[derive(Clone)]
@@ -101,13 +112,31 @@ impl CodexRunner {
     /// Spawn the Codex CLI in `work_dir` with `prompt` on stdin. Returns a
     /// `CodexExec` describing the outcome. A missing binary is reported via
     /// `spawn_error` (not an `Err`) so callers can record a clean `failed` run.
-    pub async fn exec(&self, work_dir: &PathBuf, prompt: &str) -> CodexExec {
+    ///
+    /// stdout is read line by line: each line is handed to `on_line` (for live
+    /// streaming to the UI) and accumulated so token parsing still sees the
+    /// whole output. The read loop races against `cancel` (a oneshot fired on
+    /// user stop) and the configured timeout; either kills the child and
+    /// returns early. The caller keeps the matching `Sender` alive for the run,
+    /// so `cancel` only resolves on an explicit stop.
+    pub async fn exec(
+        &self,
+        work_dir: &PathBuf,
+        prompt: &str,
+        mut cancel: oneshot::Receiver<()>,
+        mut on_line: impl FnMut(&str) + Send,
+    ) -> CodexExec {
         let mut cmd = Command::new(&self.cfg.bin);
         cmd.current_dir(work_dir);
         cmd.args(&self.cfg.args);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Own process group so a cancel/timeout can kill Codex AND the shells it
+        // spawns in one shot. A plain SIGKILL to the direct child orphans those
+        // children — they linger for seconds until their pipe breaks.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -119,9 +148,14 @@ impl CodexRunner {
                     tokens_in: None,
                     tokens_out: None,
                     spawn_error: Some(format!("spawn `{}` failed: {e}", self.cfg.bin)),
+                    cancelled: false,
                 };
             }
         };
+
+        // pid doubles as the process-group id (process_group(0) above), so
+        // `-pid` targets the whole group on kill.
+        let child_pid = child.id();
 
         if let Some(mut stdin) = child.stdin.take() {
             let p = prompt.to_string();
@@ -133,45 +167,96 @@ impl CodexRunner {
             drop(stdin);
         }
 
-        let output = match tokio::time::timeout(self.cfg.timeout, child.wait_with_output()).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                return CodexExec {
-                    exit_ok: false,
-                    stdout: String::new(),
-                    stderr: format!("wait failed: {e}"),
-                    tokens_in: None,
-                    tokens_out: None,
-                    spawn_error: None,
-                };
+        // Drain stderr in the background so the pipe never blocks the child.
+        let stderr_task = child.stderr.take().map(|err| {
+            tokio::spawn(async move {
+                let mut buf = String::new();
+                let _ = BufReader::new(err).read_to_string(&mut buf).await;
+                buf
+            })
+        });
+
+        // Read stdout line by line, racing cancellation + timeout against EOF.
+        let mut acc = String::new();
+        let mut cancelled = false;
+        let mut timed_out = false;
+        if let Some(out) = child.stdout.take() {
+            let mut lines = BufReader::new(out).lines();
+            let deadline = tokio::time::sleep(self.cfg.timeout);
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut cancel => { cancelled = true; break; }
+                    _ = &mut deadline => { timed_out = true; break; }
+                    next = lines.next_line() => match next {
+                        Ok(Some(l)) => {
+                            on_line(&l);
+                            acc.push_str(&l);
+                            acc.push('\n');
+                        }
+                        Ok(None) => break, // EOF — process finished writing.
+                        Err(e) => {
+                            warn!(?e, "codex stdout read error");
+                            break;
+                        }
+                    },
+                }
             }
-            Err(_) => {
-                return CodexExec {
-                    exit_ok: false,
-                    stdout: String::new(),
-                    stderr: format!("codex timed out after {:?}", self.cfg.timeout),
-                    tokens_in: None,
-                    tokens_out: None,
-                    spawn_error: None,
-                };
+        }
+
+        if cancelled || timed_out {
+            // SIGKILL the whole group (codex + its child shells), then the
+            // direct child as a fallback.
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             }
+            let _ = child.start_kill();
+        }
+        let status = child.wait().await.ok();
+        let stderr = match stderr_task {
+            Some(h) => h.await.unwrap_or_default(),
+            None => String::new(),
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let (tokens_in, tokens_out) = parse_tokens(&stdout, &stderr);
+        if timed_out {
+            return CodexExec {
+                exit_ok: false,
+                stdout: acc,
+                stderr: format!("codex timed out after {:?}", self.cfg.timeout),
+                tokens_in: None,
+                tokens_out: None,
+                spawn_error: None,
+                cancelled: false,
+            };
+        }
+        if cancelled {
+            return CodexExec {
+                exit_ok: false,
+                stdout: acc,
+                stderr,
+                tokens_in: None,
+                tokens_out: None,
+                spawn_error: None,
+                cancelled: true,
+            };
+        }
+
+        let (tokens_in, tokens_out) = parse_tokens(&acc, &stderr);
         debug!(
-            exit = output.status.code(),
-            stdout_len = stdout.len(),
+            exit = status.as_ref().and_then(|s| s.code()),
+            stdout_len = acc.len(),
             "codex exec done"
         );
         CodexExec {
-            exit_ok: output.status.success(),
-            stdout,
+            exit_ok: status.map(|s| s.success()).unwrap_or(false),
+            stdout: acc,
             stderr,
             tokens_in,
             tokens_out,
             spawn_error: None,
+            cancelled: false,
         }
     }
 }

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use tokio::sync::{Semaphore, broadcast};
+use tokio::sync::{Semaphore, broadcast, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{RunKind, SurveillanceEvent};
+use crate::{RunKind, SurveillanceEvent, TranscriptLine};
 use crate::codex::{CodexConfig, CodexRunner};
 use crate::config::ConfigStore;
 use crate::findings::FindingsStore;
@@ -42,6 +42,15 @@ struct Inner {
     sem: Arc<Semaphore>,
     /// Live event bus for WebSocket fan-out (findings/runs changes).
     tx: broadcast::Sender<SurveillanceEvent>,
+    /// Live stream of Codex stdout lines for the in-progress-run console.
+    transcript_tx: broadcast::Sender<TranscriptLine>,
+    /// Rolling buffer of transcript lines per in-flight run, so a client that
+    /// (re)opens the tab mid-run can replay the conversation so far instead of
+    /// only seeing new lines. Dropped when the run ends (ephemeral).
+    transcripts: Mutex<HashMap<Uuid, Vec<TranscriptLine>>>,
+    /// In-flight runs, keyed by run id, with a oneshot to cancel each. Present
+    /// only while a run executes (inserted by `execute`, removed when it ends).
+    running: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
     enabled: bool,
 }
 
@@ -95,6 +104,7 @@ impl SurveillanceService {
             .collect();
 
         let (tx, _rx) = broadcast::channel::<SurveillanceEvent>(256);
+        let (transcript_tx, _trx) = broadcast::channel::<TranscriptLine>(1024);
 
         let svc = Self {
             inner: Arc::new(Inner {
@@ -107,6 +117,9 @@ impl SurveillanceService {
                 stacks,
                 sem: Arc::new(Semaphore::new(cfg.max_concurrent.max(1))),
                 tx,
+                transcript_tx,
+                transcripts: Mutex::new(HashMap::new()),
+                running: Mutex::new(HashMap::new()),
                 enabled,
             }),
         };
@@ -135,6 +148,38 @@ impl SurveillanceService {
     /// Subscribe to live surveillance events (used by the WebSocket route).
     pub fn subscribe(&self) -> broadcast::Receiver<SurveillanceEvent> {
         self.inner.tx.subscribe()
+    }
+
+    /// Subscribe to the live Codex stdout stream (in-progress-run console).
+    pub fn subscribe_transcript(&self) -> broadcast::Receiver<TranscriptLine> {
+        self.inner.transcript_tx.subscribe()
+    }
+
+    /// Snapshot of the buffered transcript for a run (for replay when a client
+    /// opens the tab mid-run). Empty once the run has ended.
+    pub fn transcript(&self, run_id: Uuid) -> Vec<TranscriptLine> {
+        self.inner
+            .transcripts
+            .lock()
+            .unwrap()
+            .get(&run_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Request cancellation of an in-flight run. Returns true if the run was
+    /// found running (its Codex subprocess is then killed and the run recorded
+    /// as `cancelled`); false if it already finished or never existed. Removing
+    /// the sender + sending fires the oneshot the run's `exec` is awaiting.
+    pub fn cancel_run(&self, run_id: Uuid) -> bool {
+        let sender = self.inner.running.lock().unwrap().remove(&run_id);
+        match sender {
+            Some(tx) => {
+                let _ = tx.send(());
+                true
+            }
+            None => false,
+        }
     }
 
     /// Broadcast a live event. No-op if there are no subscribers.
@@ -188,14 +233,33 @@ impl SurveillanceService {
     }
 
     async fn execute(&self, run_id: Uuid, slug: String, kind: RunKind) {
+        // Register a cancel channel for the whole run lifetime so a stop request
+        // can kill the Codex subprocess. The Sender is held in the registry
+        // until the run ends, so the Receiver only fires on an explicit cancel.
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        self.inner
+            .running
+            .lock()
+            .unwrap()
+            .insert(run_id, cancel_tx);
+
         self.emit("run", &slug, "started");
-        self.execute_inner(run_id, &slug, kind).await;
+        self.execute_inner(run_id, &slug, kind, cancel_rx).await;
+        self.inner.running.lock().unwrap().remove(&run_id);
+        // Drop the buffered transcript — the run has settled (panel disappears).
+        self.inner.transcripts.lock().unwrap().remove(&run_id);
         // A run almost always touches findings; emit a final event so any open
         // Surveillance view refreshes once the run settles.
         self.emit("run", &slug, "finished");
     }
 
-    async fn execute_inner(&self, run_id: Uuid, slug: &str, kind: RunKind) {
+    async fn execute_inner(
+        &self,
+        run_id: Uuid,
+        slug: &str,
+        kind: RunKind,
+        cancel_rx: oneshot::Receiver<()>,
+    ) {
         let slug = slug.to_string();
         let (Some(findings), Some(runs), Some(memory), Some(config)) = (
             self.inner.findings.as_ref(),
@@ -299,8 +363,43 @@ impl SurveillanceService {
         // Acquire concurrency permit + run Codex.
         let _permit = self.inner.sem.acquire().await.ok();
         let measure_from = Utc::now();
-        let exec = self.inner.runner.exec(&src, &prompt).await;
+        // Stream each stdout line to the live console (ephemeral; not persisted)
+        // and append to the per-run buffer for mid-run tab re-opens.
+        let inner = self.inner.clone();
+        let run_kind = kind.run_kind().to_string();
+        let slug_line = slug.clone();
+        let mut seq: u64 = 0;
+        let exec = self
+            .inner
+            .runner
+            .exec(&src, &prompt, cancel_rx, |line| {
+                seq += 1;
+                let tl = TranscriptLine {
+                    run_id,
+                    slug: slug_line.clone(),
+                    kind: run_kind.clone(),
+                    seq,
+                    line: line.to_string(),
+                };
+                {
+                    let mut map = inner.transcripts.lock().unwrap();
+                    let buf = map.entry(run_id).or_default();
+                    buf.push(tl.clone());
+                    // Cap memory: keep the last ~2000 lines per run.
+                    if buf.len() > 2500 {
+                        let cut = buf.len() - 2000;
+                        buf.drain(0..cut);
+                    }
+                }
+                let _ = inner.transcript_tx.send(tl);
+            })
+            .await;
 
+        if exec.cancelled {
+            let _ = runs.finish_cancelled(run_id).await;
+            info!(slug = %slug, kind = kind.run_kind(), "codex run cancelled by user");
+            return;
+        }
         if let Some(err) = exec.spawn_error {
             let _ = runs.finish_failed(run_id, &err).await;
             self.note_failure(&slug, kind, memory).await;

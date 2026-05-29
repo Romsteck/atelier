@@ -48,6 +48,20 @@ pub struct SurveillanceEvent {
     pub action: String,
 }
 
+/// One line of Codex stdout, streamed live to the frontend while a run is in
+/// progress. Ephemeral — never persisted; the UI shows it in a live console
+/// that disappears once the run settles.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptLine {
+    pub run_id: uuid::Uuid,
+    pub slug: String,
+    /// run_kind: "code_review" | "suggestions" | "security"
+    pub kind: String,
+    /// Monotonic line index within the run (lets the UI order/dedup).
+    pub seq: u64,
+    pub line: String,
+}
+
 /// The three kinds of surveillance run. Note the naming asymmetry kept for
 /// backward-compat with the DB: a run is `code_review`/`suggestions`/`security`
 /// (plural for suggestions) while a finding is `code_review`/`suggestion`/`security`.

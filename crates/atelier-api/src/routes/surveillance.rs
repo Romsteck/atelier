@@ -38,6 +38,14 @@ pub fn app_router() -> Router<ApiState> {
             post(resolve_finding),
         )
         .route("/{slug}/surveillance/run", post(run_surveillance))
+        .route(
+            "/{slug}/surveillance/runs/{run_id}/cancel",
+            post(cancel_run),
+        )
+        .route(
+            "/{slug}/surveillance/runs/{run_id}/transcript",
+            get(get_transcript),
+        )
         .route("/{slug}/surveillance/runs", get(list_runs))
         .route(
             "/{slug}/surveillance/config",
@@ -213,6 +221,38 @@ async fn run_surveillance(
             .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+#[instrument(skip(state))]
+async fn cancel_run(
+    State(state): State<ApiState>,
+    Path((slug, run_id)): Path<(String, uuid::Uuid)>,
+) -> impl IntoResponse {
+    if state.surveillance.findings().is_none() {
+        return err503();
+    }
+    if state.surveillance.cancel_run(run_id) {
+        (
+            StatusCode::OK,
+            Json(json!({"ok": true, "slug": slug, "run_id": run_id})),
+        )
+            .into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "run not active")
+    }
+}
+
+#[instrument(skip(state))]
+async fn get_transcript(
+    State(state): State<ApiState>,
+    Path((_slug, run_id)): Path<(String, uuid::Uuid)>,
+) -> impl IntoResponse {
+    if state.surveillance.findings().is_none() {
+        return err503();
+    }
+    let lines = state.surveillance.transcript(run_id);
+    let total = lines.len();
+    (StatusCode::OK, Json(json!({"lines": lines, "total": total}))).into_response()
 }
 
 #[derive(Debug, Deserialize)]

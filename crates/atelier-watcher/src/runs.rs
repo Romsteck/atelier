@@ -108,6 +108,23 @@ impl RunsStore {
         Ok(())
     }
 
+    /// Mark a run as cancelled by the user (kill of an in-progress run).
+    pub async fn finish_cancelled(&self, id: Uuid) -> anyhow::Result<()> {
+        query(
+            r#"
+            UPDATE surveillance_runs
+               SET status = 'cancelled',
+                   finished_at = now(),
+                   error = 'cancelled by user'
+             WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn finish_failed(&self, id: Uuid, error: &str) -> anyhow::Result<()> {
         // Cap error to a reasonable length to keep the row small.
         let truncated: String = error.chars().take(2000).collect();

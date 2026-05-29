@@ -246,6 +246,10 @@ export const resolveFinding = (slug, id, commit_sha) =>
   api.post(`/apps/${slug}/findings/${id}/resolve`, { commit_sha });
 export const runSurveillance = (slug, kind) =>
   api.post(`/apps/${slug}/surveillance/run`, { kind });
+export const cancelSurveillanceRun = (slug, runId) =>
+  api.post(`/apps/${slug}/surveillance/runs/${runId}/cancel`);
+export const getSurveillanceTranscript = (slug, runId) =>
+  api.get(`/apps/${slug}/surveillance/runs/${runId}/transcript`);
 export const listSurveillanceRuns = (slug, params = {}) =>
   api.get(`/apps/${slug}/surveillance/runs`, { params });
 export const getSurveillanceConfig = (slug) =>

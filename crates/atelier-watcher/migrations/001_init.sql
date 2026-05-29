@@ -109,6 +109,9 @@ ALTER TABLE findings           DROP CONSTRAINT IF EXISTS findings_kind_chk;
 ALTER TABLE findings           ADD  CONSTRAINT findings_kind_chk CHECK (kind IN ('code_review', 'suggestion', 'security'));
 ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_kind_chk;
 ALTER TABLE surveillance_runs  ADD  CONSTRAINT runs_kind_chk CHECK (kind IN ('code_review', 'suggestions', 'security'));
+-- Ajout du statut `cancelled` (kill d'un run in-progress depuis l'UI).
+ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_status_chk;
+ALTER TABLE surveillance_runs  ADD  CONSTRAINT runs_status_chk CHECK (status IN ('running', 'success', 'success_empty', 'skipped', 'failed', 'cancelled'));
 -- Scheduling retiré (consommait trop l'abonnement GPT+) — purge des colonnes cron.
 ALTER TABLE surveillance_config DROP COLUMN IF EXISTS cron_code_review_enabled;
 ALTER TABLE surveillance_config DROP COLUMN IF EXISTS cron_suggestions_enabled;

@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  ShieldAlert, RefreshCw, Play, Settings as SettingsIcon, ChevronDown, ChevronRight,
+  ShieldAlert, RefreshCw, Play, Square, Terminal, Settings as SettingsIcon, ChevronDown, ChevronRight,
   X, Check, AlertOctagon, Lightbulb, Clock, Save, ShieldCheck,
 } from 'lucide-react';
 import {
@@ -8,6 +8,8 @@ import {
   dismissFinding,
   resolveFinding,
   runSurveillance,
+  cancelSurveillanceRun,
+  getSurveillanceTranscript,
   listSurveillanceRuns,
   getSurveillanceConfig,
   updateSurveillanceConfig,
@@ -100,6 +102,7 @@ function RunRow({ run }) {
   const colorByStatus = {
     success: 'text-emerald-300', success_empty: 'text-gray-400',
     skipped: 'text-yellow-400', failed: 'text-red-400', running: 'text-blue-400',
+    cancelled: 'text-orange-300',
   };
   const kindShort = { code_review: 'review', suggestions: 'sugg.', security: 'sécu' };
   return (
@@ -109,6 +112,95 @@ function RunRow({ run }) {
       <span className={`${colorByStatus[run.status] || 'text-gray-300'} w-24 shrink-0`}>{run.status}</span>
       <span className="text-gray-400 flex-1 truncate">{run.skip_reason || run.error || `${run.findings_count} finding${run.findings_count > 1 ? 's' : ''}`}</span>
       <span className="text-gray-600 shrink-0">{timeSince(run.started_at)}</span>
+    </div>
+  );
+}
+
+// Merge transcript lines deduped by seq (a buffer replay + live WS lines can
+// overlap) and kept ordered. Capped to the last 2000.
+function mergeLines(prev, incoming) {
+  const bySeq = new Map(prev.map((l) => [l.seq, l]));
+  for (const l of incoming) bySeq.set(l.seq, l);
+  return [...bySeq.values()].sort((a, b) => a.seq - b.seq).slice(-2000);
+}
+
+// Render one Codex JSONL event into a readable {icon, text, tone} entry, or
+// null to skip pure-noise events. Falls back to the raw line if not JSON.
+function formatCodexEvent(raw) {
+  let ev;
+  try { ev = JSON.parse(raw); } catch { return raw.trim() ? { icon: '', text: raw, tone: 'raw' } : null; }
+  const t = ev.type;
+  if (t === 'thread.started') return { icon: '▸', text: 'Session Codex démarrée', tone: 'meta' };
+  if (t === 'turn.started' || t === 'item.started') return null;
+  if (t === 'turn.completed') {
+    const u = ev.usage || {};
+    return { icon: '✓', text: `Tour terminé — ${u.input_tokens ?? '?'} in / ${u.output_tokens ?? '?'} out tokens`, tone: 'meta' };
+  }
+  if (t === 'turn.failed' || t === 'error') {
+    return { icon: '⚠', text: ev.error?.message || ev.message || JSON.stringify(ev), tone: 'err' };
+  }
+  if (t === 'item.completed') {
+    const it = ev.item || {};
+    switch (it.type) {
+      case 'agent_message': return { icon: '🗨', text: it.text || '', tone: 'msg' };
+      case 'reasoning': return { icon: '💭', text: it.text || it.summary || '', tone: 'dim' };
+      case 'command_execution': return { icon: '$', text: it.command || it.cmd || '', tone: 'cmd' };
+      case 'mcp_tool_call':
+      case 'tool_call': return { icon: '🔧', text: it.tool || it.name || it.server || 'appel outil', tone: 'tool' };
+      case 'file_change': return { icon: '✏', text: it.path || '', tone: 'tool' };
+      default: return { icon: '·', text: it.text || it.type || '', tone: 'dim' };
+    }
+  }
+  return null;
+}
+
+const TONE_CLS = {
+  msg: 'text-gray-100', meta: 'text-emerald-400/80', dim: 'text-gray-500',
+  cmd: 'text-sky-300', tool: 'text-fuchsia-300', err: 'text-red-300', raw: 'text-gray-400',
+};
+
+// Live console of the Codex run in progress. Lines stream in over WebSocket;
+// the panel auto-scrolls and disappears once the run settles.
+function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
+  const bodyRef = useRef(null);
+  const entries = useMemo(
+    () => lines.map((l) => formatCodexEvent(l.line)).filter((e) => e && (e.text?.trim() || e.tone === 'meta')),
+    [lines],
+  );
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [entries.length]);
+  return (
+    <div className="w-96 shrink-0 border-l border-gray-700 bg-gray-950/60 flex flex-col min-w-0">
+      <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2">
+        <Terminal className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+        <span className="text-xs text-gray-300 flex-1 truncate">
+          {stopping ? 'Arrêt en cours…' : <>Scan en cours — <span className="text-emerald-300">{kindLabel}</span></>}
+        </span>
+        <RefreshCw className={`w-3 h-3 shrink-0 animate-spin ${stopping ? 'text-red-400' : 'text-emerald-400'}`} />
+        {onStop && (
+          <button
+            onClick={onStop}
+            disabled={stopping}
+            className="px-2 py-0.5 text-xs border border-red-500/40 text-red-200 hover:bg-red-500/20 rounded flex items-center gap-1 disabled:opacity-50"
+          >
+            <Square className="w-3 h-3" /> Arrêter
+          </button>
+        )}
+      </div>
+      <div ref={bodyRef} className="flex-1 overflow-y-auto p-2 space-y-1.5">
+        {entries.length === 0 ? (
+          <div className="text-xs text-gray-600 italic">En attente de la sortie de Codex…</div>
+        ) : (
+          entries.map((e, i) => (
+            <div key={i} className="flex gap-1.5 text-[11px] leading-relaxed font-mono">
+              {e.icon && <span className="shrink-0 select-none">{e.icon}</span>}
+              <span className={`whitespace-pre-wrap break-words min-w-0 ${TONE_CLS[e.tone] || 'text-gray-300'}`}>{e.text}</span>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -164,12 +256,21 @@ export default function SurveillanceTab({ slug }) {
   const [findings, setFindings] = useState([]);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [running, setRunning] = useState(null); // runKind currently launching
+  const [busy, setBusy] = useState(false); // launch/stop request in flight
+  const [transcript, setTranscript] = useState([]); // live Codex output (ephemeral)
   const [err, setErr] = useState(null);
   const [statusFilter, setStatusFilter] = useState('open');
   const [showConfig, setShowConfig] = useState(false);
 
   const kindMeta = KINDS.find((k) => k.id === activeKind) || KINDS[0];
+
+  // The in-progress run for the active kind (drives the launch/stop button).
+  // `runs.kind` stores the run_kind (plural for suggestions), matching runKind.
+  const activeRun = useMemo(
+    () => runs.find((r) => r.kind === kindMeta.runKind && r.status === 'running'),
+    [runs, kindMeta.runKind],
+  );
+  const activeRunId = activeRun?.id;
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -196,7 +297,26 @@ export default function SurveillanceTab({ slug }) {
     'surveillance:event': (data) => {
       if (!data || !data.slug || data.slug === slug) reload();
     },
+    'surveillance:transcript': (data) => {
+      // Only the active run's lines (lines before activeRunId is known are
+      // recovered via the buffer replay below).
+      if (!data || data.slug !== slug || data.run_id !== activeRunId) return;
+      setTranscript((prev) => mergeLines(prev, [data]));
+    },
   });
+
+  // The live console is tied to one running run. On (re)mount or whenever the
+  // active run changes, replay the server-buffered transcript so far, then keep
+  // appending live WS lines. Cleared when no run is active (panel disappears).
+  useEffect(() => {
+    setTranscript([]);
+    if (!activeRunId) return;
+    let cancelled = false;
+    getSurveillanceTranscript(slug, activeRunId)
+      .then((r) => { if (!cancelled) setTranscript((prev) => mergeLines(prev, r.data?.lines || [])); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeRunId, slug]);
 
   // Group findings by category for the active kind.
   const grouped = useMemo(() => {
@@ -218,14 +338,30 @@ export default function SurveillanceTab({ slug }) {
   }, [findings, activeKind]);
 
   const handleRun = async () => {
-    setRunning(kindMeta.runKind);
+    setBusy(true);
+    setTranscript([]);
     try {
       await runSurveillance(slug, kindMeta.runKind);
+      // The run is fire-and-forget server-side; the running row + WS events
+      // drive the button state from here on.
       await reload();
     } catch (e) {
       alert(e.response?.status === 501 ? 'Runner Codex non implémenté.' : (e.response?.data?.error || e.message));
     } finally {
-      setRunning(null);
+      setBusy(false);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!activeRun) return;
+    setBusy(true);
+    try {
+      await cancelSurveillanceRun(slug, activeRun.id);
+      await reload();
+    } catch (e) {
+      alert('Arrêt a échoué : ' + (e.response?.data?.error || e.message));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -260,10 +396,17 @@ export default function SurveillanceTab({ slug }) {
 
       {/* Action bar */}
       <div className="px-4 py-2 border-b border-gray-700 bg-gray-800/30 flex items-center gap-2 flex-wrap">
-        <button onClick={handleRun} disabled={!!running} className={`px-2.5 py-1 text-xs border rounded flex items-center gap-1 disabled:opacity-50 ${kindMeta.btn}`}>
-          {running === kindMeta.runKind ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-          Lancer {kindMeta.label.toLowerCase()}
-        </button>
+        {activeRun ? (
+          <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30">
+            {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
+            Arrêter {kindMeta.label.toLowerCase()}
+          </button>
+        ) : (
+          <button onClick={handleRun} disabled={busy} className={`px-2.5 py-1 text-xs border rounded flex items-center gap-1 disabled:opacity-50 ${kindMeta.btn}`}>
+            {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+            Lancer {kindMeta.label.toLowerCase()}
+          </button>
+        )}
         <div className="flex-1" />
         <div className="flex items-center gap-1 text-xs">
           {STATUSES.map((s) => (
@@ -307,6 +450,15 @@ export default function SurveillanceTab({ slug }) {
             </div>
           ))}
         </div>
+
+        {(activeRun || transcript.length > 0) && (
+          <LiveScanPanel
+            lines={transcript}
+            kindLabel={kindMeta.label.toLowerCase()}
+            onStop={activeRun ? handleStop : undefined}
+            stopping={busy}
+          />
+        )}
 
         <aside className="w-72 shrink-0 border-l border-gray-700 bg-gray-900/30 p-3 hidden lg:block">
           <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Runs récents</div>
