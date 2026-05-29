@@ -564,7 +564,7 @@ fn translate_sqlite_default(raw: &str, ft: PgFieldType) -> String {
                 format!("'{}'", v.replace('\'', "''"))
             }
         }
-        Number | AutoIncrement | Lookup | Decimal | Currency | Percent | Json | Uuid
+        Number | AutoIncrement | Lookup | Decimal | Currency | Money | Percent | Json | Uuid
         | MultiChoice | Formula => v.to_string(),
     }
 }
@@ -803,7 +803,7 @@ async fn insert_rows_batch(
         }
     }
 
-    sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(&sql, args)
+    sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(sqlx_core::sql_str::AssertSqlSafe(sql), args)
         .execute(engine.pool())
         .await
         .with_context(|| format!("INSERT batch into {} ({} rows)", table, batch.len()))?;
@@ -861,7 +861,7 @@ async fn insert_row(
         bind_for_field(&mut args, &v, ft)?;
     }
 
-    sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(&sql, args)
+    sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(sqlx_core::sql_str::AssertSqlSafe(sql), args)
         .execute(engine.pool())
         .await
         .with_context(|| format!("INSERT into {}", table))?;

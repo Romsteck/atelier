@@ -406,7 +406,7 @@ pub async fn dv_audit_list(
     sql.push(';');
     let _ = idx; // silence unused if no filters
 
-    match sqlx_core::query::query_with(&sql, args)
+    match sqlx_core::query::query_with(sqlx_core::sql_str::AssertSqlSafe(sql.as_str()), args)
         .fetch_all(engine.pool())
         .await
     {
@@ -521,7 +521,7 @@ async fn audit_after(
             return;
         }
     };
-    if let Err(e) = sqlx_core::query::query_with(&compiled.sql, args)
+    if let Err(e) = sqlx_core::query::query_with(sqlx_core::sql_str::AssertSqlSafe(compiled.sql.as_str()), args)
         .execute(pool)
         .await
     {

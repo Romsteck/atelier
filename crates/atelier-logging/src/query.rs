@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::sqlx::{PgRow, Pool, Postgres, Row, query, query_as};
+use crate::sqlx::{AssertSqlSafe, PgRow, Pool, Postgres, Row, query, query_as};
 use crate::types::{LogCategory, LogEntry, LogLevel, LogSource};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -153,7 +153,7 @@ pub async fn query_logs(pool: &Pool<Postgres>, q: &LogQuery) -> anyhow::Result<V
     let oi = binds.push_i64(offset);
     sql.push_str(&format!(" OFFSET ${}", oi));
 
-    let mut qb = query(&sql);
+    let mut qb = query(AssertSqlSafe(sql));
     for v in &binds.values {
         qb = match v.clone() {
             BindValue::Str(s) => qb.bind(s),
@@ -175,7 +175,7 @@ pub async fn stats(pool: &Pool<Postgres>, q: &LogQuery) -> anyhow::Result<LogSta
         let mut sql = String::from("SELECT COUNT(*)::bigint FROM events_log WHERE 1=1");
         let mut binds = Binds::default();
         apply_filters(q, &mut sql, &mut binds);
-        let mut qb = query_as::<_, (i64,)>(&sql);
+        let mut qb = query_as::<_, (i64,)>(AssertSqlSafe(sql));
         for v in &binds.values {
             qb = match v.clone() {
                 BindValue::Str(s) => qb.bind(s),
@@ -193,7 +193,7 @@ pub async fn stats(pool: &Pool<Postgres>, q: &LogQuery) -> anyhow::Result<LogSta
         let mut binds = Binds::default();
         apply_filters(q, &mut sql, &mut binds);
         sql.push_str(" GROUP BY level ORDER BY 2 DESC");
-        let mut qb = query_as::<_, (String, i64)>(&sql);
+        let mut qb = query_as::<_, (String, i64)>(AssertSqlSafe(sql));
         for v in &binds.values {
             qb = match v.clone() {
                 BindValue::Str(s) => qb.bind(s),
@@ -210,7 +210,7 @@ pub async fn stats(pool: &Pool<Postgres>, q: &LogQuery) -> anyhow::Result<LogSta
         let mut binds = Binds::default();
         apply_filters(q, &mut sql, &mut binds);
         sql.push_str(" GROUP BY service ORDER BY 2 DESC LIMIT 50");
-        let mut qb = query_as::<_, (String, i64)>(&sql);
+        let mut qb = query_as::<_, (String, i64)>(AssertSqlSafe(sql));
         for v in &binds.values {
             qb = match v.clone() {
                 BindValue::Str(s) => qb.bind(s),
@@ -227,7 +227,7 @@ pub async fn stats(pool: &Pool<Postgres>, q: &LogQuery) -> anyhow::Result<LogSta
         let mut binds = Binds::default();
         apply_filters(q, &mut sql, &mut binds);
         sql.push_str(" GROUP BY app_slug ORDER BY 2 DESC LIMIT 50");
-        let mut qb = query_as::<_, (Option<String>, i64)>(&sql);
+        let mut qb = query_as::<_, (Option<String>, i64)>(AssertSqlSafe(sql));
         for v in &binds.values {
             qb = match v.clone() {
                 BindValue::Str(s) => qb.bind(s),

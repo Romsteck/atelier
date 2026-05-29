@@ -16,6 +16,7 @@ pub(crate) mod sqlx {
     pub use sqlx_core::query_scalar::query_scalar;
     pub use sqlx_core::raw_sql::raw_sql;
     pub use sqlx_core::row::Row;
+    pub use sqlx_core::sql_str::AssertSqlSafe;
     pub use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 }
 

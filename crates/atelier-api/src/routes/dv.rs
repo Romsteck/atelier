@@ -296,7 +296,7 @@ async fn audit_after(
             return;
         }
     };
-    if let Err(e) = sqlx_core::query::query_with(&compiled.sql, args)
+    if let Err(e) = sqlx_core::query::query_with(sqlx_core::sql_str::AssertSqlSafe(compiled.sql.as_str()), args)
         .execute(pool)
         .await
     {

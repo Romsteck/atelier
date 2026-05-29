@@ -22,7 +22,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
-use crate::sqlx::{Executor, PgPool, PgPoolOptions};
+use crate::sqlx::{AssertSqlSafe, Executor, PgPool, PgPoolOptions};
 use tokio::sync::RwLock;
 
 use crate::engine::DataverseEngine;
@@ -144,7 +144,7 @@ pub fn pool_with_session_defaults() -> PgPoolOptions {
         .after_connect(move |conn, _meta| {
             let sql = sql.clone();
             Box::pin(async move {
-                conn.execute(sql.as_str()).await?;
+                conn.execute(AssertSqlSafe(sql)).await?;
                 Ok(())
             })
         })

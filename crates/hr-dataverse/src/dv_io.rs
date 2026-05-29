@@ -9,6 +9,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Map, Number, Value};
 use sqlx_core::arguments::Arguments;
+use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::{PgArguments, PgRow};
 use sqlx_core::row::Row as _;
 use uuid::Uuid;
@@ -247,7 +248,7 @@ pub async fn run_list(
     compiled: &CompiledListQuery,
 ) -> Result<Vec<Value>> {
     let args = bind_all(&compiled.params)?;
-    let rows = sqlx_core::query::query_with(&compiled.sql, args)
+    let rows = sqlx_core::query::query_with(AssertSqlSafe(compiled.sql.as_str()), args)
         .fetch_all(pool)
         .await
         .map_err(|e| DataverseError::internal(format!("list fetch: {}", e)))?;
@@ -265,7 +266,7 @@ pub async fn run_get(
     params: &[QueryParam],
 ) -> Result<Option<Value>> {
     let args = bind_all(params)?;
-    let row = sqlx_core::query::query_with(sql, args)
+    let row = sqlx_core::query::query_with(AssertSqlSafe(sql), args)
         .fetch_optional(pool)
         .await
         .map_err(|e| DataverseError::internal(format!("get fetch: {}", e)))?;
@@ -279,7 +280,7 @@ pub async fn run_count(
     params: &[QueryParam],
 ) -> Result<i64> {
     let args = bind_all(params)?;
-    let row = sqlx_core::query::query_with(sql, args)
+    let row = sqlx_core::query::query_with(AssertSqlSafe(sql), args)
         .fetch_one(pool)
         .await
         .map_err(|e| DataverseError::internal(format!("count fetch: {}", e)))?;
@@ -327,7 +328,7 @@ pub async fn run_mutation(
         .map_err(|e| DataverseError::internal(format!("begin tx: {}", e)))?;
 
     let args = bind_all(mutation_params)?;
-    let row_opt = sqlx_core::query::query_with(mutation_sql, args)
+    let row_opt = sqlx_core::query::query_with(AssertSqlSafe(mutation_sql), args)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| DataverseError::internal(format!("mutation: {}", e)))?;
@@ -346,7 +347,7 @@ pub async fn run_mutation(
 
     if let Some(sql) = audit_sql {
         let args = bind_all(audit_params)?;
-        sqlx_core::query::query_with(sql, args)
+        sqlx_core::query::query_with(AssertSqlSafe(sql), args)
             .execute(&mut *tx)
             .await
             .map_err(|e| DataverseError::internal(format!("audit insert: {}", e)))?;
@@ -396,7 +397,7 @@ async fn probe_outcome(
         "SELECT 1 FROM {} WHERE \"id\" = $1 LIMIT 1",
         crate::migration::quote_ident(table_name)
     );
-    match sqlx_core::query::query_with(&sql, args)
+    match sqlx_core::query::query_with(AssertSqlSafe(sql), args)
         .fetch_optional(pool)
         .await
     {

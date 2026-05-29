@@ -174,7 +174,7 @@ impl DataverseEngine {
                 .await?;
         for (name,) in tables {
             for stmt in crate::migration::add_base_columns_sql(&name) {
-                sqlx::raw_sql(&stmt).execute(&self.pool).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(stmt)).execute(&self.pool).await?;
             }
         }
         Ok(())
@@ -211,7 +211,7 @@ impl DataverseEngine {
             return Err(DataverseError::TableNotFound(table.into()));
         }
         let sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table));
-        let (count,): (i64,) = sqlx::query_as(&sql).fetch_one(&self.pool).await?;
+        let (count,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql)).fetch_one(&self.pool).await?;
         Ok(count)
     }
 
@@ -342,15 +342,15 @@ impl DataverseEngine {
         // 1. CREATE TABLE — DDL needs the schema snapshot so Lookup
         //    columns inherit their target table's id_strategy for the
         //    FK column type (BIGINT vs UUID).
-        sqlx::raw_sql(&create_table_sql(def, &snapshot)).execute(&self.pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(create_table_sql(def, &snapshot))).execute(&self.pool).await?;
 
         // 2. Trigger that bumps `updated_at` and `version` on every UPDATE.
-        sqlx::raw_sql(&create_updated_at_trigger_sql(&def.name)).execute(&self.pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(create_updated_at_trigger_sql(&def.name))).execute(&self.pool).await?;
 
         // 3. Partial index for the soft-delete-aware default filter — `WHERE
         //    is_deleted = FALSE` is auto-injected by the gateway, the index
         //    keeps active-row scans cheap.
-        sqlx::raw_sql(&create_active_index_sql(&def.name)).execute(&self.pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(create_active_index_sql(&def.name))).execute(&self.pool).await?;
 
         // 4. _dv_tables row — persists id_strategy so subsequent
         //    schema reads (and add_column for Lookups targeting this
@@ -382,7 +382,7 @@ impl DataverseEngine {
                     relation_type: if target == &def.name { RelationType::SelfReferential } else { RelationType::OneToMany },
                     cascade: Default::default(),
                 };
-                sqlx::raw_sql(&add_foreign_key_sql(&rel)).execute(&self.pool).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(add_foreign_key_sql(&rel))).execute(&self.pool).await?;
                 insert_relation_metadata(&self.pool, &rel).await?;
             }
         }
@@ -407,7 +407,7 @@ impl DataverseEngine {
         }
 
         // The trigger is dropped automatically with the table (CASCADE).
-        sqlx::raw_sql(&drop_table_sql(name)).execute(&self.pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drop_table_sql(name))).execute(&self.pool).await?;
 
         sqlx::query("DELETE FROM _dv_columns WHERE table_name = $1")
             .bind(name)
@@ -448,7 +448,7 @@ impl DataverseEngine {
         } else {
             IdStrategy::default()
         };
-        sqlx::raw_sql(&add_column_sql(table, col, lookup_target_strategy))
+        sqlx::raw_sql(sqlx::AssertSqlSafe(add_column_sql(table, col, lookup_target_strategy)))
             .execute(&self.pool)
             .await?;
 
@@ -470,7 +470,7 @@ impl DataverseEngine {
                     relation_type: if target == table { RelationType::SelfReferential } else { RelationType::OneToMany },
                     cascade: Default::default(),
                 };
-                sqlx::raw_sql(&add_foreign_key_sql(&rel)).execute(&self.pool).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(add_foreign_key_sql(&rel))).execute(&self.pool).await?;
                 insert_relation_metadata(&self.pool, &rel).await?;
             }
         }
@@ -488,7 +488,7 @@ impl DataverseEngine {
         validation::validate_user_identifier(table)?;
         validation::validate_user_identifier(column)?;
 
-        sqlx::raw_sql(&drop_column_sql(table, column)).execute(&self.pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drop_column_sql(table, column))).execute(&self.pool).await?;
 
         sqlx::query("DELETE FROM _dv_columns WHERE table_name = $1 AND name = $2")
             .bind(table)
@@ -514,7 +514,7 @@ impl DataverseEngine {
         let snapshot = self.get_schema().await?;
         validation::validate_relation(rel, &snapshot)?;
 
-        sqlx::raw_sql(&add_foreign_key_sql(rel)).execute(&self.pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(add_foreign_key_sql(rel))).execute(&self.pool).await?;
         insert_relation_metadata(&self.pool, rel).await?;
 
         let version = bump_schema_version(&self.pool).await?;
@@ -629,7 +629,7 @@ impl DataverseEngine {
                 report.missing_triggers.push(table.clone());
                 if !dry_run {
                     let sql = crate::migration::create_updated_at_trigger_sql(table);
-                    let _ = sqlx::raw_sql(&sql).execute(&self.pool).await;
+                    let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await;
                     report.repaired_triggers.push(table.clone());
                 }
             }

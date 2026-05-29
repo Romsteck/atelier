@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::sqlx::{PgPoolOptions, Pool, Postgres, query, query_as, raw_sql};
+use crate::sqlx::{AssertSqlSafe, PgPoolOptions, Pool, Postgres, query, query_as, raw_sql};
 
 pub const INIT_SQL: &str = include_str!("../migrations/001_init.sql");
 
@@ -32,7 +32,7 @@ pub async fn ensure_database(admin_pool: &Pool<Postgres>, dbname: &str) -> anyho
         .await?;
     if exists.is_none() {
         let stmt = format!("CREATE DATABASE \"{}\"", dbname.replace('"', "\"\""));
-        query(&stmt).execute(admin_pool).await?;
+        query(AssertSqlSafe(stmt)).execute(admin_pool).await?;
     }
     Ok(())
 }

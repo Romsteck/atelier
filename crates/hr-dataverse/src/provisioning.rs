@@ -102,7 +102,7 @@ pub async fn provision_app(
         role = quote_ident(&role_name),
         pwd = escape_pg_string(&password),
     );
-    sqlx::query(&role_sql).execute(admin).await.map_err(|e| {
+    sqlx::query(sqlx::AssertSqlSafe(role_sql)).execute(admin).await.map_err(|e| {
         DataverseError::provisioning(slug, format!("CREATE ROLE: {}", e))
     })?;
 
@@ -113,8 +113,8 @@ pub async fn provision_app(
         "GRANT {role} TO CURRENT_USER",
         role = quote_ident(&role_name),
     );
-    if let Err(e) = sqlx::query(&grant_membership_sql).execute(admin).await {
-        let _ = sqlx::query(&format!("DROP ROLE IF EXISTS {}", quote_ident(&role_name)))
+    if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(grant_membership_sql)).execute(admin).await {
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {}", quote_ident(&role_name))))
             .execute(admin)
             .await;
         return Err(DataverseError::provisioning(
@@ -129,26 +129,26 @@ pub async fn provision_app(
         db = quote_ident(&db_name),
         role = quote_ident(&role_name),
     );
-    if let Err(e) = sqlx::query(&db_sql).execute(admin).await {
+    if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(db_sql)).execute(admin).await {
         // Roll back role creation on failure.
-        let _ = sqlx::query(&format!("DROP ROLE IF EXISTS {}", quote_ident(&role_name)))
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {}", quote_ident(&role_name))))
             .execute(admin)
             .await;
         return Err(DataverseError::provisioning(slug, format!("CREATE DATABASE: {}", e)));
     }
 
     // 3. Tighten privileges: revoke PUBLIC default, grant only to the app role.
-    let _ = sqlx::query(&format!(
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         "REVOKE ALL ON DATABASE {} FROM PUBLIC",
         quote_ident(&db_name)
-    ))
+    )))
     .execute(admin)
     .await;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT ALL ON DATABASE {} TO {}",
         quote_ident(&db_name),
         quote_ident(&role_name),
-    ))
+    )))
     .execute(admin)
     .await
     .map_err(|e| DataverseError::provisioning(slug, format!("GRANT: {}", e)))?;
@@ -209,13 +209,13 @@ pub async fn provision_app(
 /// when tracing is wired) — the original provisioning error is the one the
 /// caller actually wants to see.
 async fn drop_app_artifacts(admin: &PgPool, db_name: &str, role_name: &str) {
-    let _ = sqlx::query(&format!(
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP DATABASE IF EXISTS {} WITH (FORCE)",
         quote_ident(db_name)
-    ))
+    )))
     .execute(admin)
     .await;
-    let _ = sqlx::query(&format!("DROP ROLE IF EXISTS {}", quote_ident(role_name)))
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {}", quote_ident(role_name))))
         .execute(admin)
         .await;
 }
@@ -244,7 +244,7 @@ pub async fn adopt_app(
         role = quote_ident(&role_name),
         pwd = escape_pg_string(&password),
     );
-    sqlx::query(&alter_sql).execute(admin).await.map_err(|e| {
+    sqlx::query(sqlx::AssertSqlSafe(alter_sql)).execute(admin).await.map_err(|e| {
         DataverseError::provisioning(slug, format!("ALTER ROLE: {}", e))
     })?;
 
@@ -280,18 +280,18 @@ pub async fn drop_app(admin: &PgPool, slug: &str) -> Result<()> {
     .execute(admin)
     .await;
 
-    let _ = sqlx::query(&format!(
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP DATABASE IF EXISTS {} WITH (FORCE)",
         quote_ident(&db_name)
-    ))
+    )))
     .execute(admin)
     .await
     .map_err(|e| DataverseError::provisioning(slug, format!("DROP DATABASE: {}", e)));
 
-    let _ = sqlx::query(&format!(
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP ROLE IF EXISTS {}",
         quote_ident(&role_name)
-    ))
+    )))
     .execute(admin)
     .await
     .map_err(|e| DataverseError::provisioning(slug, format!("DROP ROLE: {}", e)));
