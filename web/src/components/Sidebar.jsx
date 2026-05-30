@@ -1,9 +1,12 @@
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   LogOut, User, Code2, Database, Hammer,
-  GitBranch, X, ExternalLink, TableProperties, ShieldAlert
+  GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
+  Play, Square,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useStudio } from '../context/StudioContext';
+import { statusDot } from '../pages/Studio';
 import { useEffect } from 'react';
 
 const navGroups = [
@@ -19,13 +22,30 @@ const navGroups = [
   },
 ];
 
+const linkClass = ({ isActive }) =>
+  `flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm ${
+    isActive
+      ? 'border-l-3 border-amber-400 bg-gray-700/50 text-white'
+      : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
+  }`;
+
 function Sidebar({ onClose }) {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
+  const { recentApps, selectedSlug, activeTab, onControl } = useStudio();
 
   useEffect(() => {
-    if (onClose) onClose();
-  }, [location.pathname]);
+    onClose?.();
+  }, [location.pathname, onClose]);
+
+  const onStudio = location.pathname === '/studio';
+
+  // Selecting a recent app opens its studio.
+  function handleSelectApp(slug) {
+    navigate(`/studio?app=${encodeURIComponent(slug)}&tab=${activeTab || 'code'}`);
+    onClose?.();
+  }
 
   return (
     <aside className="w-64 h-full bg-gray-800 border-r border-gray-700 flex flex-col">
@@ -71,18 +91,58 @@ function Sidebar({ onClose }) {
                     </li>
                   );
                 }
+                // "Studio" entry: clicking it opens the gallery; the sub-menu
+                // below lists the recently-opened apps for quick switching.
+                if (to === '/studio') {
+                  return (
+                    <li key={to}>
+                      <NavLink to={to} className={linkClass}>
+                        <Icon className={`w-5 h-5${highlight ? ' text-amber-400' : ''}`} />
+                        <span className="flex-1">{label}</span>
+                      </NavLink>
+                      {onStudio && (
+                        <div className="py-0.5">
+                          {recentApps.map((app) => {
+                            const state = (app.state || '').toLowerCase();
+                            const isRunning = state === 'running';
+                            const sel = app.slug === selectedSlug;
+                            return (
+                              <div
+                                key={app.slug}
+                                onClick={() => handleSelectApp(app.slug)}
+                                className={`group flex items-center gap-2.5 pl-11 pr-3 py-1.5 text-[13px] cursor-pointer border-l-3 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${
+                                  sel
+                                    ? 'border-amber-400 bg-gray-700/50 text-white'
+                                    : 'border-transparent text-gray-400 hover:bg-gray-700/30'
+                                }`}
+                              >
+                                <span className={`w-[7px] h-[7px] rounded-full shrink-0 ${statusDot(state)}`} />
+                                <span className="flex-1 truncate">{app.name}</span>
+                                <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {isRunning ? (
+                                    <button onClick={(e) => { e.stopPropagation(); onControl?.(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
+                                      <Square className="w-3 h-3" />
+                                    </button>
+                                  ) : (
+                                    <button onClick={(e) => { e.stopPropagation(); onControl?.(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
+                                      <Play className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {recentApps.length === 0 && (
+                            <div className="pl-11 pr-3 py-2 text-xs text-gray-600 italic">Aucune app récente</div>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                }
                 return (
                   <li key={to}>
-                    <NavLink
-                      to={to}
-                      className={({ isActive }) =>
-                        `flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm ${
-                          isActive
-                            ? 'border-l-3 border-amber-400 bg-gray-700/50 text-white'
-                            : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
-                        }`
-                      }
-                    >
+                    <NavLink to={to} className={linkClass}>
                       <Icon className={`w-5 h-5${highlight ? ' text-amber-400' : ''}`} />
                       <span className="flex-1">{label}</span>
                     </NavLink>

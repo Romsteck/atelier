@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import { Menu, Code2, ExternalLink, Play, Square, RefreshCw, Loader2, Check, AlertCircle, X } from "lucide-react";
@@ -188,6 +188,7 @@ function StudioHeaderInfo() {
 
 function LayoutInner({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
   const location = useLocation();
   const isStudio = location.pathname === '/studio';
   const registerSlot = usePageHeaderSlotRegister();
@@ -206,7 +207,7 @@ function LayoutInner({ children }) {
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <Sidebar onClose={() => setSidebarOpen(false)} />
+        <Sidebar onClose={closeSidebar} />
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">

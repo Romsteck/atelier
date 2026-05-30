@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useSearchParams, useLocation } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
@@ -8,8 +8,8 @@ import DocsTab from '../components/docs/DocsTab';
 import SurveillanceTab from '../components/SurveillanceTab';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
-  ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
-  Eye, EyeOff, ChevronDown, ShieldAlert,
+  ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X,
+  Eye, EyeOff, ShieldAlert,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
@@ -44,62 +44,6 @@ export function statusDot(state) {
   if (s === 'crashed' || s === 'failed') return 'bg-red-400';
   if (s === 'starting') return 'bg-yellow-400 animate-pulse';
   return 'bg-gray-500';
-}
-
-// ── Sidebar ──
-
-function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
-  return (
-    <aside className="w-[220px] min-w-[220px] h-full bg-gray-800/50 border-r border-gray-700 flex flex-col">
-      <div className="px-3 pt-3 pb-2 space-y-2">
-        <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-500">Applications</span>
-        <button
-          onClick={onAdd}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md shadow-xs shadow-blue-500/20 transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          Nouvelle application
-        </button>
-      </div>
-      <div className="flex-1 overflow-y-auto pb-2">
-        {apps.map(app => {
-          const sel = app.slug === selectedSlug;
-          const state = (app.state || '').toLowerCase();
-          const isRunning = state === 'running';
-          return (
-            <div
-              key={app.slug}
-              className={`flex items-center gap-3 px-4 py-2 text-[13px] cursor-pointer transition-[background-color,color] duration-300 ease-out hover:duration-0 group ${
-                sel
-                  ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
-                  : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
-              }`}
-              onClick={() => onSelect(app.slug)}
-            >
-              <span className={`w-[7px] h-[7px] rounded-full shrink-0 ${statusDot(state)}`} />
-              <span className="flex-1 truncate">{app.name}</span>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                {isRunning ? (
-                  <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
-                    <Square className="w-3 h-3" />
-                  </button>
-                ) : (
-                  <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
-                    <Play className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-        {apps.length === 0 && (
-          <div className="text-center py-8 text-gray-500 text-xs">
-            Aucune app
-          </div>
-        )}
-      </div>
-    </aside>
-  );
 }
 
 // ── Code Tab ──
@@ -321,7 +265,7 @@ function CreateAppModal({ onClose, onCreated }) {
   const [slug, setSlug] = useState('');
   const [slugManual, setSlugManual] = useState(false);
   const [stack, setStack] = useState('axum-vite');
-  const [visibility, setVisibility] = useState('private');
+  const visibility = 'private';
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -357,14 +301,100 @@ function CreateAppModal({ onClose, onCreated }) {
   );
 }
 
+// ── Apps list (default view when no app is selected) ──
+
+const stackLabel = (s) => STACKS.find(st => st.value === s)?.label || s;
+
+function AppsGallery({ apps, onOpen, onAdd, onControl }) {
+  return (
+    <div className="h-full overflow-y-auto p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Applications</h2>
+        <button
+          onClick={onAdd}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" /> Nouvelle application
+        </button>
+      </div>
+      <table className="w-full text-[13px] border-collapse">
+        <thead>
+          <tr className="text-left text-[11px] uppercase tracking-wider text-gray-500 border-b border-gray-700">
+            <th className="w-0 py-2 pl-3 pr-2" />
+            <th className="font-medium py-2 px-2">Nom</th>
+            <th className="font-medium py-2 px-2">Stack</th>
+            <th className="font-medium py-2 px-2 hidden md:table-cell">Lien</th>
+            <th className="font-medium py-2 px-2">Port</th>
+            <th className="w-0 py-2 pr-3 pl-2" />
+          </tr>
+        </thead>
+        <tbody>
+          {apps.map(app => {
+            const state = (app.state || '').toLowerCase();
+            const isRunning = state === 'running';
+            return (
+              <tr
+                key={app.slug}
+                onClick={() => onOpen(app.slug)}
+                className="group cursor-pointer border-b border-gray-800 transition-[background-color,color] duration-300 ease-out hover:duration-0 hover:bg-gray-700/30"
+              >
+                <td className="py-2 pl-3 pr-2">
+                  <span className={`block w-[9px] h-[9px] rounded-full ${statusDot(state)}`} title={state || 'unknown'} />
+                </td>
+                <td className="py-2 px-2 font-medium text-gray-200 group-hover:text-white">
+                  <span className="inline-flex items-center gap-1.5">
+                    {app.name}
+                    {app.has_db && <Database className="w-3 h-3 text-gray-500" title="Base de données" />}
+                  </span>
+                </td>
+                <td className="py-2 px-2 text-gray-400">{stackLabel(app.stack)}</td>
+                <td className="py-2 px-2 hidden md:table-cell">
+                  <a
+                    href={`/apps/${app.slug}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300"
+                    title={`Ouvrir /apps/${app.slug}/`}
+                  >
+                    /apps/{app.slug}/ <ExternalLink className="w-3 h-3" />
+                  </a>
+                </td>
+                <td className="py-2 px-2 text-gray-400 font-mono">{app.port ?? '-'}</td>
+                <td className="py-2 pr-3 pl-2 text-right">
+                  <span className="inline-flex opacity-0 group-hover:opacity-100 transition-opacity">
+                    {isRunning ? (
+                      <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'stop'); }} className="p-1 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
+                        <Square className="w-3.5 h-3.5" />
+                      </button>
+                    ) : (
+                      <button onClick={e => { e.stopPropagation(); onControl(app.slug, 'start'); }} className="p-1 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
+                        <Play className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+          {apps.length === 0 && (
+            <tr><td colSpan={6} className="py-8 text-center text-gray-600">Aucune application</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════
 // ██ MAIN STUDIO COMPONENT
 // ══════════════════════════════════════════════════════════════════
 
 export default function Studio() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
   const [apps, setApps] = useState([]);
-  const [selectedSlug, setSelectedSlug] = useState(() => searchParams.get('app') || localStorage.getItem('studio:selectedApp') || '');
+  const [selectedSlug, setSelectedSlug] = useState(() => searchParams.get('app') || '');
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'code');
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -377,9 +407,15 @@ export default function Studio() {
   // Code-server lazy-load: keep opened iframes alive
   const [openedCode, setOpenedCode] = useState(() => {
     const init = new Set();
-    const s = searchParams.get('app') || localStorage.getItem('studio:selectedApp');
-    if (s && (searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'code') === 'code') init.add(s);
+    const s = searchParams.get('app');
+    if (s && (searchParams.get('tab') || 'code') === 'code') init.add(s);
     return init;
+  });
+
+  // Recently-opened apps (slugs, most-recent-first) — feeds the nav sub-menu
+  const [recentSlugs, setRecentSlugs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('studio:recentApps')) || []; }
+    catch { return []; }
   });
 
   // ── Fetch apps list ──
@@ -389,7 +425,6 @@ export default function Studio() {
       const d = res.data?.data || res.data;
       const list = d?.apps || (Array.isArray(d) ? d : []);
       setApps(Array.isArray(list) ? list : []);
-      if (list.length > 0 && !selectedSlug) setSelectedSlug(list[0].slug);
     } catch {}
     finally { setLoading(false); }
   }, []);
@@ -403,9 +438,18 @@ export default function Studio() {
     getAppStatus(selectedSlug).then(r => setStatus(r.data?.data || r.data)).catch(() => {});
   }, [selectedSlug]);
 
-  // ── Persist selection ──
-  useEffect(() => { if (selectedSlug) localStorage.setItem('studio:selectedApp', selectedSlug); }, [selectedSlug]);
+  // ── Persist last-used tab ──
   useEffect(() => { localStorage.setItem('studio:activeTab', activeTab); }, [activeTab]);
+
+  // ── Track recently-opened apps ──
+  useEffect(() => {
+    if (!selectedSlug) return;
+    setRecentSlugs(prev => {
+      const next = [selectedSlug, ...prev.filter(s => s !== selectedSlug)].slice(0, 8);
+      try { localStorage.setItem('studio:recentApps', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [selectedSlug]);
 
   // ── Real-time via WS ──
   useWebSocket({
@@ -418,13 +462,28 @@ export default function Studio() {
     },
   });
 
-  // ── Handlers ──
-  function handleSelectApp(slug) {
-    setSelectedSlug(slug);
-    setSearchParams({ app: slug, tab: activeTab });
-    if (activeTab === 'code') {
-      setOpenedCode(prev => { if (prev.has(slug)) return prev; const n = new Set(prev); n.add(slug); return n; });
+  // ── Sync selection + tab from the URL (nav clicks, deep-links, back/forward) ──
+  // On /studio, no ?app= means "show the gallery" → clear the selection.
+  useEffect(() => {
+    if (location.pathname !== '/studio') return;
+    const urlApp = searchParams.get('app') || '';
+    const urlTab = searchParams.get('tab');
+    if (urlApp !== selectedSlug) setSelectedSlug(urlApp);
+    if (urlTab && urlTab !== activeTab) setActiveTab(urlTab);
+  }, [searchParams, location.pathname, selectedSlug, activeTab]);
+
+  // ── Keep the code-server iframe mounted for the selected app ──
+  useEffect(() => {
+    if (activeTab === 'code' && selectedSlug) {
+      setOpenedCode(prev => prev.has(selectedSlug) ? prev : new Set(prev).add(selectedSlug));
     }
+  }, [activeTab, selectedSlug]);
+
+  // ── Handlers ──
+  const handleAddApp = useCallback(() => setShowCreate(true), []);
+
+  function handleOpenApp(slug) {
+    setSearchParams({ app: slug, tab: activeTab || 'code' });
   }
 
   function handleSelectTab(tab) {
@@ -454,7 +513,7 @@ export default function Studio() {
   async function handleDelete() {
     if (!selectedSlug || !confirm(`Supprimer "${selectedSlug}" ?`)) return;
     await deleteApp(selectedSlug);
-    setSelectedSlug('');
+    setSearchParams({});
     setApp(null);
     fetchApps();
   }
@@ -465,73 +524,68 @@ export default function Studio() {
     return true;
   });
 
-  // Publish studio state to global context so Layout's top bar can render it
+  // 4 most-recently-opened apps, resolved to live app objects, for the nav sub-menu
+  const recentApps = useMemo(
+    () => recentSlugs.map(s => apps.find(a => a.slug === s)).filter(Boolean).slice(0, 4),
+    [recentSlugs, apps]
+  );
+
+  // Publish studio state to global context so Layout's top bar + nav can render it
   const { setStudio } = useStudio();
   useEffect(() => {
-    setStudio({ currentApp, status, selectedSlug, activeTab, busy, onControl: handleControl });
-  }, [currentApp, status, selectedSlug, activeTab, busy, handleControl, setStudio]);
+    setStudio({ currentApp, status, selectedSlug, activeTab, busy, onControl: handleControl, recentApps, onAddApp: handleAddApp });
+  }, [currentApp, status, selectedSlug, activeTab, busy, handleControl, recentApps, handleAddApp, setStudio]);
 
   if (loading) return <div className="flex items-center justify-center h-full"><Loader2 className="w-8 h-8 animate-spin text-blue-400" /></div>;
 
   return (
     <div className="flex h-full overflow-hidden">
-      <AppSidebar
-        apps={apps}
-        selectedSlug={selectedSlug}
-        onSelect={handleSelectApp}
-        onAdd={() => setShowCreate(true)}
-        busy={busy}
-        onControl={handleControl}
-      />
-
       <div className="flex flex-col flex-1 min-w-0 h-full">
-        {/* Tabs */}
-        <div className="flex items-center h-[38px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
-          {visibleTabs.map(tab => {
-            const active = tab.id === activeTab;
-            const Icon = tab.icon;
-            return (
-              <button key={tab.id} onClick={() => handleSelectTab(tab.id)}
-                className={`relative h-full px-4 border-none cursor-pointer text-[13px] bg-transparent transition-colors flex items-center gap-1.5 ${active ? 'text-white font-medium' : 'text-gray-400 hover:text-gray-200'}`}>
-                <Icon className="w-3.5 h-3.5" />
-                {tab.label}
-                {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}
-              </button>
-            );
-          })}
-        </div>
+        {/* Tabs — only when an app is open */}
+        {selectedSlug && (
+          <div className="flex items-center h-[38px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
+            {visibleTabs.map(tab => {
+              const active = tab.id === activeTab;
+              const Icon = tab.icon;
+              return (
+                <button key={tab.id} onClick={() => handleSelectTab(tab.id)}
+                  className={`relative h-full px-4 border-none cursor-pointer text-[13px] bg-transparent transition-colors flex items-center gap-1.5 ${active ? 'text-white font-medium' : 'text-gray-400 hover:text-gray-200'}`}>
+                  <Icon className="w-3.5 h-3.5" />
+                  {tab.label}
+                  {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-hidden relative">
-          {!selectedSlug ? (
-            <div className="flex flex-col items-center justify-center h-full text-gray-500">
-              <Code2 className="w-12 h-12 mb-3 opacity-20" />
-              <p className="text-sm">Selectionnez un projet pour commencer</p>
-              <button onClick={() => setShowCreate(true)} className="mt-4 px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Nouvelle app</button>
+          {/* Code iframes: always mounted (keep-alive), shown only for the selected app on the code tab */}
+          {[...openedCode].map(slug => {
+            const visible = !!selectedSlug && activeTab === 'code' && selectedSlug === slug;
+            return (
+              <div key={slug} className="absolute inset-0" style={visible ? { visibility: 'visible', zIndex: 1 } : { visibility: 'hidden', zIndex: 0, pointerEvents: 'none' }}>
+                <CodeTab slug={slug} />
+              </div>
+            );
+          })}
+
+          {/* Default view: apps gallery (no app selected) */}
+          {!selectedSlug && (
+            <AppsGallery apps={apps} onOpen={handleOpenApp} onAdd={() => setShowCreate(true)} onControl={handleControl} />
+          )}
+
+          {/* Non-code tabs */}
+          {selectedSlug && activeTab !== 'code' && (
+            <div className="h-full">
+              {activeTab === 'db' && currentApp?.has_db && <DbExplorer appSlug={selectedSlug} embedded />}
+              {activeTab === 'logs' && <LogsTab slug={selectedSlug} />}
+              {activeTab === 'docs' && <DocsTab slug={selectedSlug} />}
+              {activeTab === 'surveillance' && <SurveillanceTab slug={selectedSlug} />}
+              {activeTab === 'env' && <EnvTab slug={selectedSlug} />}
+              {activeTab === 'settings' && <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />}
             </div>
-          ) : (
-            <>
-              {/* Code iframes: lazy-loaded, kept alive when hidden */}
-              {[...openedCode].map(slug => {
-                const visible = activeTab === 'code' && selectedSlug === slug;
-                return (
-                  <div key={slug} className="absolute inset-0" style={visible ? { visibility: 'visible', zIndex: 1 } : { visibility: 'hidden', zIndex: 0, pointerEvents: 'none' }}>
-                    <CodeTab slug={slug} />
-                  </div>
-                );
-              })}
-              {/* Other tabs */}
-              {activeTab !== 'code' && (
-                <div className="h-full">
-                  {activeTab === 'db' && currentApp?.has_db && <DbExplorer appSlug={selectedSlug} embedded />}
-                  {activeTab === 'logs' && <LogsTab slug={selectedSlug} />}
-                  {activeTab === 'docs' && <DocsTab slug={selectedSlug} />}
-                  {activeTab === 'surveillance' && <SurveillanceTab slug={selectedSlug} />}
-                  {activeTab === 'env' && <EnvTab slug={selectedSlug} />}
-                  {activeTab === 'settings' && <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />}
-                </div>
-              )}
-            </>
           )}
         </div>
       </div>

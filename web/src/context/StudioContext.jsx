@@ -6,9 +6,11 @@ const DEFAULTS = {
   currentApp: null,
   status: null,
   selectedSlug: '',
-  activeTab: 'overview',
+  activeTab: 'code',
   busy: false,
   onControl: null,
+  recentApps: [],
+  onAddApp: null,
 };
 
 export function StudioProvider({ children }) {
