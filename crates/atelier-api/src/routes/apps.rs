@@ -2,7 +2,7 @@
 //!
 //! Lecture **et** écriture sur `state.app_registry` + `state.supervisor`.
 //! Atelier devient le canonical writer post-cutover. Les routes appellent
-//! directement la lib `atelier-apps` (pas d'IPC orchestrator côté CloudMaster).
+//! directement la lib `atelier-apps` (pas d'IPC orchestrator séparé).
 //!
 //! Endpoints exposés :
 //! - GET    /api/apps            (list)

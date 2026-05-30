@@ -95,7 +95,7 @@ pub struct AppsContext {
     pub dataverse_manager: Option<Arc<DataverseManager>>,
     pub context_generator: Arc<ContextGenerator>,
     /// `None` when Atelier cannot reach the hr-edge IPC socket
-    /// (e.g. running on CloudMaster while hr-edge lives on Medion).
+    /// (câblage edge à reprendre : le socket hr-edge est désormais local).
     /// `set_app_route` / `remove_app_route` calls are then skipped with a warn.
     pub edge: Option<Arc<EdgeClient>>,
     pub git: Arc<atelier_git::GitService>,
@@ -942,7 +942,7 @@ impl AppsContext {
 }
 
 impl AppsContext {
-    /// Build an app remotely on the configured CloudMaster host.
+    /// Build an app remotely on the configured build host (ATELIER_BUILD_HOST).
     ///
     /// Steps :
     /// 1. SSH probe (fast-fail with actionable error if not configured).
@@ -1092,7 +1092,7 @@ impl AppsContext {
                 if probe.exit_code != 0 {
                     error!(slug = %slug, exit_code = probe.exit_code, stderr = %truncate(&probe.stderr, 512), "build: ssh probe failed");
                     return acc.into_result(format!(
-                        "ssh probe failed (host {host}); ensure SSH key {key} can log into CloudMaster (BatchMode)"
+                        "ssh probe failed (host {host}); ensure SSH key {key} can log into the build host (BatchMode)"
                     ), started);
                 }
 
@@ -1394,7 +1394,7 @@ impl AppsContext {
     }
 
     /// Broadcast an externally-supplied AppBuildEvent on the per-app channel.
-    /// Used by the `app-build` skill (running locally on CloudMaster) to keep
+    /// Used by the `app-build` skill (running locally on Medion) to keep
     /// the Studio's per-app live panel in sync with build progress.
     #[allow(clippy::too_many_arguments)]
     pub async fn emit_external_build_event(
@@ -1425,9 +1425,9 @@ impl AppsContext {
         IpcResponse::ok_data(serde_json::json!({ "ok": true }))
     }
 
-    /// Ship pre-built artefacts from CloudMaster to Medion + restart the
+    /// Ship pre-built artefacts from a remote build host to Medion + restart the
     /// supervised process. Skips compile (the agent already ran the build
-    /// locally on CloudMaster). Steps: stop → rsync-back per artefact → restart.
+    /// on the build host). Steps: stop → rsync-back per artefact → restart.
     /// Emits AppBuildEvents on the per-app channel so the Studio panel reflects
     /// progress.
     pub async fn ship(&self, slug: String, timeout_secs: Option<u64>) -> IpcResponse {
@@ -1717,7 +1717,7 @@ impl AppsContext {
 /// support remote build, or `None` for unsupported stacks.
 /// Parse a single line of the `build_artefact` spec. Lines starting with
 /// `?` are treated as **optional** artefacts: the rsync skips silently if
-/// the source path is absent on CloudMaster, instead of erroring out.
+/// the source path is absent on the build host, instead of erroring out.
 /// Used for inputs like custom-server bundles (`server.js` for Next.js
 /// custom-HTTP-handler apps) that some apps emit and others don't.
 ///

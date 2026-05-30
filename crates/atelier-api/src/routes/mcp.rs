@@ -67,9 +67,9 @@ impl McpState {
         if token.is_empty() {
             return None;
         }
-        // hr-edge socket vit sur Medion. Atelier (CloudMaster) ne peut pas
-        // l'atteindre depuis ici → `edge: None` ; les call sites set/remove
-        // route s'auto-skip avec un warn.
+        // Gestion des routes hr-edge non câblée ici (`edge: None`) ; les call
+        // sites set/remove route s'auto-skip avec un warn. À reprendre : le
+        // socket hr-edge est désormais local (même hôte), donc atteignable.
         let edge = None;
         let (app_build_tx, _) = tokio::sync::broadcast::channel(256);
         let apps_ctx = crate::mcp::apps_ops::AppsContext {
@@ -1257,7 +1257,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "app.build",
-            "description": "Build an app remotely on CloudMaster (rsync src up, build, rsync artefacts down). Synchronous; bounded by `timeout_secs` (default 1800 = 30 min). Stacks: axum, axum-vite, next-js. Returns AppExecResult (stdout/stderr/exit_code/duration_ms).",
+            "description": "Build an app remotely on the configured build host (ATELIER_BUILD_HOST; rsync src up, build, rsync artefacts down). Synchronous; bounded by `timeout_secs` (default 1800 = 30 min). Stacks: axum, axum-vite, next-js. Returns AppExecResult (stdout/stderr/exit_code/duration_ms).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

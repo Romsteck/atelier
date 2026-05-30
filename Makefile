@@ -1,61 +1,111 @@
-.PHONY: all atelier web deploy deploy-medion deploy-app logs clean test help
+.PHONY: all atelier web web-deps deploy deploy-local deploy-remote deploy-app logs clean test help
 
-# Atelier vit désormais sur Medion. Les sources des apps restent sur
-# CloudMaster (édition via code-server). Le Makefile build localement et
-# pousse les artefacts vers Medion.
+# Atelier et ses sources vivent sur Medion (/home/romain/atelier), édité via
+# code-server@romain (127.0.0.1:8081). `make deploy` build EN PLACE sur Medion
+# et installe localement dans /opt/atelier (plus de cross-build/rsync distant).
+# Le fallback `deploy-remote` (build local + rsync/SSH) reste pour un lancement
+# hors Medion.
 
-MEDION ?= romain@10.0.0.254
-ATELIER_API ?= http://10.0.0.254:4100
+MEDION      ?= romain@10.0.0.254
+# Build et runtime co-localisés sur Medion → healthcheck en loopback.
+ATELIER_API ?= http://127.0.0.1:4100
 
-ATELIER_BIN_LOCAL := target/release/atelier
-ATELIER_FLOWD_BIN_LOCAL := target/release/atelier-flowd
-WEB_DIST_LOCAL := web/dist
+ATELIER_BIN_LOCAL   := target/release/atelier
+WEB_DIST_LOCAL      := web/dist
 # App-side logging SDK. Standalone crate (not a workspace member) consumed by
-# the apps as a path-dep; apps build on Medion so its source must live there.
-# Canonical source is here in the Atelier repo; deploy syncs it to Medion.
+# the apps via an ABSOLUTE path-dep `/opt/atelier/crates/atelier-logging-shipper`
+# (files, home, wallet, myfrigo). Must be (re)copied there after every change,
+# wherever the source lives.
 SHIPPER_CRATE_LOCAL := crates/atelier-logging-shipper
+
+PREFIX       ?= /opt/atelier
+BIN_DST      := $(PREFIX)/bin/atelier
+WEB_DIST_DST := $(PREFIX)/web/dist
+SHIPPER_DST  := $(PREFIX)/crates/atelier-logging-shipper
+
+IS_MEDION := $(shell [ "$$(uname -n)" = medion ] && echo yes || echo no)
 
 help:
 	@echo "Targets:"
 	@echo "  atelier            cargo build --release -p atelier (local)"
-	@echo "  web                build frontend (web/dist) (local)"
-	@echo "  deploy             build all + push binary + web/dist to Medion + restart atelier.service"
-	@echo "  deploy-app SLUG=x  build + rsync app x to Medion + restart via API"
-	@echo "  logs               tail journalctl atelier on Medion"
+	@echo "  web                npm ci (si besoin) + build frontend (web/dist)"
+	@echo "  deploy             build + install dans /opt/atelier + restart atelier.service"
+	@echo "                     (en place sur Medion, sinon fallback rsync/SSH)"
+	@echo "  deploy-app SLUG=x  build app x + restart via API (cf. scripts/deploy-app.sh)"
+	@echo "  logs               tail journalctl atelier (local sur Medion, sinon SSH)"
 	@echo "  test               cargo test --workspace"
 	@echo "  clean              cargo clean"
 	@echo ""
 	@echo "Variables (override on command line):"
-	@echo "  MEDION       (default: $(MEDION))"
+	@echo "  MEDION       (default: $(MEDION))   — cible SSH du fallback deploy-remote"
 	@echo "  ATELIER_API  (default: $(ATELIER_API))"
+	@echo "  PREFIX       (default: $(PREFIX))"
+	@echo "  IS_MEDION    (auto: $(IS_MEDION))"
 
 all: atelier web
 
 atelier:
 	cargo build --release -p atelier
 
-web:
-	cd web && npm run build
+# node_modules est gitignoré (non versionné) → install des deps avant le build.
+# `npm ci` est reproductible (piloté par package-lock.json) ; web/.npmrc porte
+# legacy-peer-deps=true (conflit eslint v10 / eslint-plugin-react). On (ré)installe
+# seulement si node_modules manque ou si le lockfile est plus récent.
+web-deps:
+	cd web && { [ -d node_modules ] && [ node_modules -nt package-lock.json ] || npm ci; }
 
-# Push binary + frontend to Medion + restart Atelier service.
-deploy: deploy-medion
+web: web-deps
+	cd web && CI=1 npm run build
 
-deploy-medion: atelier web
+deploy:
+ifeq ($(IS_MEDION),yes)
+	@$(MAKE) deploy-local
+else
+	@$(MAKE) deploy-remote
+endif
+
+# Build en place sur Medion + install locale (sudo) dans /opt/atelier.
+deploy-local: atelier web
 	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting (a --delete rsync would wipe prod web)" >&2; exit 1; }
-	@echo "→ rsync atelier binary + web/dist to Medion"
-	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):/opt/atelier/bin/atelier.new
-	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):/opt/atelier/web/dist/
-	@echo "→ rsync app-SDK crate (atelier-logging-shipper) to Medion"
 	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
-	ssh $(MEDION) 'sudo mkdir -p /opt/atelier/crates'
-	rsync -a --rsync-path='sudo rsync' --delete --exclude=target --exclude=Cargo.lock \
-	  $(SHIPPER_CRATE_LOCAL)/ $(MEDION):/opt/atelier/crates/atelier-logging-shipper/
-	@echo "→ atomic swap + restart atelier.service on Medion"
-	ssh $(MEDION) 'sudo install -o root -g root -m 0755 /opt/atelier/bin/atelier.new /opt/atelier/bin/atelier && sudo rm /opt/atelier/bin/atelier.new && sudo systemctl restart atelier.service'
-	@echo "→ healthcheck (poll /api/health)"
+	sudo install -d -o root -g root -m 0755 $(PREFIX)/bin $(PREFIX)/web $(PREFIX)/crates
+	@echo "→ install atelier binary (atomic: .new + rename)"
+	sudo install -o root -g root -m 0755 $(ATELIER_BIN_LOCAL) $(BIN_DST).new
+	sudo mv -f $(BIN_DST).new $(BIN_DST)
+	@echo "→ sync web/dist → $(WEB_DIST_DST)"
+	sudo rsync -a --delete $(WEB_DIST_LOCAL)/ $(WEB_DIST_DST)/
+	@echo "→ sync shipper crate → $(SHIPPER_DST) (path-dep absolu de 4 apps)"
+	sudo rsync -a --delete --exclude=target --exclude=Cargo.lock $(SHIPPER_CRATE_LOCAL)/ $(SHIPPER_DST)/
+	@echo "→ restart atelier.service"
+	sudo systemctl restart atelier.service
+	@echo "→ healthcheck (poll $(ATELIER_API)/api/health)"
 	@for i in $$(seq 1 15); do \
 	  if curl -fsS $(ATELIER_API)/api/health >/dev/null 2>&1; then \
+	    echo "  atelier healthy after $${i}s"; exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "error: atelier healthcheck failed after 15s" >&2; \
+	sudo journalctl -u atelier -n 30 --no-pager; \
+	exit 1
+
+# Fallback legacy : build local puis rsync/SSH vers Medion (lancement hors Medion).
+deploy-remote: atelier web
+	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
+	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting" >&2; exit 1; }
+	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
+	@echo "→ rsync atelier binary + web/dist to $(MEDION)"
+	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):$(BIN_DST).new
+	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):$(WEB_DIST_DST)/
+	ssh $(MEDION) 'sudo mkdir -p $(SHIPPER_DST)'
+	rsync -a --rsync-path='sudo rsync' --delete --exclude=target --exclude=Cargo.lock \
+	  $(SHIPPER_CRATE_LOCAL)/ $(MEDION):$(SHIPPER_DST)/
+	@echo "→ atomic swap + restart atelier.service on $(MEDION)"
+	ssh $(MEDION) 'sudo install -o root -g root -m 0755 $(BIN_DST).new $(BIN_DST) && sudo rm -f $(BIN_DST).new && sudo systemctl restart atelier.service'
+	@echo "→ healthcheck (poll http://10.0.0.254:4100/api/health)"
+	@for i in $$(seq 1 15); do \
+	  if curl -fsS http://10.0.0.254:4100/api/health >/dev/null 2>&1; then \
 	    echo "  atelier healthy after $${i}s"; exit 0; \
 	  fi; \
 	  sleep 1; \
@@ -64,13 +114,16 @@ deploy-medion: atelier web
 	ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager'; \
 	exit 1
 
-# Build + rsync + restart a single app on Medion.
 deploy-app:
 	@if [ -z "$(SLUG)" ]; then echo "error: SLUG=<x> required (e.g. make deploy-app SLUG=files)" >&2; exit 1; fi
 	bash scripts/deploy-app.sh $(SLUG)
 
 logs:
+ifeq ($(IS_MEDION),yes)
+	sudo journalctl -u atelier -f
+else
 	ssh $(MEDION) 'sudo journalctl -u atelier -f'
+endif
 
 test:
 	cargo test --workspace

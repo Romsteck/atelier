@@ -1,5 +1,7 @@
 # Rapatriement Studio Atelier + sources apps : CloudMaster → Medion (2026-05-27)
 
+> ⚠️ **HISTORIQUE** — à cette date le source Atelier + le code-server perso restaient sur CloudMaster. Depuis le **2026-05-31** ils sont aussi sur Medion et **CloudMaster est décommissionné**. La section « Quoi reste sur CM » ci-dessous est caduque.
+
 ## Quoi a bougé
 
 - **Service code-server (Studio)** : `hr-studio.service` (CM, 10.0.0.10:8443) → `atelier-studio.service` (Medion, 127.0.0.1:8443, alias `hr-studio.service`).

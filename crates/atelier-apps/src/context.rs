@@ -96,7 +96,7 @@ impl ContextGenerator {
     /// Variante explicite de [`Self::generate_for_app`] qui prend en paramètre
     /// le `src_dir` cible (au lieu de `app.src_dir()` hardcodé). Utilisé par
     /// AppCreate pour générer le contexte dans un tmpdir local avant rsync UP
-    /// vers CloudMaster.
+    /// (héritage hôte de build séparé ; désormais build en place sur Medion).
     ///
     /// `cleanup_legacy_parent` contrôle si on supprime les vestiges au niveau
     /// `{apps_path}/{slug}/` (CLAUDE.md/.mcp.json/.claude/) — utile pour la
@@ -684,9 +684,9 @@ flowchart LR
     )
 }
 
-/// Self-contained bash script that runs the build LOCALLY on CloudMaster
+/// Self-contained bash script that runs the build LOCALLY on Medion
 /// (where the agent + sources live) and emits status events to the Studio's
-/// per-app live panel via the homeroute API on Medion.
+/// per-app live panel via the Atelier API.
 ///
 /// The agent sees the cargo/pnpm output streamed in its terminal; the Studio
 /// sees only the start/end milestones (no log forwarding).
@@ -696,7 +696,7 @@ fn render_app_build_script(app: &Application) -> String {
         .as_deref()
         .unwrap_or("echo 'no build_command configured'; exit 1");
     let template = r#"#!/usr/bin/env bash
-# Build local de l'app `__SLUG__` (sources et toolchain sur CloudMaster).
+# Build local de l'app `__SLUG__` (sources et toolchain sur Medion).
 # Émet des events au Studio (panel per-app live) via /api/apps/__SLUG__/build-event.
 # Géré par Atelier — ne pas éditer (régénéré à chaque AppUpdate).
 set -euo pipefail
@@ -787,7 +787,7 @@ fn render_app_deploy_skill(app: &Application) -> String {
          \n\
          ## Workflow type\n\
          \n\
-         1. `bash .claude/skills/app-build/build.sh`  (build local sur CloudMaster, voir output cargo)\n\
+         1. `bash .claude/skills/app-build/build.sh`  (build local sur Medion, voir output cargo)\n\
          2. `bash .claude/skills/app-deploy/deploy.sh`  (livre + restart sur Medion)\n\
          3. Vérifier dans le panel Studio que l'app est `running`.\n\
          \n\
@@ -838,13 +838,13 @@ fn render_app_build_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: app-build\n\
-         description: Build local de l'application {slug} ({stack}) sur CloudMaster (toolchain locale, output cargo/pnpm visible en live). Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app.\n\
+         description: Build local de l'application {slug} ({stack}) sur Medion (toolchain locale, output cargo/pnpm visible en live). Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app.\n\
          allowed-tools: Bash(bash .claude/skills/app-build/build.sh*)\n\
          ---\n\
          \n\
-         # Build de l'app `{slug}` (local sur CloudMaster)\n\
+         # Build de l'app `{slug}` (local sur Medion)\n\
          \n\
-         Cette skill compile l'app **directement** sur CloudMaster (où vivent sources et toolchain). \
+         Cette skill compile l'app **directement** sur Medion (où vivent sources et toolchain). \
          L'output (cargo, pnpm, etc.) est visible en live dans ton terminal. Le Studio est notifié en parallèle via `/api/apps/{slug}/build-event` pour afficher l'état dans le panel per-app.\n\
          \n\
          **Important** : ce build NE LIVRE PAS l'artefact à Medion. Pour livrer + restart en prod, enchaîne ensuite avec :\n\
@@ -958,7 +958,7 @@ fn render_app_info_md(
          - **Port interne :** {port}\n\
          - **Health check :** `{health}`\n\
          - **Commande de run :** `{run}`\n\
-         - **Commande de build (CloudMaster) :** `{build}`\n\
+         - **Commande de build (Medion) :** `{build}`\n\
          - **Dossier source (workspace) :** `{src_dir}`\n\
          \n\
          ## Base de données\n\

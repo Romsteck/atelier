@@ -38,7 +38,7 @@ const HEALTH_FAIL_THRESHOLD: u32 = 6;
 /// permanently-wedged app restarts at most once per window instead of looping.
 const HEALTH_ESCALATION_COOLDOWN: Duration = Duration::from_secs(300);
 /// Default systemd slice for apps spawned by Atelier. Override with
-/// `ATELIER_APP_SLICE` (used during the CloudMaster→Medion transition where
+/// `ATELIER_APP_SLICE` (used during the 2026-05 rapatriement where
 /// the legacy slice name `hr-apps.slice` must be preserved).
 fn slice_name() -> String {
     std::env::var("ATELIER_APP_SLICE").unwrap_or_else(|_| "atelier-apps.slice".to_string())
@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn unit_name_format_legacy_override() {
-        // The CloudMaster .env sets ATELIER_APP_UNIT_PREFIX=hr-app to keep
+        // The legacy .env set ATELIER_APP_UNIT_PREFIX=hr-app to keep
         // managing the pre-rename services during the migration window.
         unsafe {
             std::env::set_var("ATELIER_APP_UNIT_PREFIX", "hr-app");

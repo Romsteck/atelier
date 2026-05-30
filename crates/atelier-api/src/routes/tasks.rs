@@ -1,9 +1,7 @@
-//! Read-only tasks routes (Phase 8).
+//! Tasks routes.
 //!
-//! Atelier consomme un snapshot du `tasks.db` de Medion via sync-state.timer
-//! (rsync .backup d'une SQLite WAL toutes les 2 min) et expose les mêmes
-//! endpoints que homeroute hr-api. La mutation `POST /tasks/:id/cancel` est
-//! refusée (503) — seul homeroute peut annuler une task active.
+//! Les tâches sont lues depuis le `TaskStore` Atelier (Postgres `atelier_meta`).
+//! Voir crates/atelier/src/main.rs pour l'init du store.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;

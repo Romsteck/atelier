@@ -40,8 +40,9 @@ pub async fn scaffold_stack_template(app: &Application) -> anyhow::Result<()> {
 }
 
 /// Variante explicite : scaffold le template stack dans `src` (au lieu de
-/// `app.src_dir()` hardcodé). Utilisé par AppCreate quand les sources vivent
-/// sur CloudMaster — on génère localement dans un tmpdir puis on rsync UP.
+/// `app.src_dir()` hardcodé). Utilisé par AppCreate (héritage de l'époque où
+/// les sources vivaient sur un hôte de build séparé : génération en tmpdir
+/// puis rsync UP ; désormais on écrit directement dans le src/runtime root).
 #[tracing::instrument(skip(app, src), fields(slug = %app.slug, stack = ?app.stack, target = %src.display()))]
 pub async fn scaffold_stack_template_at(app: &Application, src: &Path) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(src).await?;

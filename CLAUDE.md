@@ -55,17 +55,16 @@ Internet → Cloudflare → Medion (10.0.0.254)
                           ├─ hr-edge (proxy + ACME + auth + tunnel)
                           │   ├─ app.mynetwk.biz       → 127.0.0.1:4100      (Atelier API + frontend)
                           │   ├─ codeserver.mynetwk.biz → 127.0.0.1:8443     (Studio code-server)
-                          │   ├─ atelier.mynetwk.biz    → 127.0.0.1:4100     (Atelier)
-                          │   └─ code.mynetwk.biz       → 10.0.0.10:9080     (code-server perso CM)
+                          │   └─ atelier.mynetwk.biz    → 127.0.0.1:4100     (Atelier)
                           ├─ atelier.service (4100) — supervisor + apps API + frontend
                           ├─ atelier-studio.service (127.0.0.1:8443) — code-server pour apps
+                          ├─ code-server@romain.service (127.0.0.1:8081) — édition source Atelier
+                          ├─ /home/romain/atelier — sources Atelier (édition + make deploy en place)
                           ├─ atelier-app-{files,home,myfrigo,trader,wallet,www}.service
                           ├─ hr-edge.service / hr-orchestrator.service / homeroute.service
                           └─ Postgres-dataverse (5432)
 
-CloudMaster (10.0.0.10)  ← reste allumé
-  ├─ /nvme/atelier/  — sources Atelier (édition + make deploy)
-  └─ code-server@romain.service (9080, code.mynetwk.biz) — usage perso (édite Atelier, etc.)
+CloudMaster (10.0.0.10)  ← décommissionné (2026-05-31)
 ```
 
 ## Stockage
@@ -82,7 +81,7 @@ CloudMaster (10.0.0.10)  ← reste allumé
 | Postgres-dataverse | Medion 127.0.0.1:5432 (local depuis Atelier) |
 | dataverse-secrets.json | `/var/lib/atelier/state/dataverse-secrets.json` (Medion) |
 | **Files data (raid0)** | `/ssd_pool/homecloud/data/{files,thumbnails,downloads,films}` (Medion zfs pool) |
-| Sources Atelier (code) | `/nvme/atelier/` (CloudMaster — édition + `make deploy`) |
+| Sources Atelier (code) | `/home/romain/atelier` (Medion — édition via code-server@romain :8081, build en place) |
 
 ## Ports & sockets
 
@@ -91,8 +90,8 @@ CloudMaster (10.0.0.10)  ← reste allumé
 | 4100 | Medion | Atelier HTTP API |
 | /run/atelier.sock | Medion | Atelier IPC |
 | 3005-3010 | Medion (loopback) | Apps |
-| 8443 | Medion (loopback) | atelier-studio.service (code-server) |
-| 9080 | CloudMaster | code-server perso (`code.mynetwk.biz`) |
+| 8443 | Medion (loopback) | atelier-studio.service (code-server apps) |
+| 8081 | Medion (loopback) | code-server@romain (édition source Atelier) |
 
 ## Variables d'environnement Atelier (Medion `/opt/atelier/.env`)
 
@@ -106,32 +105,34 @@ ATELIER_DV_HOST=127.0.0.1
 
 ## Build & deploy
 
-### Atelier lui-même (depuis CloudMaster)
+### Atelier lui-même (build en place sur Medion)
 
-Le code source d'Atelier (`/nvme/atelier/`) vit sur CloudMaster, édité via le code-server perso (`code.mynetwk.biz`).
+Le code source d'Atelier vit sur Medion à `/home/romain/atelier`, édité via `code-server@romain.service` (127.0.0.1:8081). Build, install et restart se font **en local** (plus de rsync/SSH vers un hôte distant).
 
 ```bash
 make help              # tous les targets
-make atelier           # cargo build --release -p atelier (local CM)
-make web               # build frontend (web/dist)
-make deploy            # build CM + push binary + frontend vers Medion + restart atelier.service
-make logs              # tail journalctl atelier sur Medion (via SSH)
+make atelier           # cargo build --release -p atelier (local Medion)
+make web               # npm ci (si besoin) + build frontend (web/dist)
+make deploy            # build + install dans /opt/atelier + restart atelier.service + healthcheck
+make logs              # tail journalctl atelier (local)
 ```
 
-### Apps HomeRoute (depuis CM ou Studio Medion)
+`make deploy` détecte l'hôte : sur Medion → build en place + `sudo install` dans `/opt/atelier` ; ailleurs → fallback `deploy-remote` (build local + rsync/SSH). L'install du binaire est atomique (`.new` + rename), suivie du restart et d'un healthcheck sur `127.0.0.1:4100`.
 
-Les sources des 6 apps vivent désormais sur Medion (`/var/lib/atelier/apps/<slug>/src/`). On les édite via le Studio (`codeserver.mynetwk.biz`). Le `make deploy-app` se lance soit depuis CM (mode SSH automatique vers Medion), soit directement sur Medion via un terminal Studio.
+### Apps HomeRoute
+
+Les sources des 6 apps vivent sur Medion (`/var/lib/atelier/apps/<slug>/src/`), éditées via le Studio (`codeserver.mynetwk.biz`).
 
 ```bash
-make deploy-app SLUG=files   # build sur Medion (local ou via SSH) + restart via API + healthcheck
+make deploy-app SLUG=files   # build sur Medion + restart via API + healthcheck
 ```
 
-Le script (`scripts/deploy-app.sh`) détecte `hostname == medion` → build in-place, sinon → SSH vers Medion. Plus de rsync transversal source/runtime (source = runtime depuis le 2026-05-27).
+Le script (`scripts/deploy-app.sh`) détecte `hostname == medion` → build in-place. Source = runtime depuis le 2026-05-27.
 
 ## Règles obligatoires
 
 - **JAMAIS** `cargo run` directement — utiliser `make deploy`.
-- **TOUJOURS** `make deploy` après modification du code Atelier (build CM → rsync Medion → restart).
+- **TOUJOURS** `make deploy` après modification du code Atelier (build en place + install /opt/atelier + restart).
 - **TOUJOURS** `make deploy-app SLUG=<x>` après modification d'une app (build Medion + restart via API).
 - **TOUJOURS** vérifier visuellement après deploy frontend (SW cache-first peut masquer le résultat).
 - **TOUJOURS** tester e2e les endpoints créés/modifiés (cf. `.claude/rules/testing.md`).
@@ -169,4 +170,4 @@ Override possible via env vars `ATELIER_APP_UNIT_PREFIX` / `ATELIER_APP_SLICE` /
 1. Lire `MEMORY.md` global (auto-chargé) et les rules dans `.claude/rules/`.
 2. Si la tâche concerne une app HomeRoute existante (`/var/lib/atelier/apps/{slug}/src/` sur Medion, éditée via Studio), suivre la doctrine **DOC-FIRST** : `mcp__studio__docs_overview` d'abord.
 3. Pour toute fonctionnalité ajoutée à Atelier : doc + tests e2e + logging structuré.
-4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier sur Medion (`https://app.mynetwk.biz/api/...` ou `ssh romain@10.0.0.254 "sudo journalctl -u atelier..."`).
+4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier (`https://app.mynetwk.biz/api/...` ou, en local sur Medion, `sudo journalctl -u atelier...`).

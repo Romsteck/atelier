@@ -1,5 +1,7 @@
 # Plan — Extraction Atelier (couche applicative hors homeroute)
 
+> ⚠️ **HISTORIQUE** — décision révisée : Atelier puis ses sources ont été rapatriés sur Medion ; **CloudMaster est décommissionné (2026-05-31)**. Voir `CLAUDE.md` pour l'état courant.
+
 ## Context
 
 Le repo `/nvme/homeroute/` héberge aujourd'hui deux produits qui n'ont rien en commun fonctionnellement : un **routeur réseau** (DNS, DHCP, reverse proxy, ACME, monitoring hosts) et une **plateforme applicative** (apps supervisées, Dataverse Postgres, moteur de flows, Studio, docs, MCP). Les deux se contraignent mutuellement : impossible de redémarrer l'edge librement à cause des apps, impossible de déployer la plateforme en entreprise sans embarquer DNS/DHCP, releases/tests imbriqués, frontend monolithique.

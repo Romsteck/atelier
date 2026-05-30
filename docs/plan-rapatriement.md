@@ -1,5 +1,7 @@
 # Plan — Rapatriement Atelier sur Medion
 
+> ⚠️ **HISTORIQUE** — ce plan documente le rapatriement du binaire/Studio en gardant le source Atelier + son build sur CloudMaster. Depuis le **2026-05-31**, le source et le build ont aussi été rapatriés sur Medion (`/home/romain/atelier`) et **CloudMaster est décommissionné**. Voir `CLAUDE.md` pour l'état courant.
+
 ## Contexte
 
 **But initial de l'extraction Studio → Atelier** (rappelé par l'utilisateur) :
