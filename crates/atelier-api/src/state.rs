@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use atelier_logging::LogIngestService;
 use atelier_watcher::SurveillanceService;
-use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry, db_manager::DbManager};
+use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
 use atelier_common::events::EventBus;
 use atelier_common::task_store::TaskStore;
@@ -33,7 +33,6 @@ pub struct ApiState {
     pub app_registry: AppRegistry,
     pub port_registry: PortRegistry,
     pub supervisor: Arc<AppSupervisor>,
-    pub db_manager: Arc<DbManager>,
     pub context_generator: Arc<ContextGenerator>,
 
     /// Per-slug build/ship locks, created once at boot and shared by the HTTP
@@ -76,7 +75,6 @@ impl ApiState {
         app_registry: AppRegistry,
         port_registry: PortRegistry,
         supervisor: Arc<AppSupervisor>,
-        db_manager: Arc<DbManager>,
         context_generator: Arc<ContextGenerator>,
         logs: LogIngestService,
         surveillance: SurveillanceService,
@@ -94,7 +92,6 @@ impl ApiState {
             app_registry,
             port_registry,
             supervisor,
-            db_manager,
             context_generator,
             build_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             logs,

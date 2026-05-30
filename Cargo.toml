@@ -14,8 +14,6 @@ members = [
     "crates/atelier-common",
     "crates/atelier-ipc",
     "crates/atelier-dataverse",
-    "crates/atelier-dataverse-migrate",
-    "crates/atelier-db",
     "crates/atelier-docs",
     "crates/atelier-dv-codegen",
     "crates/atelier-dvexpr",
@@ -76,8 +74,6 @@ atelier-common            = { path = "crates/atelier-common" }
 atelier-ipc               = { path = "crates/atelier-ipc" }
 atelier-apps              = { path = "crates/atelier-apps" }
 atelier-dataverse         = { path = "crates/atelier-dataverse" }
-atelier-dataverse-migrate = { path = "crates/atelier-dataverse-migrate" }
-atelier-db                = { path = "crates/atelier-db" }
 atelier-docs              = { path = "crates/atelier-docs" }
 atelier-dv-codegen        = { path = "crates/atelier-dv-codegen" }
 atelier-dvexpr            = { path = "crates/atelier-dvexpr" }

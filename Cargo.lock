@@ -140,11 +140,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atelier-common",
- "atelier-db",
  "chrono",
  "hex",
  "nix",
- "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -187,38 +185,6 @@ dependencies = [
  "sqlx-postgres",
  "thiserror",
  "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "atelier-dataverse-migrate"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "atelier-dataverse",
- "atelier-db",
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "sqlx-core",
- "sqlx-postgres",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "atelier-db"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror",
  "tracing",
  "uuid",
 ]

@@ -192,7 +192,6 @@ async fn ship_app(
     let (app_build_tx, _) = tokio::sync::broadcast::channel(256);
     let ctx = AppsContext {
         supervisor: (*state.supervisor).clone(),
-        db_manager: (*state.db_manager).clone(),
         dataverse_manager: state.dv.clone(),
         context_generator: state.context_generator.clone(),
         edge: None,

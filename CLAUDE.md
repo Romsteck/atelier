@@ -17,6 +17,19 @@
 
 Le système `hr-flow` (lib + daemon + macros + callback + 34 TOML répartis sur 6 apps) a été éradiqué le 2026-05-26. Chaque app a été refondue en code natif (Rust ou TS). Voir [docs/refonte/](docs/refonte/) pour le journal détaillé. Les 4 crates `hr-flow*` ont été supprimées du workspace, le daemon `hr-flowd` désinstallé sur Medion, et toutes les routes/MCP tools/UI flow ont été retirées d'Atelier.
 
+## Migration postgres-dataverse — finalisée (2026-05-30)
+
+Les 6 apps (www, files, home, trader, wallet, myfrigo) tournent sur **postgres-dataverse** (bases `app_{slug}`, provisionnées dans `dataverse-secrets.json`). L'ancien moteur **SQLite** a été supprimé :
+
+- Crates `atelier-db` (moteur SQLite) et `atelier-dataverse-migrate` (outil de migration one-shot) supprimées du workspace.
+- `DbManager` SQLite + ses branches mortes retiré ; tous les handlers MCP `db_*` routent vers le moteur Postgres (`atelier-dataverse`). La génération de contexte lit le schéma depuis Postgres (plus le SQLite périmé).
+- Plus de création de `db.sqlite` ni d'injection d'env `DB_PATH`/`DATABASE_PATH`.
+- Le SQL brut (`db_query`/`db_exec`) renvoie une erreur dirigée vers `dv_*` / la passerelle REST `/api/dv/{slug}/{table}`.
+
+**Différé** — décommission de l'accès Postgres direct : chaque app utilise encore `DATABASE_URL` (sqlx direct) en plus de la passerelle. Couper l'accès direct (drop `DATABASE_URL` dans `sync_dv_env` + revoke LOGIN sur les rôles PG) attend la migration de chaque app en « passerelle uniquement » — cf. [.claude/rules/database-url-decommission-pending.md](.claude/rules/database-url-decommission-pending.md).
+
+Les anciens fichiers `db.sqlite` (snapshots d'avant migration, ~300 Mo) sont archivés puis supprimés sur Medion après vérification de parité Postgres (archive : `/var/backups/atelier-sqlite-snapshots-2026-05-30.tar.gz`).
+
 ---
 
 ## Quoi est Atelier
@@ -55,7 +68,7 @@ CloudMaster (10.0.0.10)  ← reste allumé
 
 | Données | Chemin |
 |---------|--------|
-| Sources canoniques apps (= runtime) | `/var/lib/atelier/apps/{slug}/{src,bin,.env,db.sqlite,runs,todos.json}` (Medion) — édition via Studio |
+| Sources canoniques apps (= runtime) | `/var/lib/atelier/apps/{slug}/{src,bin,.env,runs,todos.json}` (Medion) — édition via Studio. Données app dans Postgres-dataverse (`app_{slug}`), plus de `db.sqlite`. |
 | Studio code-server user-data | `/var/lib/atelier/studio/code-server/` (Medion, hr-studio:hr-studio 750) |
 | Studio user HOME | `/var/lib/hr-studio/` (Medion, user `hr-studio` UID 993) |
 | Atelier registry canonical | `/opt/atelier/data/{apps.json, port-registry.json}` (Medion) |
@@ -127,9 +140,9 @@ Atelier est **autonome** : toutes ses crates vivent sous `crates/` et portent le
 
 Crates internes (`crates/atelier-XXX`, modifiables localement) :
 - `atelier-common`, `atelier-ipc`, `atelier-docs` — internalisées le 2026-05-30.
-- `atelier-apps`, `atelier-db`, `atelier-git`, `atelier-dataverse`, `atelier-dataverse-migrate`, `atelier-dvexpr`, `atelier-dv-codegen` — internalisées le 2026-05-09.
+- `atelier-apps`, `atelier-git`, `atelier-dataverse`, `atelier-dvexpr`, `atelier-dv-codegen` — internalisées le 2026-05-09.
 
-Les 4 crates `hr-flow*` ont été supprimées le 2026-05-26. Atelier ne lit plus rien dans `/nvme/homeroute/` : éditer/refondre ces crates ne nécessite plus de garder homeroute compilable.
+Les 4 crates `hr-flow*` ont été supprimées le 2026-05-26. Les crates `atelier-db` (moteur SQLite legacy) et `atelier-dataverse-migrate` (outil de migration SQLite→Postgres, one-shot) ont été supprimées le 2026-05-30 une fois les 6 apps passées sur postgres-dataverse (cf. « Migration postgres-dataverse finalisée » ci-dessous). Atelier ne lit plus rien dans `/nvme/homeroute/` : éditer/refondre ces crates ne nécessite plus de garder homeroute compilable.
 
 ## Service naming + autonomie
 

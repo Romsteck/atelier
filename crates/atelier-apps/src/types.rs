@@ -174,11 +174,6 @@ impl Application {
         PathBuf::from(root).join(&self.slug)
     }
 
-    /// Path to the managed SQLite database for this app.
-    pub fn db_path(&self) -> PathBuf {
-        self.app_dir().join("db.sqlite")
-    }
-
     /// Path to the runtime `.env` file.
     pub fn env_file(&self) -> PathBuf {
         self.app_dir().join(".env")

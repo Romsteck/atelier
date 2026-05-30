@@ -98,7 +98,6 @@ async fn main() -> Result<()> {
         port_registry.clone(),
         events.app_state.clone(),
     ));
-    let db_manager = Arc::new(atelier_apps::db_manager::DbManager::new(apps_src_root.clone()));
     let context_generator = Arc::new(atelier_apps::context::ContextGenerator::new(
         apps_src_root.clone(),
         base_domain.clone(),
@@ -135,7 +134,6 @@ async fn main() -> Result<()> {
         app_registry,
         port_registry,
         supervisor,
-        db_manager,
         context_generator,
         logs,
         surveillance,

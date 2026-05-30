@@ -63,7 +63,7 @@ impl ContextGenerator {
     ///
     /// INVARIANT : tout ce qui est destiné à l'agent est écrit sous
     /// `app.src_dir() == {apps_path}/{slug}/src/`. Le niveau parent
-    /// `{apps_path}/{slug}/` est réservé aux fichiers runtime (db.sqlite, .env)
+    /// `{apps_path}/{slug}/` est réservé aux fichiers runtime (`.env`, etc.)
     /// et les éventuels CLAUDE.md/.claude/.mcp.json qui s'y trouvent (vestiges)
     /// sont supprimés par `cleanup_legacy_parent_context` à chaque appel.
     ///
@@ -146,11 +146,8 @@ impl ContextGenerator {
                   &render_docs_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("app-info.md"),
                   &render_app_info_md(app, all_apps, &db_tables))?;
-        // db.md varies by `app.db_backend`:
-        //  - LegacySqlite      → "MIGRATION POSTGRES EN ATTENTE" (warns to
-        //    minimise schema changes until the migration runs)
-        //  - PostgresDataverse → new stack rules + post-migration cleanup
-        //    instructions (delete leftover SQLite refs)
+        // db.md documents the postgres-dataverse stack + post-migration
+        // cleanup instructions (delete any leftover SQLite refs in app code).
         log_write(&app.slug, &src_rules_dir.join("db.md"),
                   &render_db_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("mcp-tools.md"),
@@ -271,7 +268,7 @@ impl ContextGenerator {
         let mut table_rows = String::new();
         for app in all_apps {
             let db_cell = if app.has_db {
-                format!("`{}`", app.db_path().display())
+                "postgres-dataverse".to_string()
             } else {
                 "—".to_string()
             };
@@ -299,7 +296,7 @@ impl ContextGenerator {
              \n\
              This is the workspace root for every application managed by Atelier. \
              Each app lives under `{apps_path}/<slug>/` with its own sources, build \
-             artifacts, `.env` and (optionally) managed SQLite DB.\n\
+             artifacts, `.env` and (optionally) a postgres-dataverse database.\n\
              \n\
              ## Documentation (DOC-FIRST OBLIGATOIRE)\n\
              \n\
@@ -411,14 +408,16 @@ impl ContextGenerator {
              ## Environment variables\n\
              The orchestrator injects:\n\
              - `PORT` — listen on this port. **Never hardcode** a port in the code.\n\
-             - `DATABASE_URL` / `DATABASE_PATH` — path to the managed SQLite DB \
-             (only when `has_db` is true).\n\
+             - `DATABASE_URL` — Postgres connection string for this app's \
+             postgres-dataverse database (only when `has_db` is true).\n\
+             - `HR_DV_BASE_URL` / `HR_DV_TOKEN` / `HR_APP_UUID` — dataverse gateway \
+             credentials (only when `has_db` is true).\n\
              - Any custom variables declared on the application (managed via the API).\n\
              \n\
              ## Database\n\
-             - Use the MCP `db.*` tools for every read/write — they target the managed DB \
-             for this app automatically.\n\
-             - Never open the `.db` file by hand.\n\
+             - Use the MCP `db.*` / `dv_*` tools or the REST gateway \
+             `/api/dv/{slug}/<table>` for every read/write.\n\
+             - Raw SQL is not supported on the postgres-dataverse backend.\n\
              \n\
              ## Documentation (DOC-FIRST OBLIGATOIRE)\n\
              - **Avant toute exploration de code**, appelle `docs_overview` — c'est non \
@@ -1451,7 +1450,7 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
         skills.push(("app-db-info", format!(
             "---\n\
              name: app-db-info\n\
-             description: Donne un résumé de la base SQLite de l'app {slug} (tables, colonnes, row counts). Utilise-moi quand l'utilisateur demande ce qu'il y a en base, le schéma, ou un aperçu des données.\n\
+             description: Donne un résumé de la base postgres-dataverse de l'app {slug} (tables, colonnes, row counts). Utilise-moi quand l'utilisateur demande ce qu'il y a en base, le schéma, ou un aperçu des données.\n\
              allowed-tools: \n\
              ---\n\
              \n\

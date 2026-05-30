@@ -7,14 +7,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::dto::{
-    AppDbQueryResult, AppDbRelation, AppDbTableColumn, AppDbTableSchema,
+    AppDbRelation, AppDbTableColumn, AppDbTableSchema,
     AppDbTablesData, AppExecResult, AppListData, AppLogEntry, AppLogsData,
     AppStatusData, ApplicationDto,
 };
 use super::scaffold;
 
 use atelier_apps::types::{AppStack, AppState, Application, DbBackend, Visibility, valid_slug};
-use atelier_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
+use atelier_apps::{AppSupervisor, ContextGenerator, ProcessStatus};
 use atelier_common::events::AppBuildEvent;
 use atelier_dataverse::DataverseManager;
 use tokio::sync::broadcast;
@@ -89,7 +89,6 @@ fn wrap_local_cmd(cmd: &str) -> (&'static str, Vec<String>) {
 #[derive(Clone)]
 pub struct AppsContext {
     pub supervisor: AppSupervisor,
-    pub db_manager: DbManager,
     /// New Postgres+GraphQL backend, populated when
     /// `HR_DATAVERSE_ADMIN_URL` is set at boot. None means apps flagged
     /// `db_backend: postgres-dataverse` will get an explicit error.
@@ -109,17 +108,6 @@ pub struct AppsContext {
 }
 
 impl AppsContext {
-    /// Look up the configured backend for a slug. Apps not in the
-    /// registry default to `LegacySqlite` (the same fallback the field
-    /// default uses), making this safe to call before app creation
-    /// completes.
-    pub async fn db_backend_for(&self, slug: &str) -> DbBackend {
-        match self.supervisor.registry.get(slug).await {
-            Some(app) => app.db_backend,
-            None => DbBackend::default(),
-        }
-    }
-
     /// Resolve the postgres-dataverse engine for `slug`. Maps any
     /// configuration / connectivity error into a ready-to-return
     /// [`IpcResponse`] so call sites stay compact.
@@ -138,11 +126,47 @@ impl AppsContext {
             .map_err(|e| IpcResponse::err(format!("dataverse engine: {e}")))
     }
 
+    /// Best-effort list of an app's postgres-dataverse tables for context
+    /// generation. Returns `None` (never an error) when the app has no DB,
+    /// the dataverse manager is unconfigured, the app isn't provisioned, or
+    /// the query fails — context generation stays non-fatal.
+    async fn dv_list_tables_opt(&self, slug: &str, has_db: bool) -> Option<Vec<String>> {
+        if !has_db {
+            return None;
+        }
+        let mgr = self.dataverse_manager.as_ref()?;
+        let engine = mgr.engine_for(slug).await.ok()?;
+        engine.list_tables().await.ok()
+    }
+
+    /// Count rows of a single postgres-dataverse table. Mirrors the shape the
+    /// MCP `db_count_rows` tool expects (a `count` column).
+    pub async fn db_count_rows(&self, slug: String, table: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        match engine.count_rows(&table).await {
+            Ok(count) => IpcResponse::ok_data(serde_json::json!({
+                "columns": ["count"],
+                "rows": [{ "count": count }],
+                "total": 1,
+            })),
+            Err(e) => IpcResponse::err(format!("count_rows: {e}")),
+        }
+    }
+
     /// Sync the dataverse-gateway env vars (`HR_DV_BASE_URL`, `HR_DV_TOKEN`,
     /// `HR_APP_UUID`) into the app's `.env` file. Backfills missing
-    /// gateway credentials in `dataverse-secrets.json` if needed. Removes
-    /// any legacy `DATABASE_URL` line so apps don't accidentally keep
-    /// a stale direct DSN. Idempotent — safe to call on every boot.
+    /// gateway credentials in `dataverse-secrets.json` if needed. Also
+    /// injects the transitional direct `DATABASE_URL` (DSN) — apps still
+    /// reach Postgres via sqlx directly; dropping it + revoking the role's
+    /// LOGIN is deferred to the decommission phase (see
+    /// `.claude/rules/database-url-decommission-pending.md`). Idempotent —
+    /// safe to call on every boot.
     ///
     /// `base_url_override` lets the caller pass a custom base URL (used
     /// by tests). In production, defaults to `http://127.0.0.1:4000/api/dv/{slug}`
@@ -288,9 +312,6 @@ impl AppsContext {
             app.run_command = scaffold::default_run_command(&app);
             info!(slug = %slug, run_command = %app.run_command, "AppCreate: applied default run_command");
         }
-        if has_db {
-            let _ = tokio::fs::File::create(app.db_path()).await;
-        }
 
         // Persist app.
         if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
@@ -332,11 +353,7 @@ impl AppsContext {
 
         // Regen context (CLAUDE.md, .mcp.json, .claude/) — always local now.
         let all = self.supervisor.registry.list().await;
-        let db_tables = if app.has_db {
-            self.db_manager.list_tables(&slug).await.ok()
-        } else {
-            None
-        };
+        let db_tables = self.dv_list_tables_opt(&slug, app.has_db).await;
         if let Err(e) = self
             .context_generator
             .generate_for_app(&app, &all, db_tables)
@@ -398,16 +415,9 @@ impl AppsContext {
         }
         if let Some(new_has_db) = has_db {
             if new_has_db && !app.has_db {
-                // Enable: create the DB file if missing so the engine can initialize metadata.
-                if !app.db_path().exists() {
-                    if let Err(e) = tokio::fs::File::create(app.db_path()).await {
-                        return IpcResponse::err(format!("failed to create db file: {e}"));
-                    }
-                }
                 info!(slug = %slug, "has_db enabled");
             } else if !new_has_db && app.has_db {
-                // Disable: keep the DB file on disk; only flip the flag.
-                info!(slug = %slug, "has_db disabled (db file preserved on disk)");
+                info!(slug = %slug, "has_db disabled");
             }
             app.has_db = new_has_db;
         }
@@ -440,11 +450,7 @@ impl AppsContext {
 
         // Regenerate context
         let all = self.supervisor.registry.list().await;
-        let db_tables = if app.has_db {
-            self.db_manager.list_tables(&slug).await.ok()
-        } else {
-            None
-        };
+        let db_tables = self.dv_list_tables_opt(&slug, app.has_db).await;
         if let Err(e) = self
             .context_generator
             .generate_for_app(&app, &all, db_tables)
@@ -697,11 +703,7 @@ impl AppsContext {
             None => return IpcResponse::err(format!("app not found: {slug}")),
         };
         let all = self.supervisor.registry.list().await;
-        let db_tables = if app.has_db {
-            self.db_manager.list_tables(&slug).await.ok()
-        } else {
-            None
-        };
+        let db_tables = self.dv_list_tables_opt(&slug, app.has_db).await;
 
         if let Err(e) = self
             .context_generator
@@ -724,28 +726,16 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            return match engine.list_tables().await {
-                Ok(tables) => {
-                    info!(slug = %slug, count = tables.len(), backend = "postgres-dataverse", "AppDbListTables ok");
-                    IpcResponse::ok_data(AppDbTablesData { tables })
-                }
-                Err(e) => IpcResponse::err(format!("list_tables: {e}")),
-            };
-        }
-        match self.db_manager.list_tables(&slug).await {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        match engine.list_tables().await {
             Ok(tables) => {
-                info!(slug = %slug, count = tables.len(), "AppDbListTables ok");
+                info!(slug = %slug, count = tables.len(), backend = "postgres-dataverse", "AppDbListTables ok");
                 IpcResponse::ok_data(AppDbTablesData { tables })
             }
-            Err(e) => {
-                error!(slug = %slug, error = %e, "AppDbListTables failed");
-                IpcResponse::err(format!("list_tables: {e}"))
-            }
+            Err(e) => IpcResponse::err(format!("list_tables: {e}")),
         }
     }
 
@@ -753,248 +743,103 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            // atelier_dataverse::DatabaseSchema → AppDbTableSchema (same JSON shape).
-            let dv_schema = match engine.get_schema().await {
-                Ok(s) => s,
-                Err(e) => return IpcResponse::err(format!("get_schema: {e}")),
-            };
-            let Some(t) = dv_schema.tables.iter().find(|t| t.name == table) else {
-                return IpcResponse::err(format!("table '{}' not found", table));
-            };
-            let row_count = engine.count_rows(&table).await.unwrap_or(0) as u64;
-            let columns = t
-                .columns
-                .iter()
-                .map(|c| AppDbTableColumn {
-                    name: c.name.clone(),
-                    // Both backends derive `Debug` and use the same variant
-                    // names, so `Debug` formatting is interchangeable.
-                    field_type: format!("{:?}", c.field_type),
-                    required: c.required,
-                    unique: c.unique,
-                    choices: c.choices.clone(),
-                    formula_expression: c.formula_expression.clone(),
-                })
-                .collect();
-            let relations = dv_schema
-                .relations
-                .iter()
-                .filter(|r| r.from_table == table)
-                .map(|r| AppDbRelation {
-                    from_column: r.from_column.clone(),
-                    to_table: r.to_table.clone(),
-                    to_column: r.to_column.clone(),
-                    display_column: "id".to_string(),
-                })
-                .collect();
-            return IpcResponse::ok_data(AppDbTableSchema {
-                name: t.name.clone(),
-                columns,
-                relations,
-                row_count,
-            });
-        }
-        match self.db_manager.describe_table(&slug, &table).await {
-            Ok(schema) => {
-                let dto = AppDbTableSchema {
-                    name: schema.name,
-                    columns: schema
-                        .columns
-                        .into_iter()
-                        .map(|c| AppDbTableColumn {
-                            name: c.name,
-                            field_type: format!("{:?}", c.field_type),
-                            required: c.required,
-                            unique: c.unique,
-                            choices: c.choices,
-                            formula_expression: c.formula_expression,
-                        })
-                        .collect(),
-                    relations: schema
-                        .relations
-                        .into_iter()
-                        .map(|r| AppDbRelation {
-                            from_column: r.from_column,
-                            to_table: r.to_table,
-                            to_column: r.to_column,
-                            display_column: r.display_column,
-                        })
-                        .collect(),
-                    row_count: schema.row_count,
-                };
-                IpcResponse::ok_data(dto)
-            }
-            Err(e) => IpcResponse::err(format!("describe_table: {e}")),
-        }
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        let dv_schema = match engine.get_schema().await {
+            Ok(s) => s,
+            Err(e) => return IpcResponse::err(format!("get_schema: {e}")),
+        };
+        let Some(t) = dv_schema.tables.iter().find(|t| t.name == table) else {
+            return IpcResponse::err(format!("table '{}' not found", table));
+        };
+        let row_count = engine.count_rows(&table).await.unwrap_or(0) as u64;
+        let columns = t
+            .columns
+            .iter()
+            .map(|c| AppDbTableColumn {
+                name: c.name.clone(),
+                field_type: format!("{:?}", c.field_type),
+                required: c.required,
+                unique: c.unique,
+                choices: c.choices.clone(),
+                formula_expression: c.formula_expression.clone(),
+            })
+            .collect();
+        let relations = dv_schema
+            .relations
+            .iter()
+            .filter(|r| r.from_table == table)
+            .map(|r| AppDbRelation {
+                from_column: r.from_column.clone(),
+                to_table: r.to_table.clone(),
+                to_column: r.to_column.clone(),
+                display_column: "id".to_string(),
+            })
+            .collect();
+        IpcResponse::ok_data(AppDbTableSchema {
+            name: t.name.clone(),
+            columns,
+            relations,
+            row_count,
+        })
     }
 
     pub async fn db_query(
         &self,
         slug: String,
-        sql: String,
-        params: Vec<serde_json::Value>,
+        _sql: String,
+        _params: Vec<serde_json::Value>,
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            return IpcResponse::err(
-                "raw SQL is not supported on the postgres-dataverse backend — \
-                 use MCP `dv_list`/`dv_get`/`dv_insert`/`dv_update`/... or the \
-                 REST gateway at /api/dv/{slug}/{table}",
-            );
-        }
-        match self.db_manager.query(&slug, &sql, params).await {
-            Ok(q) => {
-                info!(slug = %slug, rows = q.total, "AppDbQuery ok");
-                IpcResponse::ok_data(AppDbQueryResult {
-                    columns: q.columns,
-                    rows: q.rows,
-                    total: q.total,
-                })
-            }
-            Err(e) => {
-                warn!(slug = %slug, error = %e, "AppDbQuery failed");
-                IpcResponse::err(format!("query: {e}"))
-            }
-        }
+        IpcResponse::err(
+            "raw SQL is not supported on the postgres-dataverse backend — \
+             use MCP `dv_list`/`dv_get`/`dv_insert`/`dv_update`/... or the \
+             REST gateway at /api/dv/{slug}/{table}",
+        )
     }
 
     pub async fn db_execute(
         &self,
         slug: String,
-        sql: String,
-        params: Vec<serde_json::Value>,
+        _sql: String,
+        _params: Vec<serde_json::Value>,
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            return IpcResponse::err(
-                "raw SQL is not supported on the postgres-dataverse backend — \
-                 use db.insert / db.update / db.delete or a GraphQL mutation",
-            );
-        }
-        info!(slug = %slug, sql_preview = %sql.chars().take(80).collect::<String>(), "AppDbExecute");
-        match self.db_manager.execute(&slug, &sql, params).await {
-            Ok(rows_affected) => {
-                info!(slug = %slug, rows_affected, "AppDbExecute ok");
-                IpcResponse::ok_data(serde_json::json!({ "rows_affected": rows_affected }))
-            }
-            Err(e) => {
-                warn!(slug = %slug, error = %e, "AppDbExecute failed");
-                IpcResponse::err(format!("execute: {e}"))
-            }
-        }
-    }
-
-    pub async fn db_query_rows(
-        &self,
-        slug: String,
-        table: String,
-        filters_json: Vec<serde_json::Value>,
-        limit: Option<u64>,
-        offset: Option<u64>,
-        order_by: Option<String>,
-        order_desc: Option<bool>,
-        expand: Vec<String>,
-    ) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            // Translate the legacy {column, op, value} filter shape into
-            // a dvexpr `$filter` and run it through `build_list_sql` —
-            // same SQL path as MCP `dv_list` / REST `/api/dv/{slug}/...`.
-            return query_rows_via_dv_sql(
-                self.dataverse_manager.as_ref(),
-                &slug,
-                &table,
-                &filters_json,
-                limit,
-                offset,
-                order_by.as_deref(),
-                order_desc.unwrap_or(false),
-            )
-            .await;
-        }
-
-        // Parse filters from JSON
-        let filters: Vec<atelier_apps::Filter> = filters_json
-            .iter()
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-            .collect();
-
-        let pagination = atelier_apps::Pagination {
-            limit: limit.unwrap_or(100),
-            offset: offset.unwrap_or(0),
-            order_by,
-            order_desc: order_desc.unwrap_or(false),
-        };
-
-        match self
-            .db_manager
-            .select_rows_expanded(&slug, &table, &filters, &pagination, &expand)
-            .await
-        {
-            Ok(q) => {
-                info!(slug = %slug, table = %table, rows = q.total, expand = ?expand, "AppDbQueryRows ok");
-                IpcResponse::ok_data(AppDbQueryResult {
-                    columns: q.columns,
-                    rows: q.rows,
-                    total: q.total,
-                })
-            }
-            Err(e) => {
-                warn!(slug = %slug, table = %table, error = %e, "AppDbQueryRows failed");
-                IpcResponse::err(format!("query_rows: {e}"))
-            }
-        }
+        IpcResponse::err(
+            "raw SQL is not supported on the postgres-dataverse backend — \
+             use db.insert / db.update / db.delete or a GraphQL mutation",
+        )
     }
 
     pub async fn db_sync_schema(&self, slug: String) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            // On the postgres-dataverse backend, `_dv_*` IS the source of
-            // truth — there is nothing to sync from. We return an empty
-            // SyncResult so the caller sees a successful no-op.
-            return IpcResponse::ok_data(serde_json::json!({
-                "tables_added": [],
-                "columns_added": [],
-                "relations_added": 0,
-            }));
-        }
-        match self.db_manager.sync_schema(&slug).await {
-            Ok(r) => {
-                info!(slug = %slug, tables = r.tables_added.len(), columns = r.columns_added.len(), relations = r.relations_added, "Schema sync done");
-                IpcResponse::ok_data(r)
-            }
-            Err(e) => IpcResponse::err(format!("sync_schema: {e}")),
-        }
+        // On the postgres-dataverse backend, `_dv_*` IS the source of truth —
+        // there is nothing to sync from. Return an empty SyncResult so the
+        // caller sees a successful no-op.
+        IpcResponse::ok_data(serde_json::json!({
+            "tables_added": [],
+            "columns_added": [],
+            "relations_added": 0,
+        }))
     }
 
     pub async fn db_get_schema(&self, slug: String) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            return match engine.get_schema().await {
-                Ok(schema) => IpcResponse::ok_data(schema),
-                Err(e) => IpcResponse::err(format!("get_schema: {e}")),
-            };
-        }
-        match self.db_manager.get_schema(&slug).await {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        match engine.get_schema().await {
             Ok(schema) => IpcResponse::ok_data(schema),
             Err(e) => IpcResponse::err(format!("get_schema: {e}")),
         }
@@ -1019,27 +864,16 @@ impl AppsContext {
             map.entry("updated_at".to_string())
                 .or_insert_with(|| serde_json::Value::String(now));
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            let def: atelier_dataverse::TableDefinition = match serde_json::from_value(def_value) {
-                Ok(d) => d,
-                Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
-            };
-            info!(slug = %slug, table = %def.name, backend = "postgres-dataverse", "Creating table");
-            return match engine.create_table(&def).await {
-                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
-                Err(e) => IpcResponse::err(format!("create_table: {e}")),
-            };
-        }
-        let def: atelier_apps::TableDefinition = match serde_json::from_value(def_value) {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        let def: atelier_dataverse::TableDefinition = match serde_json::from_value(def_value) {
             Ok(d) => d,
             Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
         };
-        info!(slug = %slug, table = %def.name, "Creating table");
-        match self.db_manager.create_table(&slug, def).await {
+        info!(slug = %slug, table = %def.name, backend = "postgres-dataverse", "Creating table");
+        match engine.create_table(&def).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("create_table: {e}")),
         }
@@ -1049,19 +883,12 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            info!(slug = %slug, table = %table, backend = "postgres-dataverse", "Dropping table");
-            return match engine.drop_table(&table).await {
-                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
-                Err(e) => IpcResponse::err(format!("drop_table: {e}")),
-            };
-        }
-        info!(slug = %slug, table = %table, "Dropping table");
-        match self.db_manager.drop_table(&slug, &table).await {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        info!(slug = %slug, table = %table, backend = "postgres-dataverse", "Dropping table");
+        match engine.drop_table(&table).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("drop_table: {e}")),
         }
@@ -1071,27 +898,16 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            let col: atelier_dataverse::ColumnDefinition = match serde_json::from_value(column) {
-                Ok(c) => c,
-                Err(e) => return IpcResponse::err(format!("invalid column definition: {e}")),
-            };
-            info!(slug = %slug, table = %table, column = %col.name, backend = "postgres-dataverse", "Adding column");
-            return match engine.add_column(&table, &col).await {
-                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
-                Err(e) => IpcResponse::err(format!("add_column: {e}")),
-            };
-        }
-        let col: atelier_apps::ColumnDefinition = match serde_json::from_value(column) {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        let col: atelier_dataverse::ColumnDefinition = match serde_json::from_value(column) {
             Ok(c) => c,
             Err(e) => return IpcResponse::err(format!("invalid column definition: {e}")),
         };
-        info!(slug = %slug, table = %table, column = %col.name, "Adding column");
-        match self.db_manager.add_column(&slug, &table, col).await {
+        info!(slug = %slug, table = %table, column = %col.name, backend = "postgres-dataverse", "Adding column");
+        match engine.add_column(&table, &col).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("add_column: {e}")),
         }
@@ -1101,19 +917,12 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            info!(slug = %slug, table = %table, column = %column, backend = "postgres-dataverse", "Removing column");
-            return match engine.remove_column(&table, &column).await {
-                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
-                Err(e) => IpcResponse::err(format!("remove_column: {e}")),
-            };
-        }
-        info!(slug = %slug, table = %table, column = %column, "Removing column");
-        match self.db_manager.remove_column(&slug, &table, &column).await {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        info!(slug = %slug, table = %table, column = %column, backend = "postgres-dataverse", "Removing column");
+        match engine.remove_column(&table, &column).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("remove_column: {e}")),
         }
@@ -1123,27 +932,16 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            let engine = match self.dv_engine_for(&slug).await {
-                Ok(e) => e,
-                Err(resp) => return resp,
-            };
-            let rel: atelier_dataverse::RelationDefinition = match serde_json::from_value(relation) {
-                Ok(r) => r,
-                Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
-            };
-            info!(slug = %slug, from = %rel.from_table, to = %rel.to_table, backend = "postgres-dataverse", "Creating relation");
-            return match engine.create_relation(&rel).await {
-                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
-                Err(e) => IpcResponse::err(format!("create_relation: {e}")),
-            };
-        }
-        let rel: atelier_apps::RelationDefinition = match serde_json::from_value(relation) {
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        let rel: atelier_dataverse::RelationDefinition = match serde_json::from_value(relation) {
             Ok(r) => r,
             Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
         };
-        info!(slug = %slug, from = %rel.from_table, to = %rel.to_table, "Creating relation");
-        match self.db_manager.create_relation(&slug, rel).await {
+        info!(slug = %slug, from = %rel.from_table, to = %rel.to_table, backend = "postgres-dataverse", "Creating relation");
+        match engine.create_relation(&rel).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("create_relation: {e}")),
         }
@@ -1595,11 +1393,7 @@ impl AppsContext {
 
         // Refresh the per-app context (build command may have changed).
         let all = self.supervisor.registry.list().await;
-        let db_tables = if app.has_db {
-            self.db_manager.list_tables(&slug).await.ok()
-        } else {
-            None
-        };
+        let db_tables = self.dv_list_tables_opt(&slug, app.has_db).await;
         if let Err(e) = self.context_generator.generate_for_app(&app, &all, db_tables) {
             warn!(slug = %slug, error = %e, "build: context regen failed (non-fatal)");
         }
@@ -2282,149 +2076,6 @@ async fn upsert_env_var(path: &std::path::Path, key: &str, value: &str) -> std::
     }
     out.push_str(&format!("{}={}\n", key, value));
     tokio::fs::write(path, out).await
-}
-
-/// Translate a legacy `db.tables/{t}/rows` request into a GraphQL
-/// query against the per-app dataverse Postgres, then re-shape the
-/// response into the same `AppDbQueryResult { columns, rows, total }`
-/// envelope so DbExplorer doesn't need a frontend branch.
-///
-/// Wires through the same `build_list_sql` + `run_list` path used by the
-/// REST gateway and MCP `dv_list`, after translating the DbExplorer's
-/// legacy filter shape into a dvexpr `$filter` string.
-async fn query_rows_via_dv_sql(
-    manager: Option<&Arc<atelier_dataverse::DataverseManager>>,
-    slug: &str,
-    table: &str,
-    legacy_filters: &[serde_json::Value],
-    limit: Option<u64>,
-    offset: Option<u64>,
-    order_by: Option<&str>,
-    order_desc: bool,
-) -> IpcResponse {
-    use atelier_common::Identity;
-    use atelier_dataverse::dv_io::run_list;
-    use atelier_dataverse::query::{build_list_sql, Direction, ListQuery, OrderBy};
-
-    let Some(mgr) = manager else {
-        return IpcResponse::err("postgres-dataverse backend not configured");
-    };
-    let engine = match mgr.engine_for(slug).await {
-        Ok(e) => e,
-        Err(e) => return IpcResponse::err(format!("dataverse engine: {e}")),
-    };
-    let snapshot = match engine.get_schema().await {
-        Ok(s) => s,
-        Err(e) => return IpcResponse::err(format!("get_schema: {e}")),
-    };
-    let Some(table_def) = snapshot.tables.iter().find(|t| t.name == table) else {
-        return IpcResponse::err(format!("table '{}' not found", table));
-    };
-
-    let filter_str = translate_legacy_filters_to_dvexpr(legacy_filters);
-    let orderby = order_by
-        .map(|col| {
-            vec![OrderBy {
-                column: col.to_string(),
-                direction: if order_desc { Direction::Desc } else { Direction::Asc },
-            }]
-        })
-        .unwrap_or_default();
-
-    let lq = ListQuery {
-        filter: filter_str,
-        select: Vec::new(),
-        orderby,
-        top: Some(limit.unwrap_or(100).min(1000) as u32),
-        skip: Some(offset.unwrap_or(0) as u32),
-        count: true,
-        include_deleted: false,
-    };
-
-    let identity = Identity::system();
-    let compiled = match build_list_sql(table_def, &lq, &identity) {
-        Ok(c) => c,
-        Err(e) => return IpcResponse::err(format!("$filter: {e}")),
-    };
-
-    let rows = match run_list(engine.pool(), table_def, &compiled).await {
-        Ok(r) => r,
-        Err(e) => return IpcResponse::err(format!("dv_list: {e}")),
-    };
-
-    let columns: Vec<String> = if let Some(first) = rows.first().and_then(|v| v.as_object()) {
-        first.keys().cloned().collect()
-    } else {
-        let mut c: Vec<String> = vec!["id".into(), "created_at".into(), "updated_at".into()];
-        for col in &table_def.columns {
-            c.push(col.name.clone());
-        }
-        c
-    };
-
-    let total = rows.len() as u64;
-    IpcResponse::ok_data(AppDbQueryResult {
-        columns,
-        rows,
-        total,
-    })
-}
-
-/// Translate the legacy `[{column, op, value?}]` filter shape into a
-/// dvexpr `$filter` string suitable for `ListQuery.filter`. Unknown ops
-/// are dropped silently (safe default). Returns `None` when there is
-/// nothing to filter on — the caller skips the filter slot entirely.
-fn translate_legacy_filters_to_dvexpr(legacy: &[serde_json::Value]) -> Option<String> {
-    let mut clauses: Vec<String> = Vec::new();
-    for f in legacy {
-        let Some(col) = f.get("column").and_then(|v| v.as_str()) else { continue };
-        let Some(op) = f.get("op").and_then(|v| v.as_str()) else { continue };
-        let value_json = f.get("value");
-        let lit = || render_dvexpr_literal(value_json);
-        let clause = match op {
-            "eq" => format!("{col} == {}", lit()),
-            "ne" => format!("{col} != {}", lit()),
-            "gt" => format!("{col} > {}", lit()),
-            "gte" => format!("{col} >= {}", lit()),
-            "lt" => format!("{col} < {}", lit()),
-            "lte" => format!("{col} <= {}", lit()),
-            "is_null" => format!("{col} == null"),
-            "is_not_null" => format!("{col} != null"),
-            // `like` / `in` not yet plumbed in dvexpr — degrade to `==`
-            // so DbExplorer still returns something useful.
-            "like" | "in" => format!("{col} == {}", lit()),
-            _ => continue,
-        };
-        clauses.push(clause);
-    }
-    if clauses.is_empty() {
-        None
-    } else {
-        Some(clauses.join(" && "))
-    }
-}
-
-/// Render a JSON value as a dvexpr literal (string → `"..."` escaped,
-/// number/bool inline, null/missing → `null`).
-fn render_dvexpr_literal(v: Option<&serde_json::Value>) -> String {
-    match v {
-        None | Some(serde_json::Value::Null) => "null".to_string(),
-        Some(serde_json::Value::Bool(b)) => b.to_string(),
-        Some(serde_json::Value::Number(n)) => n.to_string(),
-        Some(serde_json::Value::String(s)) => {
-            // Minimal escape: `"` and `\`. Newlines/tabs left as-is — dvexpr
-            // accepts them inside double-quoted literals.
-            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-            format!("\"{escaped}\"")
-        }
-        Some(other) => {
-            // Arrays/objects don't have a literal form in dvexpr — degrade
-            // to their JSON serialisation as a string literal so the
-            // comparison at least doesn't blow up the parser.
-            let escaped = other.to_string().replace('\\', "\\\\").replace('"', "\\\"");
-            format!("\"{escaped}\"")
-        }
-    }
 }
 
 fn db_backend_to_str(b: &DbBackend) -> &'static str {

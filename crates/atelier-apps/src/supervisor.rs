@@ -673,11 +673,6 @@ async fn systemd_run_app(app: &Application) -> Result<()> {
     cmd.arg(format!("--working-directory={}", src_dir.display()));
     cmd.arg(format!("--description=Atelier app {}", app.slug));
     cmd.arg(format!("--setenv=PORT={}", app.port));
-    cmd.arg(format!(
-        "--setenv=DATABASE_PATH={}",
-        app.db_path().display()
-    ));
-    cmd.arg(format!("--setenv=DB_PATH={}", app.db_path().display()));
     for (k, v) in &app.env_vars {
         cmd.arg(format!("--setenv={k}={v}"));
     }

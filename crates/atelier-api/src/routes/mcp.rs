@@ -74,7 +74,6 @@ impl McpState {
         let (app_build_tx, _) = tokio::sync::broadcast::channel(256);
         let apps_ctx = crate::mcp::apps_ops::AppsContext {
             supervisor: (*state.supervisor).clone(),
-            db_manager: (*state.db_manager).clone(),
             dataverse_manager: state.dv.clone(),
             context_generator: state.context_generator.clone(),
             edge,
@@ -501,10 +500,10 @@ fn tool_definitions_project() -> Value {
         { "name": "exec", "description": "Execute a shell command in the project directory. Do NOT use this to run the build — invoke the `app-build` skill instead (it calls the dedicated HTTP endpoint).", "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "Shell command to execute" }, "timeout_secs": { "type": "integer", "default": 60 } }, "required": ["command"] } },
         { "name": "logs", "description": "Get recent application logs.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 100 }, "level": { "type": "string", "description": "Filter by level (info, warn, error)" } } } },
         // ── Database ──
-        { "name": "db_tables", "description": "List all tables in the application's SQLite database.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "db_tables", "description": "List all tables in the application's postgres-dataverse database.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
-        { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database. Legacy SQLite backend only — apps on postgres-dataverse must use REST `/api/dv/{slug}/{table}` or MCP `dv_*` tools.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_exec", "description": "Raw SQL mutations are not supported on the postgres-dataverse backend — use REST `/api/dv/{slug}/{table}` or MCP `dv_*` tools.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_overview", "description": "Compact overview of the database: table list with column count + row count for each.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_count_rows", "description": "Count rows in a single table.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_get_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON. Read-only.", "inputSchema": { "type": "object", "properties": {} } },
@@ -600,7 +599,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         // ── Studio ──
         "studio.refresh_context" => tool_studio_refresh_context(id, &arguments, state).await,
         "studio.refresh_all" => tool_studio_refresh_all(id, state).await,
-        // ── DB* (V3 — per-app SQLite) ──
+        // ── DB* (per-app postgres-dataverse) ──
         "db.tables" | "db.list_tables" => tool_db_tables(id, &arguments, state).await,
         "db.describe" | "db.describe_table" => tool_db_describe(id, &arguments, state).await,
         "db.query" | "db.query_data" => tool_db_query(id, &arguments, state).await,
@@ -1305,7 +1304,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "db.tables",
-            "description": "List user-defined tables in an app's SQLite database.",
+            "description": "List user-defined tables in an app's postgres-dataverse database.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "slug": { "type": "string" } },
@@ -1326,7 +1325,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "db.query",
-            "description": "Run a SELECT query against an app's SQLite database.",
+            "description": "Raw SQL is not supported on postgres-dataverse — use `dv_list` or REST `/api/dv/{slug}/{table}`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1338,33 +1337,8 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
-            "name": "db.find",
-            "description": "Query rows of a table with structured filters, sort, pagination and relation expand. No SQL required.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string" },
-                    "table": { "type": "string" },
-                    "filters": {
-                        "type": "array",
-                        "description": "List of {column, op, value?}. op ∈ eq|ne|gt|lt|gte|lte|like|in|is_null|is_not_null"
-                    },
-                    "limit": { "type": "integer", "default": 100, "description": "Capped at 1000" },
-                    "offset": { "type": "integer", "default": 0 },
-                    "order_by": { "type": "string" },
-                    "order_desc": { "type": "boolean", "default": false },
-                    "expand": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Foreign-key relations to hydrate inline"
-                    }
-                },
-                "required": ["slug", "table"]
-            }
-        },
-        {
             "name": "db.execute",
-            "description": "Execute a mutation (INSERT, UPDATE, DELETE) against an app's SQLite database.",
+            "description": "Raw SQL mutations are not supported on postgres-dataverse — use db.insert/db.update/db.delete or `dv_*` tools.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1407,7 +1381,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "db.sync_schema",
-            "description": "Sync existing SQLite tables into Dataverse metadata. Use after manual DDL changes.",
+            "description": "No-op on postgres-dataverse: the `_dv_*` metadata is already the source of truth.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "slug": { "type": "string" } },
@@ -1807,8 +1781,10 @@ async fn tool_db_count_rows(id: Value, args: &Value, state: &McpState) -> Value 
     let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing table".into());
     };
-    let sql = format!("SELECT COUNT(*) as count FROM \"{}\"", table.replace('"', ""));
-    ipc_resp_to_mcp(id, ctx.db_query(slug.to_string(), sql, vec![]).await)
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_count_rows(slug.to_string(), table.to_string()).await,
+    )
 }
 
 // ── db.get_schema / db.sync_schema ───────────────────────────────────
