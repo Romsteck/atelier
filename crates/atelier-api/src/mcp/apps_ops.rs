@@ -161,17 +161,16 @@ impl AppsContext {
 
     /// Sync the dataverse-gateway env vars (`HR_DV_BASE_URL`, `HR_DV_TOKEN`,
     /// `HR_APP_UUID`) into the app's `.env` file. Backfills missing
-    /// gateway credentials in `dataverse-secrets.json` if needed. Also
-    /// injects the transitional direct `DATABASE_URL` (DSN) — apps still
-    /// reach Postgres via sqlx directly; dropping it + revoking the role's
-    /// LOGIN is deferred to the decommission phase (see
-    /// `.claude/rules/database-url-decommission-pending.md`). Idempotent —
-    /// safe to call on every boot.
+    /// gateway credentials in `dataverse-secrets.json` if needed.
     ///
-    /// `base_url_override` lets the caller pass a custom base URL (used
-    /// by tests). In production, defaults to `http://127.0.0.1:4000/api/dv/{slug}`
-    /// — apps reach the gateway via loopback, hr-edge handles external
-    /// access on `dv.<base_domain>/{slug}/...`.
+    /// The gateway is the apps' SOLE database path: with the postgres-dataverse
+    /// migration finalised (2026-05-30) no app reads a direct `DATABASE_URL`
+    /// anymore, so none is injected and the PG `app_{slug}` roles are NOLOGIN.
+    /// Idempotent — safe to call on every boot.
+    ///
+    /// The base URL is `http://127.0.0.1:4100/api/dv/{slug}` — apps reach the
+    /// gateway via loopback; hr-edge handles external access on
+    /// `dv.<base_domain>/{slug}/...`.
     pub async fn sync_dv_env(&self, slug: &str) -> anyhow::Result<()> {
         let Some(mgr) = self.dataverse_manager.as_ref() else {
             return Ok(());
@@ -185,7 +184,7 @@ impl AppsContext {
             Ok(s) => s,
             Err(_) => return Ok(()), // app not provisioned — nothing to sync
         };
-        let base_url = format!("http://127.0.0.1:4000/api/dv/{}", slug);
+        let base_url = format!("http://127.0.0.1:4100/api/dv/{}", slug);
         let env_path = app.env_file();
         if let Some(parent) = env_path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
@@ -193,14 +192,7 @@ impl AppsContext {
         upsert_env_var(&env_path, "HR_DV_BASE_URL", &base_url).await?;
         upsert_env_var(&env_path, "HR_DV_TOKEN", &secret.gateway_token).await?;
         upsert_env_var(&env_path, "HR_APP_UUID", &secret.app_uuid.to_string()).await?;
-        // Transitional: the long-term plan bans direct PG access (apps go
-        // through the gateway only), but during the migration window
-        // mid-migrated apps still need `DATABASE_URL`. We persist it so
-        // sqlx-postgres callers keep working until they're refactored to
-        // the typed `dv-{slug}` client. The hard ban (revoke LOGIN on the
-        // PG role + drop this line) lands in the decommission phase.
-        upsert_env_var(&env_path, "DATABASE_URL", &secret.dsn).await?;
-        info!(slug, "sync_dv_env: HR_DV_* + transitional DATABASE_URL injected");
+        info!(slug, "sync_dv_env: HR_DV_* injected (gateway-only, no DATABASE_URL)");
         Ok(())
     }
 

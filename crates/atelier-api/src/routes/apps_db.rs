@@ -1,34 +1,35 @@
-//! Read-only Apps DB routes (Phase 9 prep).
+//! Apps DB routes — the schema/data surface the Studio + DbExplorer use.
 //!
-//! Mirroir des endpoints homeroute `/api/apps/{slug}/db/*` côté Atelier,
-//! limité aux apps `postgres-dataverse` (les apps SQLite legacy retournent 503
-//! avec un lien vers proxy.mynetwk.biz pour leur exploration).
+//! Toutes les apps tournent sur `postgres-dataverse` : on délègue au DV engine
+//! déjà initialisé dans `ApiState.dv`. Les schémas, la liste des tables et les
+//! requêtes sont les mêmes que `/api/dv/...` mais exposés sous le nom hr-api
+//! attendu par le frontend.
 //!
-//! Pour les pg-dataverse, on délégue au DV engine déjà initialisé dans ApiState.dv —
-//! les schémas, la liste des tables et les requêtes sont les mêmes que /api/dv/...
-//! mais exposés sous le nom hr-api utilisé par le frontend Studio + DbExplorer.
-//!
-//! Mutations (`create_table`, `drop_table`, `add_column`, `remove_column`,
-//! `create_relation`, `query` SQL brut, `execute`, `schema/sync`) ne sont
-//! pas portées ici — utiliser les MCP `dv_*` (write ops) ou les routes
-//! REST `/api/dv/{slug}/{table}` (gateway officielle).
+//! Lecture : `db/schema`, `db/tables`, `db/tables/{t}`, `db/tables/{t}/rows`.
+//! Écriture (admin, identité `system`, verrou optimiste géré côté serveur) :
+//! `POST db/tables/{t}/insert`, `PATCH/DELETE db/tables/{t}/rows/{id}`. Le SQL
+//! brut n'existe plus (postgres-dataverse) — ces endpoints sont la voie admin.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use atelier_common::Identity;
 use atelier_dataverse::{
     TableDefinition,
-    dv_io::run_list,
+    audit::AuditOp,
+    crud::{build_get, build_insert, build_soft_delete, build_update},
+    dv_io::{MutationOutcome, run_get, run_list, run_mutation},
     query::{ListQuery, build_list_sql},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::routes::dv::{audit_after, parse_id_value};
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
@@ -37,6 +38,11 @@ pub fn router() -> Router<ApiState> {
         .route("/{slug}/db/tables", get(list_tables))
         .route("/{slug}/db/tables/{table}", get(describe_table))
         .route("/{slug}/db/tables/{table}/rows", post(query_rows))
+        .route("/{slug}/db/tables/{table}/insert", post(insert_row))
+        .route(
+            "/{slug}/db/tables/{table}/rows/{id}",
+            patch(update_row).delete(delete_row),
+        )
 }
 
 fn validate_slug(slug: &str) -> Result<(), Response> {
@@ -522,4 +528,241 @@ async fn query_rows(
         "rows": cleaned_rows,
         "total": total,
     }))
+}
+
+// ── Admin writes (postgres-dataverse via DV engine) ─────────────────────
+//
+// The DbExplorer is an admin tool: it acts as `Identity::system()` and the
+// optimistic-lock version is read server-side, so the browser never has to
+// track row versions. Mirrors the gateway write path in `routes::dv`.
+
+async fn engine_and_schema(
+    state: &ApiState,
+    slug: &str,
+) -> Result<
+    (
+        std::sync::Arc<atelier_dataverse::DataverseEngine>,
+        atelier_dataverse::DatabaseSchema,
+    ),
+    Response,
+> {
+    let dv = state.dv.as_ref().ok_or_else(|| {
+        err_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dataverse manager not initialised",
+        )
+    })?;
+    let engine = dv.engine_for(slug).await.map_err(|e| {
+        err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("dataverse engine: {e}"))
+    })?;
+    let schema = engine
+        .get_schema()
+        .await
+        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("get_schema: {e}")))?;
+    Ok((engine, schema))
+}
+
+/// Read the current optimistic-lock version of a live row, server-side.
+async fn current_version(
+    engine: &atelier_dataverse::DataverseEngine,
+    table_def: &TableDefinition,
+    id_value: &Value,
+) -> Result<i32, Response> {
+    let get = build_get(table_def, id_value, false);
+    match run_get(engine.pool(), table_def, &get.sql, &get.params).await {
+        Ok(Some(row)) => row
+            .get("version")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .ok_or_else(|| err_response(StatusCode::INTERNAL_SERVER_ERROR, "row missing version")),
+        Ok(None) => Err(err_response(StatusCode::NOT_FOUND, "row not found")),
+        Err(e) => Err(err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("get: {e}"))),
+    }
+}
+
+/// POST /api/apps/{slug}/db/tables/{table}/insert
+async fn insert_row(
+    State(state): State<ApiState>,
+    Path((slug, table)): Path<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table_name(&table) {
+        return r;
+    }
+    if let Err(r) = require_pg(&state, &slug).await {
+        return r;
+    }
+    let Value::Object(obj) = payload else {
+        return err_response(StatusCode::BAD_REQUEST, "insert payload must be a JSON object");
+    };
+    let payload_map: BTreeMap<String, Value> = obj.into_iter().collect();
+    let (engine, schema) = match engine_and_schema(&state, &slug).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(table_def) = schema.tables.iter().find(|t| t.name == table) else {
+        return err_response(StatusCode::NOT_FOUND, format!("table '{table}' not found"));
+    };
+    let identity = Identity::system();
+    let mutation = match build_insert(table_def, &payload_map, &identity) {
+        Ok(m) => m,
+        Err(e) => return err_response(StatusCode::UNPROCESSABLE_ENTITY, format!("insert: {e}")),
+    };
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &Value::Null,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(engine.pool(), &table, &row, AuditOp::Insert, &identity, None).await;
+            info!(slug = %slug, table = %table, "AppDb insert ok");
+            ok_data(row)
+        }
+        Ok(other) => err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("insert: unexpected {other:?}"),
+        ),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("insert: {e}")),
+    }
+}
+
+/// PATCH /api/apps/{slug}/db/tables/{table}/rows/{id}
+async fn update_row(
+    State(state): State<ApiState>,
+    Path((slug, table, id)): Path<(String, String, String)>,
+    Json(payload): Json<Value>,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table_name(&table) {
+        return r;
+    }
+    if let Err(r) = require_pg(&state, &slug).await {
+        return r;
+    }
+    let Value::Object(obj) = payload else {
+        return err_response(StatusCode::BAD_REQUEST, "update payload must be a JSON object");
+    };
+    let payload_map: BTreeMap<String, Value> = obj.into_iter().collect();
+    let id_value = parse_id_value(id);
+    let (engine, schema) = match engine_and_schema(&state, &slug).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(table_def) = schema.tables.iter().find(|t| t.name == table) else {
+        return err_response(StatusCode::NOT_FOUND, format!("table '{table}' not found"));
+    };
+    let version = match current_version(&engine, table_def, &id_value).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let before = {
+        let get = build_get(table_def, &id_value, true);
+        run_get(engine.pool(), table_def, &get.sql, &get.params)
+            .await
+            .ok()
+            .flatten()
+    };
+    let identity = Identity::system();
+    let mutation = match build_update(table_def, &id_value, version, &payload_map, &identity) {
+        Ok(m) => m,
+        Err(e) => return err_response(StatusCode::UNPROCESSABLE_ENTITY, format!("update: {e}")),
+    };
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &id_value,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(
+                engine.pool(),
+                &table,
+                &row,
+                AuditOp::Update,
+                &identity,
+                before.as_ref(),
+            )
+            .await;
+            info!(slug = %slug, table = %table, "AppDb update ok");
+            ok_data(row)
+        }
+        Ok(MutationOutcome::PreconditionFailed) => err_response(
+            StatusCode::PRECONDITION_FAILED,
+            "row changed concurrently — refresh and retry",
+        ),
+        Ok(MutationOutcome::NotFound) => err_response(StatusCode::NOT_FOUND, "row not found"),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("update: {e}")),
+    }
+}
+
+/// DELETE /api/apps/{slug}/db/tables/{table}/rows/{id} (soft-delete)
+async fn delete_row(
+    State(state): State<ApiState>,
+    Path((slug, table, id)): Path<(String, String, String)>,
+) -> Response {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    if let Err(r) = validate_table_name(&table) {
+        return r;
+    }
+    if let Err(r) = require_pg(&state, &slug).await {
+        return r;
+    }
+    let id_value = parse_id_value(id);
+    let (engine, schema) = match engine_and_schema(&state, &slug).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(table_def) = schema.tables.iter().find(|t| t.name == table) else {
+        return err_response(StatusCode::NOT_FOUND, format!("table '{table}' not found"));
+    };
+    let version = match current_version(&engine, table_def, &id_value).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let identity = Identity::system();
+    let mutation = match build_soft_delete(table_def, &id_value, version, &identity) {
+        Ok(m) => m,
+        Err(e) => return err_response(StatusCode::UNPROCESSABLE_ENTITY, format!("delete: {e}")),
+    };
+    match run_mutation(
+        engine.pool(),
+        table_def,
+        &mutation.sql,
+        &mutation.params,
+        None,
+        &[],
+        &id_value,
+    )
+    .await
+    {
+        Ok(MutationOutcome::Applied(row)) => {
+            audit_after(engine.pool(), &table, &row, AuditOp::Delete, &identity, None).await;
+            info!(slug = %slug, table = %table, "AppDb delete ok");
+            ok_data(json!({ "deleted": true }))
+        }
+        Ok(MutationOutcome::PreconditionFailed) => err_response(
+            StatusCode::PRECONDITION_FAILED,
+            "row changed concurrently — refresh and retry",
+        ),
+        Ok(MutationOutcome::NotFound) => err_response(StatusCode::NOT_FOUND, "row not found"),
+        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}")),
+    }
 }

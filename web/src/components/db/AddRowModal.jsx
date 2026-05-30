@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { X, Plus, Loader2 } from 'lucide-react';
-import { getFieldConfig, isReadOnly } from './fieldTypes';
+import { getFieldConfig, isReadOnly, coerceValue } from './fieldTypes';
 import { LookupCombobox } from './LookupCombobox';
 
 export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) {
@@ -29,11 +29,11 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
       editableCols.forEach(c => {
         const v = values[c.name];
         if (c.field_type === 'Boolean') {
-          row[c.name] = v ? 1 : 0;
+          row[c.name] = coerceValue(v, 'Boolean');
         } else if (v === '' || v == null) {
           if (!c.required) row[c.name] = null;
         } else {
-          row[c.name] = coerce(v, c.field_type);
+          row[c.name] = coerceValue(v, c.field_type);
         }
       });
       await onInsert(row);
@@ -185,23 +185,3 @@ function FieldInput({ col, cfg, relation, appSlug, value, onChange }) {
   );
 }
 
-function coerce(value, fieldType) {
-  switch (fieldType) {
-    case 'Number':
-    case 'AutoIncrement':
-    case 'Lookup': {
-      const n = parseInt(value, 10);
-      return isNaN(n) ? value : n;
-    }
-    case 'Decimal':
-    case 'Currency':
-    case 'Percent': {
-      const n = parseFloat(value);
-      return isNaN(n) ? value : n;
-    }
-    case 'Boolean':
-      return value ? 1 : 0;
-    default:
-      return value;
-  }
-}

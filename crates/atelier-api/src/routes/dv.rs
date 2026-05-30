@@ -245,7 +245,7 @@ fn parse_if_match(headers: &HeaderMap) -> Result<i32, Response> {
     })
 }
 
-fn parse_id_value(id: String) -> Value {
+pub(crate) fn parse_id_value(id: String) -> Value {
     // The id path segment can be int (i64) or uuid/string. We let the
     // CRUD builder cast via the table's `id_cast` so we don't have to
     // know the type here — just pass JSON.
@@ -259,7 +259,7 @@ fn parse_id_value(id: String) -> Value {
 /// Best-effort audit insert. Logged on failure but does not propagate
 /// the error — at the gateway boundary, an audit-only failure must not
 /// roll back a successful data mutation.
-async fn audit_after(
+pub(crate) async fn audit_after(
     pool: &sqlx_postgres::PgPool,
     table: &str,
     after_row: &Value,

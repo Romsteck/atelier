@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { queryAppDb } from '../../api/client';
+import { queryAppDbRows } from '../../api/client';
 import { ChevronDown, Loader2 } from 'lucide-react';
 
 /**
@@ -16,8 +16,10 @@ export function LookupCombobox({ appSlug, relation, value, onChange, required })
   useEffect(() => {
     if (!appSlug || !relation) return;
     setLoading(true);
-    const sql = `SELECT "${relation.to_column}", "${relation.display_column}" FROM "${relation.to_table}" ORDER BY "${relation.display_column}" LIMIT 500`;
-    queryAppDb(appSlug, sql)
+    queryAppDbRows(appSlug, relation.to_table, {
+      limit: 500,
+      order_by: relation.display_column,
+    })
       .then((res) => {
         const d = res.data;
         const data = d && typeof d === 'object' && 'data' in d ? d.data : d;

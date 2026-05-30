@@ -5,8 +5,11 @@ import {
   getAppDbTables,
   getAppDbTable,
   queryAppDbRows,
-  executeAppDb,
+  insertAppDbRow,
+  updateAppDbRow,
+  deleteAppDbRow,
 } from '../api/client';
+import { coerceValue } from '../components/db/fieldTypes';
 import { TableSidebar } from '../components/db/TableSidebar';
 import { DataGrid } from '../components/db/DataGrid';
 import { Pagination } from '../components/db/Pagination';
@@ -224,13 +227,10 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   }
 
   // ── Inline edit ──
+  // The dataverse gateway keys every row by its `id`; the optimistic-lock
+  // version is resolved server-side, so the browser only sends id + patch.
   function handleStartEdit(row, col, value) {
-    if (isPgBackend) {
-      showToast('Édition désactivée sur postgres-dataverse — utilise db.graphql', 'err');
-      return;
-    }
-    const colSchema = schema?.columns?.find(c => c.name === col);
-    if (colSchema?.primary_key) return;
+    if (col === 'id') return;
     setEditingCell({ row, col });
     setEditValue(value == null ? '' : String(value));
   }
@@ -239,57 +239,49 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     if (!editingCell || !result || !selectedAppSlug || !selectedTable) return;
 
     const row = result.rows[editingCell.row];
-    const original = row[editingCell.col];
+    const col = editingCell.col;
+    const original = row[col];
     if (String(original ?? '') === editValue) { setEditingCell(null); return; }
 
-    const pkCol = schema?.columns?.find(c => c.primary_key);
-    if (!pkCol) { setEditingCell(null); return; }
+    const id = row.id;
+    if (id == null) { setEditingCell(null); return; }
 
-    const pkValue = row[pkCol.name];
     setSavingCell(editingCell);
     setEditingCell(null);
 
     try {
-      const newVal = editValue === '' ? 'NULL' : `'${editValue.replace(/'/g, "''")}'`;
-      const sql = `UPDATE "${selectedTable}" SET "${editingCell.col}" = ${newVal} WHERE "${pkCol.name}" = '${String(pkValue).replace(/'/g, "''")}'`;
-      await executeAppDb(selectedAppSlug, sql);
+      const fieldType = schema?.columns?.find(c => c.name === col)?.field_type;
+      const newVal = coerceValue(editValue, fieldType);
+      await updateAppDbRow(selectedAppSlug, selectedTable, id, { [col]: newVal });
       await loadTableData();
-      showToast('Cellule mise a jour');
+      showToast('Cellule mise à jour');
     } catch (e) {
-      setError(e.message);
+      setError(e.response?.data?.error || e.message);
     } finally {
       setSavingCell(null);
     }
   }
 
-  // ── Insert row ──
+  // ── Insert row ── (rowData already typed by AddRowModal/coerceValue)
   async function handleInsertRow(rowData) {
     if (!selectedAppSlug || !selectedTable) return;
-    const cols = Object.keys(rowData);
-    const vals = cols.map(c => {
-      const v = rowData[c];
-      return v == null ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`;
-    });
-    const sql = `INSERT INTO "${selectedTable}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${vals.join(', ')})`;
-    await executeAppDb(selectedAppSlug, sql);
+    await insertAppDbRow(selectedAppSlug, selectedTable, rowData);
     await loadTableData();
-    showToast('Ligne ajoutee');
+    showToast('Ligne ajoutée');
   }
 
   // ── Delete rows ──
   async function handleDeleteSelected() {
-    if (!selectedAppSlug || !selectedTable || !result || !schema) return;
-    const pkCol = schema.columns?.find(c => c.primary_key);
-    if (!pkCol) throw new Error('No PK');
-
-    const pkValues = Array.from(selectedRows).map(idx => result.rows[idx][pkCol.name]);
-    for (const pk of pkValues) {
-      const sql = `DELETE FROM "${selectedTable}" WHERE "${pkCol.name}" = '${String(pk).replace(/'/g, "''")}'`;
-      await executeAppDb(selectedAppSlug, sql);
+    if (!selectedAppSlug || !selectedTable || !result) return;
+    const ids = Array.from(selectedRows)
+      .map(idx => result.rows[idx]?.id)
+      .filter(v => v != null);
+    for (const id of ids) {
+      await deleteAppDbRow(selectedAppSlug, selectedTable, id);
     }
     setSelectedRows(new Set());
     await loadTableData();
-    showToast(`${pkValues.length} ligne(s) supprimee(s)`);
+    showToast(`${ids.length} ligne(s) supprimée(s)`);
   }
 
   // ── Export CSV ──
@@ -329,17 +321,6 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
   const totalCount = result?.total_count || 0;
 
-  // Backend awareness: block SQL-brut writes when the app is on the
-  // postgres-dataverse backend. Reads still go through the IPC layer
-  // which routes correctly per backend; writes need a GraphQL UI that
-  // hasn't shipped yet (see Phase F.2 in the dataverse plan).
-  const selectedApp = appsWithTables.find(a => a.app.slug === selectedAppSlug)?.app;
-  const dbBackend = selectedApp?.db_backend || 'legacy-sqlite';
-  const isPgBackend = dbBackend === 'postgres-dataverse';
-  const writesDisabledReason = isPgBackend
-    ? 'Désactivé sur postgres-dataverse. Utilise l\'endpoint GraphQL /api/apps/{slug}/db/graphql ou les tools MCP db.graphql / db.insert / db.update / db.delete.'
-    : null;
-
   return (
     <>
       {!embedded && <PageHeader title="Bases de données" icon={Database} />}
@@ -374,18 +355,10 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
           {selectedAppSlug && (
             <span
-              className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm ${
-                isPgBackend
-                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
-              }`}
-              title={
-                isPgBackend
-                  ? 'Postgres + GraphQL (managé via atelier-dataverse)'
-                  : 'SQLite legacy (atelier-db) — migration vers postgres-dataverse à venir'
-              }
+              className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+              title="Postgres géré via atelier-dataverse (passerelle REST, plus d'accès direct)"
             >
-              {isPgBackend ? 'pg+graphql' : 'sqlite'}
+              dataverse
             </span>
           )}
 
@@ -400,18 +373,16 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
               />
               <button
                 onClick={() => setShowAddRow(true)}
-                disabled={isPgBackend}
-                className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
-                title={writesDisabledReason || 'Ajouter'}
+                className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer"
+                title="Ajouter"
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
               {selectedRows.size > 0 && (
                 <button
                   onClick={() => setShowDeleteConfirm(true)}
-                  disabled={isPgBackend}
-                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
-                  title={writesDisabledReason || 'Supprimer'}
+                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer"
+                  title="Supprimer"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
@@ -425,16 +396,6 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
             </div>
           )}
         </div>
-
-        {/* Postgres-dataverse banner: explain that writes go through GraphQL */}
-        {isPgBackend && selectedTable && (
-          <div className="px-4 py-1.5 text-[11px] bg-emerald-500/5 text-emerald-200 border-b border-emerald-500/20 shrink-0">
-            Cette app est sur le backend <strong>postgres-dataverse</strong>. Les
-            écritures via SQL brut sont désactivées — utilise le tool MCP{' '}
-            <code className="bg-black/40 px-1 rounded-sm">db.graphql</code> ou
-            l'endpoint <code className="bg-black/40 px-1 rounded-sm">/api/apps/{selectedAppSlug}/db/graphql</code>.
-          </div>
-        )}
 
         {/* Error */}
         {error && (

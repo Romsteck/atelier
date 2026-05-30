@@ -26,7 +26,11 @@ Les 6 apps (www, files, home, trader, wallet, myfrigo) tournent sur **postgres-d
 - Plus de création de `db.sqlite` ni d'injection d'env `DB_PATH`/`DATABASE_PATH`.
 - Le SQL brut (`db_query`/`db_exec`) renvoie une erreur dirigée vers `dv_*` / la passerelle REST `/api/dv/{slug}/{table}`.
 
-**Différé** — décommission de l'accès Postgres direct : chaque app utilise encore `DATABASE_URL` (sqlx direct) en plus de la passerelle. Couper l'accès direct (drop `DATABASE_URL` dans `sync_dv_env` + revoke LOGIN sur les rôles PG) attend la migration de chaque app en « passerelle uniquement » — cf. [.claude/rules/database-url-decommission-pending.md](.claude/rules/database-url-decommission-pending.md).
+**Décommission de l'accès Postgres direct — terminée (2026-05-30).** Les 6 apps sont en **gateway-only** : plus aucune lecture de `DATABASE_URL`/`sqlx` dans leur code (tout passe par la passerelle REST `/api/dv/{slug}` + `HR_DV_*`). `sync_dv_env` n'injecte plus `DATABASE_URL` et le DSN a été purgé des `.env` runtime — **le process applicatif n'a donc plus aucun moyen de se connecter directement** à Postgres.
+
+> ⚠️ Les rôles PG `app_{slug}` **gardent `LOGIN`** : c'est la passerelle (Atelier `atelier-dataverse`) qui se connecte à la base `app_{slug}` **en s'authentifiant comme ce rôle** (isolation par app via les credentials de `dataverse-secrets.json`), pas comme `dataverse_admin`. Les passer en `NOLOGIN` casse la passerelle — vérifié le 2026-05-30 (www : « le rôle app_www n'est pas autorisé à se connecter »). Ne PAS révoquer `LOGIN` sans d'abord re-câbler la passerelle sur un rôle partagé (ce qui perdrait l'isolation par app).
+
+Le DbExplorer écrit aussi via la passerelle (endpoints admin `POST/PATCH/DELETE /api/apps/{slug}/db/tables/...`), plus aucun SQL brut.
 
 Les anciens fichiers `db.sqlite` (snapshots d'avant migration, ~300 Mo) sont archivés puis supprimés sur Medion après vérification de parité Postgres (archive : `/var/backups/atelier-sqlite-snapshots-2026-05-30.tar.gz`).
 

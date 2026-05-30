@@ -53,3 +53,32 @@ export function isReadOnly(fieldType) {
 export function isTextLike(fieldType) {
   return ['Text', 'Email', 'Url', 'Phone', 'Uuid', 'Duration'].includes(fieldType);
 }
+
+/**
+ * Coerce a UI value to the JSON type the dataverse gateway expects for a
+ * given FieldType. Empty/null → null. Booleans are real JSON booleans (not
+ * 1/0 — that was a raw-SQL artifact), numbers are numbers, Json is parsed.
+ */
+export function coerceValue(value, fieldType) {
+  if (value === '' || value == null) return null;
+  switch (fieldType) {
+    case 'Number':
+    case 'AutoIncrement':
+    case 'Lookup': {
+      const n = parseInt(value, 10);
+      return Number.isNaN(n) ? value : n;
+    }
+    case 'Decimal':
+    case 'Currency':
+    case 'Percent': {
+      const n = parseFloat(value);
+      return Number.isNaN(n) ? value : n;
+    }
+    case 'Boolean':
+      return value === true || value === 'true' || value === 1 || value === '1';
+    case 'Json':
+      try { return JSON.parse(value); } catch { return value; }
+    default:
+      return value;
+  }
+}

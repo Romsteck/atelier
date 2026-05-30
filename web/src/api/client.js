@@ -192,9 +192,12 @@ export const updateAppEnv = (slug, env) => api.put(`/apps/${slug}/env`, { env })
 // Apps DB
 export const getAppDbTables = (slug) => api.get(`/apps/${slug}/db/tables`);
 export const getAppDbTable = (slug, table) => api.get(`/apps/${slug}/db/tables/${table}`);
-export const queryAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/query`, { sql, params });
-export const executeAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/execute`, { sql, params });
 export const queryAppDbRows = (slug, table, body) => api.post(`/apps/${slug}/db/tables/${table}/rows`, body);
+// Admin row writes — routed through the dataverse engine (postgres-dataverse).
+// No raw SQL: inserts/updates/deletes go through these typed endpoints.
+export const insertAppDbRow = (slug, table, row) => api.post(`/apps/${slug}/db/tables/${table}/insert`, row);
+export const updateAppDbRow = (slug, table, id, patch) => api.patch(`/apps/${slug}/db/tables/${table}/rows/${id}`, patch);
+export const deleteAppDbRow = (slug, table, id) => api.delete(`/apps/${slug}/db/tables/${table}/rows/${id}`);
 export const getAppDbSchema = (slug) => api.get(`/apps/${slug}/db/schema`);
 export const syncAppDbSchema = (slug) => api.post(`/apps/${slug}/db/sync`);
 export const createAppDbTable = (slug, body) => api.post(`/apps/${slug}/db/tables`, body);
@@ -202,22 +205,6 @@ export const dropAppDbTable = (slug, table) => api.delete(`/apps/${slug}/db/tabl
 export const addAppDbColumn = (slug, table, body) => api.post(`/apps/${slug}/db/tables/${table}/columns`, body);
 export const removeAppDbColumn = (slug, table, column) => api.delete(`/apps/${slug}/db/tables/${table}/columns/${column}`);
 export const createAppDbRelation = (slug, body) => api.post(`/apps/${slug}/db/relations`, body);
-
-// ── Postgres-Dataverse only ─────────────────────────────────────
-// These endpoints return an explicit error for apps still on the legacy
-// SQLite backend. The DbExplorer / SchemaPage branches on `app.db_backend`
-// to decide whether to use them (vs queryAppDb / executeAppDb).
-//
-// graphqlAppDb sends a GraphQL request via the canonical
-// {query, variables, operationName} envelope. Returns the standard
-// `{ data: {...}, errors: [...]? }` GraphQL response shape.
-export const graphqlAppDb = (slug, query, variables, operationName) =>
-  api.post(`/apps/${slug}/db/graphql`, { query, variables, operationName });
-
-// introspectAppDbSdl returns the SDL string of the app's GraphQL schema —
-// preferred over crafting client-side `__schema` queries when you just
-// need the types one shot (model discovery, autocompletion).
-export const introspectAppDbSdl = (slug) => api.get(`/apps/${slug}/db/introspect`);
 
 // ========== Logs ==========
 export const getLogs = (params = {}) => api.get('/logs', { params });
