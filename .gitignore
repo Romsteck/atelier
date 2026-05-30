@@ -12,3 +12,6 @@ web/dist/
 .env.local
 *.log
 *.pid
+
+# Claude Code — réglages locaux par machine (non versionnés)
+.claude/settings.local.json
