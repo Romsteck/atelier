@@ -862,7 +862,7 @@ async fn tool_docs_search(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(idx) = state.docs_index.as_ref() else {
         return tool_error(id, "Docs index unavailable (init failed at boot)");
     };
-    match idx.search(query, app_id, doc_type, limit) {
+    match idx.search(query, app_id, doc_type, limit).await {
         Ok(hits) => tool_success(
             id,
             json!({ "query": query, "count": hits.len(), "results": hits }),
@@ -1047,9 +1047,9 @@ async fn tool_docs_update(id: Value, args: &Value, state: &McpState) -> Value {
 
     match store.write_entry(app_id, doc_type, name, frontmatter, body) {
         Ok(entry) => {
-            // Sync FTS index.
+            // Sync the search index.
             if let Some(idx) = state.docs_index.as_ref() {
-                if let Err(e) = idx.upsert(&entry) {
+                if let Err(e) = idx.upsert(&entry).await {
                     warn!(error = %e, "Docs index upsert failed");
                 }
             }
@@ -1091,7 +1091,7 @@ async fn tool_docs_delete(id: Value, args: &Value, state: &McpState) -> Value {
         Ok(deleted) => {
             if deleted {
                 if let Some(idx) = state.docs_index.as_ref() {
-                    if let Err(e) = idx.remove(app_id, doc_type, name) {
+                    if let Err(e) = idx.remove(app_id, doc_type, name).await {
                         warn!(error = %e, "Docs index remove failed");
                     }
                 }
@@ -1135,12 +1135,11 @@ async fn tool_docs_diagram_set(id: Value, args: &Value, state: &McpState) -> Val
         return tool_error(id, &format!("diagram_set failed: {e}"));
     }
     // The diagram flag is now true; re-index the entry so search reflects it.
-    if let (Some(idx), Ok(entry)) = (
-        state.docs_index.as_ref(),
-        store.read_entry(app_id, doc_type, name),
-    ) {
-        if let Err(e) = idx.upsert(&entry) {
-            warn!(error = %e, "Docs index upsert failed after diagram set");
+    if let Some(idx) = state.docs_index.as_ref() {
+        if let Ok(entry) = store.read_entry(app_id, doc_type, name) {
+            if let Err(e) = idx.upsert(&entry).await {
+                warn!(error = %e, "Docs index upsert failed after diagram set");
+            }
         }
     }
     info!(app_id, doc_type = doc_type_str, name, bytes = mermaid.len(), "Docs diagram set");

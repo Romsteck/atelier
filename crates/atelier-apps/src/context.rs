@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-use crate::types::{AppStack, Application, Visibility};
+use crate::types::{Application, Visibility};
 
 /// Generates Claude Code context files for Atelier apps.
 pub struct ContextGenerator {

@@ -213,7 +213,7 @@ async fn search(State(state): State<ApiState>, Query(q): Query<SearchQuery>) -> 
         )
         .into_response();
     };
-    match idx.search(&q.q, q.app_id.as_deref(), doc_type, q.limit) {
+    match idx.search(&q.q, q.app_id.as_deref(), doc_type, q.limit).await {
         Ok(hits) => Json(json!({
             "success": true,
             "query": q.q,

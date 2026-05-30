@@ -15,3 +15,5 @@ tracing-subscriber = { workspace = true }
 ipnet = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }

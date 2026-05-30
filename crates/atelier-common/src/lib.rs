@@ -1,3 +1,4 @@
+pub mod control_db;
 pub mod events;
 pub mod identity;
 pub mod logging;

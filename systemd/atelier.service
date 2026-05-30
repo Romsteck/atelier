@@ -1,6 +1,10 @@
 [Unit]
 Description=Atelier — Application Platform
-After=network-online.target
+# Le control-plane (registres apps+ports, tâches, index docs) vit désormais dans
+# Postgres (atelier_meta). La supervision en dépend au démarrage — on ordonne donc
+# après postgresql. Pas de Requires= : si Postgres tombe à chaud, Atelier continue
+# de tourner (les écritures dégradent), mais un boot sans Postgres échoue volontairement.
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]

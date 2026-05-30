@@ -50,6 +50,21 @@ pub enum AppState {
     Unknown,
 }
 
+impl AppState {
+    /// Lowercase wire form, matching the serde representation. Used to mirror
+    /// the state into the `applications.state` column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Crashed => "crashed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Managed-DB engine for an app.
 ///
 /// Only `PostgresDataverse` exists post-migration: every app with a

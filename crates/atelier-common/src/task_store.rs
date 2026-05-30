@@ -1,63 +1,38 @@
-use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::error;
 
+use crate::control_db::sqlx::{PgPool, Pool, Postgres, Row, query};
 use crate::tasks::*;
 
-/// Persistent task storage backed by SQLite (WAL mode).
+/// Persistent task storage backed by the shared `atelier_meta` Postgres pool.
+///
+/// When `pool` is `None` (Postgres not configured / unreachable at boot) every
+/// operation degrades to a best-effort no-op — mirroring the previous
+/// error-swallowing behaviour so callers never need to handle storage errors.
 pub struct TaskStore {
-    conn: Arc<Mutex<rusqlite::Connection>>,
+    pool: Option<Pool<Postgres>>,
 }
 
 impl TaskStore {
-    pub fn new(path: &Path) -> Result<Self, rusqlite::Error> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS tasks (
-                id          TEXT PRIMARY KEY,
-                task_type   TEXT NOT NULL,
-                title       TEXT NOT NULL,
-                status      TEXT NOT NULL DEFAULT 'pending',
-                trigger_type TEXT NOT NULL,
-                trigger_info TEXT,
-                target      TEXT,
-                created_at  TEXT NOT NULL,
-                started_at  TEXT,
-                finished_at TEXT,
-                error       TEXT
-            );
+    /// Build the store over the shared control-plane pool and run crash
+    /// recovery (orphaned `pending`/`running` tasks → `failed`).
+    pub async fn new(pool: Option<PgPool>) -> Self {
+        let store = Self { pool };
+        if let Some(p) = store.pool.as_ref() {
+            if let Err(e) = query(
+                "UPDATE tasks SET status = 'failed', error = 'Interrupted by restart', \
+                 finished_at = now() WHERE status IN ('pending', 'running')",
+            )
+            .execute(p)
+            .await
+            {
+                error!("Failed to recover orphaned tasks: {}", e);
+            }
+        }
+        store
+    }
 
-            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-            CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);
-
-            CREATE TABLE IF NOT EXISTS task_steps (
-                id          TEXT PRIMARY KEY,
-                task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                step_name   TEXT NOT NULL,
-                status      TEXT NOT NULL DEFAULT 'running',
-                started_at  TEXT NOT NULL,
-                finished_at TEXT,
-                message     TEXT,
-                details     TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_steps_task ON task_steps(task_id);
-            ",
-        )?;
-
-        // Mark orphaned running tasks as failed (from previous crash)
-        conn.execute(
-            "UPDATE tasks SET status = 'failed', error = 'Interrupted by restart', finished_at = ?1 WHERE status IN ('pending', 'running')",
-            rusqlite::params![chrono::Utc::now().to_rfc3339()],
-        )?;
-
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
+    fn pool(&self) -> Option<&Pool<Postgres>> {
+        self.pool.as_ref()
     }
 
     // ── CRUD Tasks ──
@@ -91,44 +66,58 @@ impl TaskStore {
             error: None,
         };
 
-        let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "INSERT INTO tasks (id, task_type, title, status, trigger_type, trigger_info, target, created_at)
-             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                id,
-                task_type_str,
-                title,
-                trigger_type,
-                trigger_info,
-                target,
-                now.to_rfc3339(),
-            ],
-        ) {
-            error!("Failed to create task: {}", e);
+        if let Some(p) = self.pool() {
+            if let Err(e) = query(
+                "INSERT INTO tasks (id, task_type, title, status, trigger_type, trigger_info, target, created_at) \
+                 VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7)",
+            )
+            .bind(&id)
+            .bind(&task_type_str)
+            .bind(title)
+            .bind(&trigger_type)
+            .bind(&trigger_info)
+            .bind(target)
+            .bind(now)
+            .execute(p)
+            .await
+            {
+                error!("Failed to create task: {}", e);
+            }
         }
 
         task
     }
 
     pub async fn update_task_status(&self, id: &str, status: TaskStatus, error_msg: Option<&str>) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let Some(p) = self.pool() else { return };
+        let now = chrono::Utc::now();
         let status_str = status.to_string();
-        let conn = self.conn.lock().await;
 
         let result = match status {
-            TaskStatus::Running => conn.execute(
-                "UPDATE tasks SET status = ?2, started_at = ?3 WHERE id = ?1",
-                rusqlite::params![id, status_str, now],
-            ),
-            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => conn.execute(
-                "UPDATE tasks SET status = ?2, finished_at = ?3, error = ?4 WHERE id = ?1",
-                rusqlite::params![id, status_str, now, error_msg],
-            ),
-            _ => conn.execute(
-                "UPDATE tasks SET status = ?2 WHERE id = ?1",
-                rusqlite::params![id, status_str],
-            ),
+            TaskStatus::Running => {
+                query("UPDATE tasks SET status = $2, started_at = $3 WHERE id = $1")
+                    .bind(id)
+                    .bind(&status_str)
+                    .bind(now)
+                    .execute(p)
+                    .await
+            }
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => {
+                query("UPDATE tasks SET status = $2, finished_at = $3, error = $4 WHERE id = $1")
+                    .bind(id)
+                    .bind(&status_str)
+                    .bind(now)
+                    .bind(error_msg)
+                    .execute(p)
+                    .await
+            }
+            _ => {
+                query("UPDATE tasks SET status = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(&status_str)
+                    .execute(p)
+                    .await
+            }
         };
 
         if let Err(e) = result {
@@ -137,13 +126,21 @@ impl TaskStore {
     }
 
     pub async fn get_task(&self, id: &str) -> Option<Task> {
-        let conn = self.conn.lock().await;
-        conn.query_row(
-            "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error FROM tasks WHERE id = ?1",
-            rusqlite::params![id],
-            |row| Ok(row_to_task(row)),
+        let p = self.pool()?;
+        match query(
+            "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error \
+             FROM tasks WHERE id = $1",
         )
-        .ok()
+        .bind(id)
+        .fetch_optional(p)
+        .await
+        {
+            Ok(row) => row.map(|r| row_to_task(&r)),
+            Err(e) => {
+                error!("Failed to get task: {}", e);
+                None
+            }
+        }
     }
 
     pub async fn list_tasks(
@@ -152,67 +149,68 @@ impl TaskStore {
         offset: u32,
         status: Option<&str>,
     ) -> (Vec<Task>, u32) {
-        let conn = self.conn.lock().await;
-
-        let total: u32 = if let Some(s) = status {
-            conn.query_row(
-                "SELECT COUNT(*) FROM tasks WHERE status = ?1",
-                rusqlite::params![s],
-                |row| row.get(0),
-            )
-            .unwrap_or(0)
-        } else {
-            conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
-                .unwrap_or(0)
+        let Some(p) = self.pool() else {
+            return (vec![], 0);
         };
 
-        let tasks: Vec<Task> = if let Some(s) = status {
-            let mut stmt = match conn.prepare(
-                "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error FROM tasks WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("Failed to prepare list_tasks: {}", e);
-                    return (vec![], 0);
-                }
-            };
-            stmt.query_map(rusqlite::params![s, limit, offset], |row| {
-                Ok(row_to_task(row))
-            })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
+        let total: i64 = if let Some(s) = status {
+            match query("SELECT COUNT(*) FROM tasks WHERE status = $1")
+                .bind(s)
+                .fetch_one(p)
+                .await
+            {
+                Ok(row) => row.get::<i64, _>(0),
+                Err(_) => 0,
+            }
         } else {
-            let mut stmt = match conn.prepare(
-                "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error FROM tasks ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("Failed to prepare list_tasks: {}", e);
-                    return (vec![], 0);
-                }
-            };
-            stmt.query_map(rusqlite::params![limit, offset], |row| Ok(row_to_task(row)))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        };
-
-        (tasks, total)
-    }
-
-    pub async fn get_active_tasks(&self) -> Vec<Task> {
-        let conn = self.conn.lock().await;
-        let mut stmt = match conn.prepare(
-            "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error FROM tasks WHERE status IN ('pending', 'running') ORDER BY created_at DESC",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to prepare get_active_tasks: {}", e);
-                return vec![];
+            match query("SELECT COUNT(*) FROM tasks").fetch_one(p).await {
+                Ok(row) => row.get::<i64, _>(0),
+                Err(_) => 0,
             }
         };
 
-        match stmt.query_map([], |row| Ok(row_to_task(row))) {
-            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+        let rows = if let Some(s) = status {
+            query(
+                "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error \
+                 FROM tasks WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            )
+            .bind(s)
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(p)
+            .await
+        } else {
+            query(
+                "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error \
+                 FROM tasks ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            )
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(p)
+            .await
+        };
+
+        match rows {
+            Ok(rows) => (rows.iter().map(row_to_task).collect(), total as u32),
+            Err(e) => {
+                error!("Failed to list tasks: {}", e);
+                (vec![], 0)
+            }
+        }
+    }
+
+    pub async fn get_active_tasks(&self) -> Vec<Task> {
+        let Some(p) = self.pool() else {
+            return vec![];
+        };
+        match query(
+            "SELECT id, task_type, title, status, trigger_type, trigger_info, target, created_at, started_at, finished_at, error \
+             FROM tasks WHERE status IN ('pending', 'running') ORDER BY created_at DESC",
+        )
+        .fetch_all(p)
+        .await
+        {
+            Ok(rows) => rows.iter().map(row_to_task).collect(),
             Err(e) => {
                 error!("Failed to get active tasks: {}", e);
                 vec![]
@@ -237,64 +235,78 @@ impl TaskStore {
             details: None,
         };
 
-        let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "INSERT INTO task_steps (id, task_id, step_name, status, started_at, message) VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
-            rusqlite::params![id, task_id, name, now.to_rfc3339(), message],
-        ) {
-            error!("Failed to create step: {}", e);
+        if let Some(p) = self.pool() {
+            if let Err(e) = query(
+                "INSERT INTO task_steps (id, task_id, step_name, status, started_at, message) \
+                 VALUES ($1, $2, $3, 'running', $4, $5)",
+            )
+            .bind(&id)
+            .bind(task_id)
+            .bind(name)
+            .bind(now)
+            .bind(message)
+            .execute(p)
+            .await
+            {
+                error!("Failed to create step: {}", e);
+            }
         }
 
         step
     }
 
     pub async fn complete_step(&self, id: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "UPDATE task_steps SET status = 'done', finished_at = ?2 WHERE id = ?1",
-            rusqlite::params![id, now],
-        ) {
+        let Some(p) = self.pool() else { return };
+        if let Err(e) = query("UPDATE task_steps SET status = 'done', finished_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(chrono::Utc::now())
+            .execute(p)
+            .await
+        {
             error!("Failed to complete step: {}", e);
         }
     }
 
     pub async fn fail_step(&self, id: &str, error_msg: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "UPDATE task_steps SET status = 'failed', finished_at = ?2, message = ?3 WHERE id = ?1",
-            rusqlite::params![id, now, error_msg],
-        ) {
+        let Some(p) = self.pool() else { return };
+        if let Err(e) =
+            query("UPDATE task_steps SET status = 'failed', finished_at = $2, message = $3 WHERE id = $1")
+                .bind(id)
+                .bind(chrono::Utc::now())
+                .bind(error_msg)
+                .execute(p)
+                .await
+        {
             error!("Failed to fail step: {}", e);
         }
     }
 
     pub async fn update_step(&self, id: &str, message: &str, details: Option<serde_json::Value>) {
-        let details_str = details.map(|d| d.to_string());
-        let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "UPDATE task_steps SET message = ?2, details = ?3 WHERE id = ?1",
-            rusqlite::params![id, message, details_str],
-        ) {
+        let Some(p) = self.pool() else { return };
+        if let Err(e) = query("UPDATE task_steps SET message = $2, details = $3 WHERE id = $1")
+            .bind(id)
+            .bind(message)
+            .bind(details)
+            .execute(p)
+            .await
+        {
             error!("Failed to update step: {}", e);
         }
     }
 
     pub async fn get_steps(&self, task_id: &str) -> Vec<TaskStep> {
-        let conn = self.conn.lock().await;
-        let mut stmt = match conn.prepare(
-            "SELECT id, task_id, step_name, status, started_at, finished_at, message, details FROM task_steps WHERE task_id = ?1 ORDER BY started_at ASC",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to prepare get_steps: {}", e);
-                return vec![];
-            }
+        let Some(p) = self.pool() else {
+            return vec![];
         };
-
-        match stmt.query_map(rusqlite::params![task_id], |row| Ok(row_to_step(row))) {
-            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+        match query(
+            "SELECT id, task_id, step_name, status, started_at, finished_at, message, details \
+             FROM task_steps WHERE task_id = $1 ORDER BY started_at ASC",
+        )
+        .bind(task_id)
+        .fetch_all(p)
+        .await
+        {
+            Ok(rows) => rows.iter().map(row_to_step).collect(),
             Err(e) => {
                 error!("Failed to get steps: {}", e);
                 vec![]
@@ -305,61 +317,56 @@ impl TaskStore {
     // ── Cleanup ──
 
     pub async fn cleanup_old(&self, max_age_days: u32) {
+        let Some(p) = self.pool() else { return };
         let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days as i64);
-        let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "DELETE FROM task_steps WHERE task_id IN (SELECT id FROM tasks WHERE created_at < ?1)",
-            rusqlite::params![cutoff.to_rfc3339()],
-        ) {
-            error!("Failed to cleanup old steps: {}", e);
-        }
-        if let Err(e) = conn.execute(
-            "DELETE FROM tasks WHERE created_at < ?1",
-            rusqlite::params![cutoff.to_rfc3339()],
-        ) {
+        // task_steps cascade-delete via the FK, so a single DELETE suffices.
+        if let Err(e) = query("DELETE FROM tasks WHERE created_at < $1")
+            .bind(cutoff)
+            .execute(p)
+            .await
+        {
             error!("Failed to cleanup old tasks: {}", e);
         }
     }
 }
 
-fn row_to_task(row: &rusqlite::Row) -> Task {
-    let status_str: String = row.get(3).unwrap_or_default();
-    let trigger_type: String = row.get(4).unwrap_or_default();
-    let trigger_info: Option<String> = row.get(5).unwrap_or(None);
-    let task_type_str: String = row.get(1).unwrap_or_default();
+fn row_to_task(row: &crate::control_db::sqlx::PgRow) -> Task {
+    let status_str: String = row.get("status");
+    let trigger_type: String = row.get("trigger_type");
+    let trigger_info: Option<String> = row.get("trigger_info");
+    let task_type_str: String = row.get("task_type");
 
     Task {
-        id: row.get(0).unwrap_or_default(),
+        id: row.get("id"),
         task_type: serde_json::from_value(serde_json::Value::String(task_type_str))
             .unwrap_or(TaskType::ContainerCreate),
-        title: row.get(2).unwrap_or_default(),
+        title: row.get("title"),
         status: parse_status(&status_str),
         trigger: match trigger_type.as_str() {
             "user" => TaskTrigger::User(trigger_info.unwrap_or_default()),
             "api" => TaskTrigger::Api,
             _ => TaskTrigger::System,
         },
-        target: row.get(6).unwrap_or(None),
-        created_at: parse_datetime(row.get::<_, String>(7).ok()),
-        started_at: parse_datetime_opt(row.get::<_, Option<String>>(8).ok().flatten()),
-        finished_at: parse_datetime_opt(row.get::<_, Option<String>>(9).ok().flatten()),
-        error: row.get(10).unwrap_or(None),
+        target: row.get("target"),
+        created_at: row.get("created_at"),
+        started_at: row.get("started_at"),
+        finished_at: row.get("finished_at"),
+        error: row.get("error"),
     }
 }
 
-fn row_to_step(row: &rusqlite::Row) -> TaskStep {
-    let status_str: String = row.get(3).unwrap_or_default();
-    let details_str: Option<String> = row.get(7).unwrap_or(None);
+fn row_to_step(row: &crate::control_db::sqlx::PgRow) -> TaskStep {
+    let status_str: String = row.get("status");
 
     TaskStep {
-        id: row.get(0).unwrap_or_default(),
-        task_id: row.get(1).unwrap_or_default(),
-        step_name: row.get(2).unwrap_or_default(),
+        id: row.get("id"),
+        task_id: row.get("task_id"),
+        step_name: row.get("step_name"),
         status: parse_status(&status_str),
-        started_at: parse_datetime(row.get::<_, String>(4).ok()),
-        finished_at: parse_datetime_opt(row.get::<_, Option<String>>(5).ok().flatten()),
-        message: row.get(6).unwrap_or(None),
-        details: details_str.and_then(|s| serde_json::from_str(&s).ok()),
+        started_at: row.get("started_at"),
+        finished_at: row.get("finished_at"),
+        message: row.get("message"),
+        details: row.get("details"),
     }
 }
 
@@ -372,15 +379,4 @@ fn parse_status(s: &str) -> TaskStatus {
         "cancelled" => TaskStatus::Cancelled,
         _ => TaskStatus::Pending,
     }
-}
-
-fn parse_datetime(s: Option<String>) -> chrono::DateTime<chrono::Utc> {
-    s.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-        .map(|d| d.with_timezone(&chrono::Utc))
-        .unwrap_or_else(chrono::Utc::now)
-}
-
-fn parse_datetime_opt(s: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
-    s.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-        .map(|d| d.with_timezone(&chrono::Utc))
 }

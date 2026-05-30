@@ -16,7 +16,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:4100";
 const DEFAULT_IPC_SOCK: &str = "/run/atelier.sock";
 const DEFAULT_DOCS_DIR: &str = "/var/lib/atelier/docs";
-const DEFAULT_DOCS_INDEX: &str = "/var/lib/atelier/docs-index.sqlite";
 const DEFAULT_GIT_REPOS_DIR: &str = "/var/lib/atelier/git/repos";
 const DEFAULT_APPS_STATE_DIR: &str = "/var/lib/atelier/state";
 const DEFAULT_APPS_SRC_ROOT: &str = "/var/lib/atelier/apps";
@@ -46,7 +45,6 @@ async fn main() -> Result<()> {
     let http_addr = std::env::var("ATELIER_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_HTTP_ADDR.to_string());
     let ipc_sock = PathBuf::from(std::env::var("ATELIER_IPC_SOCK").unwrap_or_else(|_| DEFAULT_IPC_SOCK.to_string()));
     let docs_dir = PathBuf::from(std::env::var("ATELIER_DOCS_DIR").unwrap_or_else(|_| DEFAULT_DOCS_DIR.to_string()));
-    let docs_index_path = PathBuf::from(std::env::var("ATELIER_DOCS_INDEX").unwrap_or_else(|_| DEFAULT_DOCS_INDEX.to_string()));
     let git_repos_dir = PathBuf::from(std::env::var("ATELIER_GIT_REPOS_DIR").unwrap_or_else(|_| DEFAULT_GIT_REPOS_DIR.to_string()));
     let apps_state_dir = PathBuf::from(std::env::var("ATELIER_APPS_STATE_DIR").unwrap_or_else(|_| DEFAULT_APPS_STATE_DIR.to_string()));
     let apps_src_root = PathBuf::from(std::env::var("ATELIER_APPS_SRC_ROOT").unwrap_or_else(|_| DEFAULT_APPS_SRC_ROOT.to_string()));
@@ -60,7 +58,6 @@ async fn main() -> Result<()> {
         http_addr = %http_addr,
         ipc_sock = %ipc_sock.display(),
         docs_dir = %docs_dir.display(),
-        docs_index = %docs_index_path.display(),
         git_repos_dir = %git_repos_dir.display(),
         apps_state_dir = %apps_state_dir.display(),
         apps_src_root = %apps_src_root.display(),
@@ -69,29 +66,36 @@ async fn main() -> Result<()> {
         "atelier starting"
     );
 
-    let docs_index = open_docs_index(&docs_index_path, &docs_dir);
     let git = Arc::new(atelier_git::GitService::with_repos_dir(git_repos_dir));
     let dv = init_dv(&apps_state_dir).await;
-    let task_store = open_task_store(&apps_state_dir);
+    // Shared control-plane Postgres pool (atelier_meta). Backs the task store +
+    // docs index now; the registry/port stores migrate onto it in a later stage.
+    let meta_pool = init_control_db().await;
+    let task_store =
+        Arc::new(atelier_common::task_store::TaskStore::new(meta_pool.clone()).await);
+    let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
-    // Phase 9 — Apps supervisor wiring. Atelier devient le canonical owner des
-    // registries (apps.json, port-registry.json) sous apps_data_dir. Au premier
-    // boot, on seed depuis le mirror synced.
-    seed_apps_data(&apps_data_dir, &apps_state_dir);
+    // Apps supervisor wiring. The registries (apps + ports) live in the shared
+    // `atelier_meta` Postgres in a single `applications` table — app and port in
+    // one transactional row, so the old apps.json/port-registry.json desync (and
+    // its boot-time `reconcile` hack) can no longer happen. Postgres is therefore
+    // a hard dependency for supervision: fail fast if the pool is unavailable
+    // (mirrors the previous `.expect()` on the local-file registry load).
+    let registry_pool = meta_pool
+        .clone()
+        .expect("control-plane Postgres (atelier_meta) required for the app registry");
+    // One-shot backfill from the legacy JSON/SQLite files if the DB is empty.
+    if let Err(err) = backfill_control_plane(&registry_pool, &apps_data_dir, &apps_state_dir).await {
+        warn!(?err, "control-plane backfill skipped/failed");
+    }
     let events = Arc::new(atelier_common::events::EventBus::new());
-    let app_registry = atelier_apps::AppRegistry::load_from(apps_data_dir.join("apps.json"))
+    let app_registry = atelier_apps::AppRegistry::new(registry_pool.clone())
         .await
-        .expect("Failed to load app registry");
-    let port_registry = atelier_apps::PortRegistry::load_from(
-        apps_data_dir.join("port-registry.json"),
-        3001,
-    )
-    .await
-    .expect("Failed to load port registry");
-
-    // apps.json and port-registry.json are persisted independently — a crash
-    // between the two writes can desync them. Repair before adopting apps.
-    reconcile_registries(&app_registry, &port_registry).await;
+        .expect("Failed to load app registry from Postgres");
+    let port_registry =
+        atelier_apps::PortRegistry::new(registry_pool.clone(), 3001)
+            .await
+            .expect("Failed to load port registry from Postgres");
 
     let supervisor = Arc::new(atelier_apps::AppSupervisor::new(
         app_registry.clone(),
@@ -315,67 +319,104 @@ fn seed_apps_data(data_dir: &PathBuf, state_dir: &PathBuf) {
     }
 }
 
-/// Cross-check the two persisted registries at boot. `apps.json` and
-/// `port-registry.json` are written independently (no shared transaction), so
-/// a crash between the two writes can leave them inconsistent. This pass
-/// repairs a port registry that lost an entry an app still references, and
-/// logs any orphan port assignment.
-async fn reconcile_registries(
-    app_registry: &atelier_apps::AppRegistry,
-    port_registry: &atelier_apps::PortRegistry,
-) {
-    let apps = app_registry.list().await;
-    let ports = port_registry.snapshot().await;
-    let app_slugs: std::collections::HashSet<&str> =
-        apps.iter().map(|a| a.slug.as_str()).collect();
+/// One-shot, idempotent import of the legacy file-based control plane into the
+/// `applications` table. Runs only when the table is empty (fresh cutover);
+/// once populated, Postgres is the source of truth and this is a no-op.
+///
+/// Merges `apps.json` (app metadata) with `port-registry.json` (slug→port) into
+/// one row per app. The legacy files are left in place as a rollback safety net.
+async fn backfill_control_plane(
+    pool: &atelier_common::control_db::sqlx::PgPool,
+    apps_data_dir: &PathBuf,
+    state_dir: &PathBuf,
+) -> anyhow::Result<()> {
+    use atelier_common::control_db::sqlx::{Row, query};
 
-    let mut conflicts = 0u32;
-    for app in &apps {
-        if app.port == 0 {
-            continue;
-        }
-        match port_registry.ensure(&app.slug, app.port).await {
-            Ok(true) => {}
-            Ok(false) => conflicts += 1,
-            Err(err) => warn!(slug = %app.slug, ?err, "reconcile: port-registry repair failed"),
-        }
+    // Ensure the legacy files are present (seed from the read-only mirror) so a
+    // first boot after the schema migration can import them.
+    seed_apps_data(apps_data_dir, state_dir);
+
+    let row = query("SELECT COUNT(*) AS n FROM applications")
+        .fetch_one(pool)
+        .await?;
+    let existing: i64 = row.get("n");
+    if existing > 0 {
+        return Ok(());
     }
 
-    let mut orphans = 0u32;
-    for (slug, port) in &ports {
-        if !app_slugs.contains(slug.as_str()) {
-            orphans += 1;
-            warn!(slug = %slug, port, "reconcile: orphan port assignment (no matching app)");
-        }
+    let apps_path = apps_data_dir.join("apps.json");
+    let ports_path = apps_data_dir.join("port-registry.json");
+    if !apps_path.exists() {
+        info!("backfill: no apps.json — starting with an empty registry");
+        return Ok(());
     }
 
-    info!(
-        apps = apps.len(),
-        ports = ports.len(),
-        conflicts,
-        orphans,
-        "registry reconciliation done"
-    );
+    let apps: Vec<atelier_apps::Application> = {
+        let bytes = std::fs::read(&apps_path)?;
+        if bytes.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_slice(&bytes)?
+        }
+    };
+    let ports: std::collections::BTreeMap<String, u16> = if ports_path.exists() {
+        let bytes = std::fs::read(&ports_path)?;
+        if bytes.is_empty() {
+            Default::default()
+        } else {
+            // {base_port, assignments:{slug:port}} — only assignments matter here.
+            let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+            serde_json::from_value(v.get("assignments").cloned().unwrap_or_default())
+                .unwrap_or_default()
+        }
+    } else {
+        Default::default()
+    };
+
+    let mut imported = 0u32;
+    for mut app in apps {
+        // The port registry file is authoritative for the port (apps.json's copy
+        // is the one that "drifts"); fall back to the app's own port otherwise.
+        let port = ports.get(&app.slug).copied().unwrap_or(app.port);
+        app.port = port;
+        let data = serde_json::to_value(&app)?;
+        let port_col: Option<i32> = if port == 0 { None } else { Some(port as i32) };
+        query(
+            "INSERT INTO applications (slug, port, state, data, updated_at) \
+             VALUES ($1, $2, $3, $4, now()) ON CONFLICT (slug) DO NOTHING",
+        )
+        .bind(&app.slug)
+        .bind(port_col)
+        .bind(app.state.as_str())
+        .bind(&data)
+        .execute(pool)
+        .await?;
+        imported += 1;
+    }
+    info!(imported, "control-plane backfill complete (apps.json/port-registry.json → Postgres)");
+    Ok(())
 }
 
-fn open_task_store(state_dir: &PathBuf) -> Arc<atelier_common::task_store::TaskStore> {
-    let path = state_dir.join("tasks.db");
-    match atelier_common::task_store::TaskStore::new(&path) {
-        Ok(store) => {
-            info!(path = %path.display(), "task_store opened");
-            Arc::new(store)
+/// Open the shared control-plane Postgres pool (`atelier_meta`) via the
+/// dataverse admin DSN and apply the control-plane DDL. Returns `None` when the
+/// DSN is absent or Postgres is unreachable — the control-plane stores then run
+/// in degraded mode (matching the soft-dependency behaviour of dv/logs/surveillance).
+async fn init_control_db() -> Option<atelier_common::control_db::sqlx::PgPool> {
+    let admin_dsn = match std::env::var("ATELIER_DV_ADMIN_URL").ok().filter(|s| !s.is_empty()) {
+        Some(u) => u,
+        None => {
+            warn!("ATELIER_DV_ADMIN_URL absent — control-plane Postgres désactivé (mode dégradé)");
+            return None;
+        }
+    };
+    match atelier_common::control_db::bootstrap(&admin_dsn).await {
+        Ok(pool) => {
+            info!("control-plane Postgres ready (atelier_meta)");
+            Some(pool)
         }
         Err(err) => {
-            warn!(?err, "task_store init failed — endpoints retourneront vide");
-            // Fallback : on ouvre une DB temporaire éphémère, pour ne pas casser
-            // le boot du service. Les endpoints /api/tasks renverront simplement
-            // "tasks: [], total: 0" jusqu'au prochain sync.
-            let tmp = std::env::temp_dir().join("atelier-tasks-empty.db");
-            let _ = std::fs::remove_file(&tmp);
-            Arc::new(
-                atelier_common::task_store::TaskStore::new(&tmp)
-                    .expect("fallback task_store"),
-            )
+            warn!(?err, "control-plane Postgres bootstrap failed — mode dégradé");
+            None
         }
     }
 }
@@ -434,16 +475,19 @@ async fn init_dv(state_dir: &PathBuf) -> Option<Arc<atelier_dataverse::manager::
     Some(Arc::new(mgr))
 }
 
-fn open_docs_index(index_path: &PathBuf, docs_dir: &PathBuf) -> Option<Arc<atelier_docs::Index>> {
-    match atelier_docs::Index::open_or_rebuild(index_path, docs_dir.clone()) {
+/// Build the Postgres-backed docs search index over the shared `atelier_meta`
+/// pool, rebuilding it from the filesystem if the table is empty. Returns `None`
+/// when the control-plane pool is absent (Postgres down) — search then degrades
+/// to 503, matching the previous behaviour when the SQLite index failed to open.
+async fn open_docs_index(
+    meta_pool: &Option<atelier_common::control_db::sqlx::PgPool>,
+    docs_dir: &PathBuf,
+) -> Option<Arc<atelier_docs::Index>> {
+    let pool = meta_pool.clone()?;
+    match atelier_docs::Index::new_or_rebuild(pool, docs_dir.clone()).await {
         Ok(idx) => {
-            let count = idx.count().unwrap_or(0);
-            info!(
-                fts5 = idx.fts5_available,
-                entries = count,
-                index = %index_path.display(),
-                "docs index opened"
-            );
+            let count = idx.count().await.unwrap_or(0);
+            info!(entries = count, "docs index ready (atelier_meta)");
             Some(Arc::new(idx))
         }
         Err(err) => {
