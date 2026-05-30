@@ -381,8 +381,8 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
               }`}
               title={
                 isPgBackend
-                  ? 'Postgres + GraphQL (managé via hr-dataverse)'
-                  : 'SQLite legacy (hr-db) — migration vers postgres-dataverse à venir'
+                  ? 'Postgres + GraphQL (managé via atelier-dataverse)'
+                  : 'SQLite legacy (atelier-db) — migration vers postgres-dataverse à venir'
               }
             >
               {isPgBackend ? 'pg+graphql' : 'sqlite'}

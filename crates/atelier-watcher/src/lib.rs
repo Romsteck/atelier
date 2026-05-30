@@ -2,7 +2,7 @@
 ///
 /// Runs **manuels uniquement** (déclenchés depuis l'UI ou MCP) — pas de
 /// scheduler interne : un cron consommerait trop l'abonnement GPT+. Chaque run
-/// passe par les gates throttle + budget + diff-aware, puis Codex. Le
+/// passe par les gates cap (`MAX_OPEN_FINDINGS`) + diff-aware, puis Codex. Le
 /// git_watcher auto-résout les findings via les commits `fix(surveillance:N)`.
 /// Inert tant que le binaire `codex` n'est pas installé — un run renvoie alors
 /// une erreur propre.
@@ -21,7 +21,6 @@ pub(crate) mod sqlx {
 }
 
 pub mod codex;
-pub mod config;
 pub mod findings;
 pub mod git_watcher;
 pub mod gitutil;
@@ -31,11 +30,16 @@ pub mod runs;
 pub mod service;
 
 pub use codex::{CodexConfig, CodexRunner};
-pub use config::{AppSurveillanceConfig, ConfigStore, ConfigUpdate};
 pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding};
 pub use memory::{Memory, MemoryStore};
 pub use runs::{Run, RunsStore};
 pub use service::{AppMeta, SurveillanceConfig, SurveillanceService};
+
+/// Per-kind cap on OPEN findings. A new scan of a kind is skipped once the kind
+/// already has this many open findings (the UI also disables the launch button),
+/// and the prompt tells Codex to report only the most important issues within
+/// this budget. Single source of truth — no longer per-app configurable.
+pub const MAX_OPEN_FINDINGS: i64 = 6;
 
 /// Live event broadcast to the frontend over WebSocket whenever a finding or
 /// run changes. Payload is intentionally minimal — the frontend reloads the

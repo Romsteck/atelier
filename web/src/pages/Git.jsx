@@ -329,7 +329,7 @@ function Git() {
                 </Button>
               </div>
               <a
-                href="https://github.com/settings/tokens/new?scopes=repo&description=HomeRoute"
+                href="https://github.com/settings/tokens/new?scopes=repo&description=Atelier"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 mt-2"

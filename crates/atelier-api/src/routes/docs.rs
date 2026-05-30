@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use hr_docs::{DocType, Store, validate_app_id, validate_entry_name};
+use atelier_docs::{DocType, Store, validate_app_id, validate_entry_name};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -72,7 +72,7 @@ async fn get_overview(
     }
     match store(&state).overview(&app_id) {
         Ok(ov) => Json(json!({ "success": true, "data": ov })).into_response(),
-        Err(hr_docs::StoreError::AppNotFound(_)) => {
+        Err(atelier_docs::StoreError::AppNotFound(_)) => {
             err(StatusCode::NOT_FOUND, "App not found").into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
@@ -148,7 +148,7 @@ async fn get_entry(
             }))
             .into_response()
         }
-        Err(hr_docs::StoreError::EntryNotFound { .. }) => {
+        Err(atelier_docs::StoreError::EntryNotFound { .. }) => {
             err(StatusCode::NOT_FOUND, "Entry not found").into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
@@ -235,7 +235,7 @@ async fn completeness(
     let s = store(&state);
     let overview = match s.overview(&app_id) {
         Ok(o) => o,
-        Err(hr_docs::StoreError::AppNotFound(_)) => {
+        Err(atelier_docs::StoreError::AppNotFound(_)) => {
             return err(StatusCode::NOT_FOUND, "App not found").into_response();
         }
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),

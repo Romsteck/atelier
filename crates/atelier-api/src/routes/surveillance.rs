@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::{instrument, warn};
 
-use atelier_watcher::{ConfigUpdate, FindingFilter};
+use atelier_watcher::FindingFilter;
 
 use crate::state::ApiState;
 
@@ -20,8 +20,6 @@ use crate::state::ApiState;
 ///   POST   /api/apps/:slug/findings/:id/resolve
 ///   POST   /api/apps/:slug/surveillance/run     -- P3+ (returns 501 for now)
 ///   GET    /api/apps/:slug/surveillance/runs
-///   GET    /api/apps/:slug/surveillance/config
-///   PUT    /api/apps/:slug/surveillance/config
 pub fn global_router() -> Router<ApiState> {
     Router::new().route("/", get(list_findings_global))
 }
@@ -47,10 +45,6 @@ pub fn app_router() -> Router<ApiState> {
             get(get_transcript),
         )
         .route("/{slug}/surveillance/runs", get(list_runs))
-        .route(
-            "/{slug}/surveillance/config",
-            get(get_config).put(update_config),
-        )
 }
 
 fn err503() -> axum::response::Response {
@@ -277,37 +271,6 @@ async fn list_runs(
             Json(json!({"runs": items, "total": items.len()})),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
-}
-
-#[instrument(skip(state))]
-async fn get_config(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-) -> impl IntoResponse {
-    let Some(cs) = state.surveillance.config() else {
-        return err503();
-    };
-    match cs.get(&slug).await {
-        Ok(Some(cfg)) => (StatusCode::OK, Json(cfg)).into_response(),
-        Ok(None) => err(StatusCode::NOT_FOUND, "config not seeded for this slug"),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
-}
-
-#[instrument(skip(state, body))]
-async fn update_config(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-    Json(body): Json<ConfigUpdate>,
-) -> impl IntoResponse {
-    let Some(cs) = state.surveillance.config() else {
-        return err503();
-    };
-    match cs.update(&slug, body).await {
-        Ok(Some(cfg)) => (StatusCode::OK, Json(cfg)).into_response(),
-        Ok(None) => err(StatusCode::NOT_FOUND, "config not seeded for this slug"),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

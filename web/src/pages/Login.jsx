@@ -56,7 +56,7 @@ function Login() {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600  mb-4">
             <Shield className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-white">HomeRoute</h1>
+          <h1 className="text-2xl font-bold text-white">Atelier</h1>
           <p className="text-gray-400 mt-2">Connexion securisee</p>
         </div>
 
@@ -132,7 +132,7 @@ function Login() {
 
         {/* Footer */}
         <p className="text-center text-gray-500 text-sm mt-6">
-          HomeRoute - Votre routeur intelligent
+          Atelier - Plateforme applicative
         </p>
       </div>
     </div>

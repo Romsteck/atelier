@@ -90,15 +90,11 @@ CREATE INDEX IF NOT EXISTS memory_app_used_idx
     ON agent_memory (slug, last_used_at DESC);
 
 -- ---------------------------------------------------------------------------
--- surveillance_config — paramétrage per-app (gates des runs manuels).
--- Pas de scheduler interne : un cron consommerait trop l'abonnement GPT+.
+-- surveillance_config — SUPPRIMÉE. Le seul gate restant est le plafond de
+-- findings ouvertes par kind (constante `MAX_OPEN_FINDINGS`, non configurable)
+-- + le diff-aware. Plus de budget tokens/jour ni de throttle paramétrable.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS surveillance_config (
-    slug                       TEXT         PRIMARY KEY,
-    throttle_threshold         INTEGER      NOT NULL DEFAULT 5,
-    max_tokens_per_day         INTEGER      NOT NULL DEFAULT 100000,
-    updated_at                 TIMESTAMPTZ  NOT NULL DEFAULT now()
-);
+DROP TABLE IF EXISTS surveillance_config;
 
 -- ---------------------------------------------------------------------------
 -- Schema evolution (idempotent) — pour les DB déjà créées avant l'ajout du
@@ -112,13 +108,6 @@ ALTER TABLE surveillance_runs  ADD  CONSTRAINT runs_kind_chk CHECK (kind IN ('co
 -- Ajout du statut `cancelled` (kill d'un run in-progress depuis l'UI).
 ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_status_chk;
 ALTER TABLE surveillance_runs  ADD  CONSTRAINT runs_status_chk CHECK (status IN ('running', 'success', 'success_empty', 'skipped', 'failed', 'cancelled'));
--- Scheduling retiré (consommait trop l'abonnement GPT+) — purge des colonnes cron.
-ALTER TABLE surveillance_config DROP COLUMN IF EXISTS cron_code_review_enabled;
-ALTER TABLE surveillance_config DROP COLUMN IF EXISTS cron_suggestions_enabled;
-ALTER TABLE surveillance_config DROP COLUMN IF EXISTS cron_security_enabled;
-ALTER TABLE surveillance_config DROP COLUMN IF EXISTS code_review_at;
-ALTER TABLE surveillance_config DROP COLUMN IF EXISTS suggestions_at;
-ALTER TABLE surveillance_config DROP COLUMN IF EXISTS security_at;
 -- Promotion findings→todos retirée (système de todos supprimé) — purge statut + colonne.
 UPDATE findings SET status = 'open' WHERE status = 'promoted';
 ALTER TABLE findings DROP COLUMN IF EXISTS promoted_todo_id;

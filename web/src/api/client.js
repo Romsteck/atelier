@@ -252,7 +252,3 @@ export const getSurveillanceTranscript = (slug, runId) =>
   api.get(`/apps/${slug}/surveillance/runs/${runId}/transcript`);
 export const listSurveillanceRuns = (slug, params = {}) =>
   api.get(`/apps/${slug}/surveillance/runs`, { params });
-export const getSurveillanceConfig = (slug) =>
-  api.get(`/apps/${slug}/surveillance/config`);
-export const updateSurveillanceConfig = (slug, body) =>
-  api.put(`/apps/${slug}/surveillance/config`, body);

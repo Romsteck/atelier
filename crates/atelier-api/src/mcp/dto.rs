@@ -1,9 +1,9 @@
 //! App-domain DTOs returned by IPC/MCP handlers.
 //!
-//! Previously lived under `hr_ipc::types` (deleted there 2026-05-27 once
+//! Previously lived under `atelier_ipc::types` (deleted there 2026-05-27 once
 //! the apps subsystem moved to Atelier). The shapes mirror
-//! `hr_apps::types::Application` & co but stay in atelier-api to avoid a
-//! crate-dep cycle (`hr-apps` -> `hr-ipc` -> `hr-apps`).
+//! `atelier_apps::types::Application` & co but stay in atelier-api to avoid a
+//! crate-dep cycle (`atelier-apps` -> `atelier-ipc` -> `atelier-apps`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

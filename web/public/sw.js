@@ -1,4 +1,4 @@
-const CACHE_NAME = 'homeroute-v5';
+const CACHE_NAME = 'atelier-v1';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/favicon.svg',

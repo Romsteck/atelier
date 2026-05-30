@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
     );
 
     let docs_index = open_docs_index(&docs_index_path, &docs_dir);
-    let git = Arc::new(hr_git::GitService::with_repos_dir(git_repos_dir));
+    let git = Arc::new(atelier_git::GitService::with_repos_dir(git_repos_dir));
     let dv = init_dv(&apps_state_dir).await;
     let task_store = open_task_store(&apps_state_dir);
 
@@ -78,11 +78,11 @@ async fn main() -> Result<()> {
     // registries (apps.json, port-registry.json) sous apps_data_dir. Au premier
     // boot, on seed depuis le mirror synced.
     seed_apps_data(&apps_data_dir, &apps_state_dir);
-    let events = Arc::new(hr_common::events::EventBus::new());
-    let app_registry = hr_apps::AppRegistry::load_from(apps_data_dir.join("apps.json"))
+    let events = Arc::new(atelier_common::events::EventBus::new());
+    let app_registry = atelier_apps::AppRegistry::load_from(apps_data_dir.join("apps.json"))
         .await
         .expect("Failed to load app registry");
-    let port_registry = hr_apps::PortRegistry::load_from(
+    let port_registry = atelier_apps::PortRegistry::load_from(
         apps_data_dir.join("port-registry.json"),
         3001,
     )
@@ -93,20 +93,20 @@ async fn main() -> Result<()> {
     // between the two writes can desync them. Repair before adopting apps.
     reconcile_registries(&app_registry, &port_registry).await;
 
-    let supervisor = Arc::new(hr_apps::AppSupervisor::new(
+    let supervisor = Arc::new(atelier_apps::AppSupervisor::new(
         app_registry.clone(),
         port_registry.clone(),
         events.app_state.clone(),
     ));
-    let db_manager = Arc::new(hr_apps::db_manager::DbManager::new(apps_src_root.clone()));
-    let context_generator = Arc::new(hr_apps::context::ContextGenerator::new(
+    let db_manager = Arc::new(atelier_apps::db_manager::DbManager::new(apps_src_root.clone()));
+    let context_generator = Arc::new(atelier_apps::context::ContextGenerator::new(
         apps_src_root.clone(),
         base_domain.clone(),
         mcp_endpoint.clone(),
     ));
     info!(
         apps = app_registry.list().await.len(),
-        "hr-apps supervisor wired (Phase 9 prep)"
+        "atelier-apps supervisor wired (Phase 9 prep)"
     );
 
     // Adopt existing transient units for apps marked Running. À chaque boot
@@ -117,8 +117,8 @@ async fn main() -> Result<()> {
     }
 
     // Surveillance IA (Codex code-review + suggestions + sécurité). Migrate
-    // schema, seed config, spawn git_watcher loop. Runs manuels uniquement (pas
-    // de scheduler). Inert tant que le binaire `codex` n'est pas installé. Noop
+    // schema, spawn git_watcher loop. Runs manuels uniquement (pas de
+    // scheduler). Inert tant que le binaire `codex` n'est pas installé. Noop
     // si pas de DSN.
     let surveillance = init_surveillance(&app_registry, &apps_src_root).await;
 
@@ -139,6 +139,10 @@ async fn main() -> Result<()> {
         context_generator,
         logs,
         surveillance,
+    );
+    info!(
+        slugs = ?state.preserve_prefix_slugs,
+        "apps_proxy: prefix-preserving (no-strip) slugs"
     );
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
@@ -177,9 +181,9 @@ async fn main() -> Result<()> {
 
 /// Bootstrap the surveillance service. Reuses `ATELIER_DV_ADMIN_URL` (the
 /// dataverse admin DSN) to CREATE DATABASE `atelier_meta` on first boot,
-/// run its migrations, seed `surveillance_config` for every app of the
-/// registry (crons OFF by default), and spawn the cron + git_watcher loops.
-/// If the env var is missing, the service starts in noop mode.
+/// run its migrations, and spawn the git_watcher loop. `seed_apps` carries the
+/// registry's slugs + stack hints (used for prompts + git_watcher). If the env
+/// var is missing, the service starts in noop mode.
 ///
 /// Codex CLI invocation is configured via env (all optional, sane defaults):
 ///   - `ATELIER_CODEX_BIN`         (default "codex")
@@ -190,7 +194,7 @@ async fn main() -> Result<()> {
 /// The Atelier MCP server is registered once in `~/.codex/config.toml` via
 /// `codex mcp add atelier --url http://127.0.0.1:4100/mcp --bearer-token-env-var MCP_TOKEN`.
 async fn init_surveillance(
-    registry: &hr_apps::AppRegistry,
+    registry: &atelier_apps::AppRegistry,
     apps_src_root: &PathBuf,
 ) -> SurveillanceService {
     let admin_dsn = std::env::var("ATELIER_DV_ADMIN_URL")
@@ -319,8 +323,8 @@ fn seed_apps_data(data_dir: &PathBuf, state_dir: &PathBuf) {
 /// repairs a port registry that lost an entry an app still references, and
 /// logs any orphan port assignment.
 async fn reconcile_registries(
-    app_registry: &hr_apps::AppRegistry,
-    port_registry: &hr_apps::PortRegistry,
+    app_registry: &atelier_apps::AppRegistry,
+    port_registry: &atelier_apps::PortRegistry,
 ) {
     let apps = app_registry.list().await;
     let ports = port_registry.snapshot().await;
@@ -356,9 +360,9 @@ async fn reconcile_registries(
     );
 }
 
-fn open_task_store(state_dir: &PathBuf) -> Arc<hr_common::task_store::TaskStore> {
+fn open_task_store(state_dir: &PathBuf) -> Arc<atelier_common::task_store::TaskStore> {
     let path = state_dir.join("tasks.db");
-    match hr_common::task_store::TaskStore::new(&path) {
+    match atelier_common::task_store::TaskStore::new(&path) {
         Ok(store) => {
             info!(path = %path.display(), "task_store opened");
             Arc::new(store)
@@ -371,14 +375,14 @@ fn open_task_store(state_dir: &PathBuf) -> Arc<hr_common::task_store::TaskStore>
             let tmp = std::env::temp_dir().join("atelier-tasks-empty.db");
             let _ = std::fs::remove_file(&tmp);
             Arc::new(
-                hr_common::task_store::TaskStore::new(&tmp)
+                atelier_common::task_store::TaskStore::new(&tmp)
                     .expect("fallback task_store"),
             )
         }
     }
 }
 
-async fn init_dv(state_dir: &PathBuf) -> Option<Arc<hr_dataverse::manager::DataverseManager>> {
+async fn init_dv(state_dir: &PathBuf) -> Option<Arc<atelier_dataverse::manager::DataverseManager>> {
     let admin_dsn = match std::env::var("ATELIER_DV_ADMIN_URL") {
         Ok(v) if !v.is_empty() => v,
         _ => {
@@ -392,9 +396,9 @@ async fn init_dv(state_dir: &PathBuf) -> Option<Arc<hr_dataverse::manager::Datav
         return None;
     }
 
-    let mgr = match hr_dataverse::manager::DataverseManager::connect_admin(
+    let mgr = match atelier_dataverse::manager::DataverseManager::connect_admin(
         admin_dsn,
-        hr_dataverse::provisioning::ProvisioningConfig::default(),
+        atelier_dataverse::provisioning::ProvisioningConfig::default(),
         Some(secrets_path.clone()),
     )
     .await
@@ -410,7 +414,7 @@ async fn init_dv(state_dir: &PathBuf) -> Option<Arc<hr_dataverse::manager::Datav
     let dv_host = std::env::var("ATELIER_DV_HOST").unwrap_or_else(|_| DEFAULT_DV_HOST.to_string());
     if let Ok(bytes) = std::fs::read(&secrets_path) {
         if let Ok(secrets) =
-            serde_json::from_slice::<hr_dataverse::manager::SecretsFile>(&bytes)
+            serde_json::from_slice::<atelier_dataverse::manager::SecretsFile>(&bytes)
         {
             let mut applied = 0;
             for (slug, sec) in secrets.apps.iter() {
@@ -432,8 +436,8 @@ async fn init_dv(state_dir: &PathBuf) -> Option<Arc<hr_dataverse::manager::Datav
     Some(Arc::new(mgr))
 }
 
-fn open_docs_index(index_path: &PathBuf, docs_dir: &PathBuf) -> Option<Arc<hr_docs::Index>> {
-    match hr_docs::Index::open_or_rebuild(index_path, docs_dir.clone()) {
+fn open_docs_index(index_path: &PathBuf, docs_dir: &PathBuf) -> Option<Arc<atelier_docs::Index>> {
+    match atelier_docs::Index::open_or_rebuild(index_path, docs_dir.clone()) {
         Ok(idx) => {
             let count = idx.count().unwrap_or(0);
             info!(

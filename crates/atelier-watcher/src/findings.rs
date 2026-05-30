@@ -167,26 +167,21 @@ impl FindingsStore {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Count findings still OPEN and older than N hours — the throttle proxy
-    /// for "unaddressed findings piling up". Decoupled from todo promotion.
-    pub async fn count_stale_open(
-        &self,
-        slug: &str,
-        kind: &str,
-        older_than_hours: i32,
-    ) -> anyhow::Result<i64> {
+    /// Count all OPEN findings for a (slug, kind). Backs the per-kind cap gate
+    /// (`MAX_OPEN_FINDINGS`): a new scan is skipped once the cap is reached, and
+    /// the count is injected into the prompt so Codex self-limits to the most
+    /// important issues.
+    pub async fn count_open(&self, slug: &str, kind: &str) -> anyhow::Result<i64> {
         let sql = r#"
             SELECT COUNT(*)::bigint AS c
               FROM findings
              WHERE slug = $1
                AND kind = $2
                AND status = 'open'
-               AND first_seen < now() - make_interval(hours => $3::int)
         "#;
         let row = query(sql)
             .bind(slug)
             .bind(kind)
-            .bind(older_than_hours)
             .fetch_one(&self.pool)
             .await?;
         Ok(row.try_get("c")?)

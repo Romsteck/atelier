@@ -1,4 +1,4 @@
-//! IPC handlers for `App*` variants (hr-apps integration).
+//! IPC handlers for `App*` variants (atelier-apps integration).
 //!
 //! Split out of `ipc_handler.rs` to keep that file manageable.
 
@@ -13,10 +13,10 @@ use super::dto::{
 };
 use super::scaffold;
 
-use hr_apps::types::{AppStack, AppState, Application, DbBackend, Visibility, valid_slug};
-use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
-use hr_common::events::AppBuildEvent;
-use hr_dataverse::DataverseManager;
+use atelier_apps::types::{AppStack, AppState, Application, DbBackend, Visibility, valid_slug};
+use atelier_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
+use atelier_common::events::AppBuildEvent;
+use atelier_dataverse::DataverseManager;
 use tokio::sync::broadcast;
 
 fn detect_level(msg: &str) -> &'static str {
@@ -31,12 +31,12 @@ fn detect_level(msg: &str) -> &'static str {
         "info"
     }
 }
-use hr_ipc::EdgeClient;
-use hr_ipc::types::IpcResponse;
+use atelier_ipc::EdgeClient;
+use atelier_ipc::types::IpcResponse;
 use tracing::{error, info, warn};
 
 /// Base URL of the Atelier API as seen *from the build host*. Used to bind
-/// the `origin` remote of each app's working tree to the hr-git Smart-HTTP
+/// the `origin` remote of each app's working tree to the atelier-git Smart-HTTP
 /// endpoint at scaffold time. Override via `ATELIER_GIT_API_BASE`.
 pub const GIT_API_BASE: &str = "http://127.0.0.1:4100";
 /// Cap stdout/stderr capture per pipeline stage to ~1 MB.
@@ -99,7 +99,7 @@ pub struct AppsContext {
     /// (e.g. running on CloudMaster while hr-edge lives on Medion).
     /// `set_app_route` / `remove_app_route` calls are then skipped with a warn.
     pub edge: Option<Arc<EdgeClient>>,
-    pub git: Arc<hr_git::GitService>,
+    pub git: Arc<atelier_git::GitService>,
     pub base_domain: String,
     /// Per-slug locks to serialise concurrent `build()` invocations.
     pub build_locks:
@@ -126,7 +126,7 @@ impl AppsContext {
     pub(crate) async fn dv_engine_for(
         &self,
         slug: &str,
-    ) -> std::result::Result<Arc<hr_dataverse::DataverseEngine>, IpcResponse> {
+    ) -> std::result::Result<Arc<atelier_dataverse::DataverseEngine>, IpcResponse> {
         let mgr = self.dataverse_manager.as_ref().ok_or_else(|| {
             IpcResponse::err(
                 "postgres-dataverse backend is not configured on this orchestrator \
@@ -185,7 +185,7 @@ impl AppsContext {
     pub async fn sync_dv_env_all(&self) {
         let apps = self.supervisor.registry.list().await;
         for app in apps {
-            if matches!(app.db_backend, hr_apps::DbBackend::PostgresDataverse) {
+            if matches!(app.db_backend, atelier_apps::DbBackend::PostgresDataverse) {
                 if let Err(e) = self.sync_dv_env(&app.slug).await {
                     warn!(slug = %app.slug, error = %e, "sync_dv_env failed");
                 }
@@ -299,7 +299,7 @@ impl AppsContext {
             return IpcResponse::err(format!("registry upsert failed: {e}"));
         }
 
-        // hr-git bare repo (best-effort).
+        // atelier-git bare repo (best-effort).
         if let Err(e) = self.git.create_repo(&slug).await {
             warn!(slug = %slug, error = %e, "AppCreate: git create_repo failed (non-fatal)");
         }
@@ -758,7 +758,7 @@ impl AppsContext {
                 Ok(e) => e,
                 Err(resp) => return resp,
             };
-            // hr_dataverse::DatabaseSchema → AppDbTableSchema (same JSON shape).
+            // atelier_dataverse::DatabaseSchema → AppDbTableSchema (same JSON shape).
             let dv_schema = match engine.get_schema().await {
                 Ok(s) => s,
                 Err(e) => return IpcResponse::err(format!("get_schema: {e}")),
@@ -925,12 +925,12 @@ impl AppsContext {
         }
 
         // Parse filters from JSON
-        let filters: Vec<hr_apps::Filter> = filters_json
+        let filters: Vec<atelier_apps::Filter> = filters_json
             .iter()
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect();
 
-        let pagination = hr_apps::Pagination {
+        let pagination = atelier_apps::Pagination {
             limit: limit.unwrap_or(100),
             offset: offset.unwrap_or(0),
             order_by,
@@ -1024,7 +1024,7 @@ impl AppsContext {
                 Ok(e) => e,
                 Err(resp) => return resp,
             };
-            let def: hr_dataverse::TableDefinition = match serde_json::from_value(def_value) {
+            let def: atelier_dataverse::TableDefinition = match serde_json::from_value(def_value) {
                 Ok(d) => d,
                 Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
             };
@@ -1034,7 +1034,7 @@ impl AppsContext {
                 Err(e) => IpcResponse::err(format!("create_table: {e}")),
             };
         }
-        let def: hr_apps::TableDefinition = match serde_json::from_value(def_value) {
+        let def: atelier_apps::TableDefinition = match serde_json::from_value(def_value) {
             Ok(d) => d,
             Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
         };
@@ -1076,7 +1076,7 @@ impl AppsContext {
                 Ok(e) => e,
                 Err(resp) => return resp,
             };
-            let col: hr_dataverse::ColumnDefinition = match serde_json::from_value(column) {
+            let col: atelier_dataverse::ColumnDefinition = match serde_json::from_value(column) {
                 Ok(c) => c,
                 Err(e) => return IpcResponse::err(format!("invalid column definition: {e}")),
             };
@@ -1086,7 +1086,7 @@ impl AppsContext {
                 Err(e) => IpcResponse::err(format!("add_column: {e}")),
             };
         }
-        let col: hr_apps::ColumnDefinition = match serde_json::from_value(column) {
+        let col: atelier_apps::ColumnDefinition = match serde_json::from_value(column) {
             Ok(c) => c,
             Err(e) => return IpcResponse::err(format!("invalid column definition: {e}")),
         };
@@ -1128,7 +1128,7 @@ impl AppsContext {
                 Ok(e) => e,
                 Err(resp) => return resp,
             };
-            let rel: hr_dataverse::RelationDefinition = match serde_json::from_value(relation) {
+            let rel: atelier_dataverse::RelationDefinition = match serde_json::from_value(relation) {
                 Ok(r) => r,
                 Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
             };
@@ -1138,7 +1138,7 @@ impl AppsContext {
                 Err(e) => IpcResponse::err(format!("create_relation: {e}")),
             };
         }
-        let rel: hr_apps::RelationDefinition = match serde_json::from_value(relation) {
+        let rel: atelier_apps::RelationDefinition = match serde_json::from_value(relation) {
             Ok(r) => r,
             Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
         };
@@ -2259,8 +2259,8 @@ async fn remove_env_var(path: &std::path::Path, key: &str) -> std::io::Result<()
 /// Set / replace a single `KEY=value` line in a `.env` file. Idempotent:
 /// any existing line with the same key (commented-out or not) is dropped
 /// and the new one appended at the end. Creates the file if it doesn't
-/// exist (parent directory must already exist — the orchestrator manages
-/// `/opt/homeroute/apps/{slug}/` lifecycle elsewhere).
+/// exist (parent directory must already exist — the supervisor manages
+/// `/var/lib/atelier/apps/{slug}/` lifecycle elsewhere).
 async fn upsert_env_var(path: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
     let existing = match tokio::fs::read_to_string(path).await {
         Ok(s) => s,
@@ -2293,7 +2293,7 @@ async fn upsert_env_var(path: &std::path::Path, key: &str, value: &str) -> std::
 /// REST gateway and MCP `dv_list`, after translating the DbExplorer's
 /// legacy filter shape into a dvexpr `$filter` string.
 async fn query_rows_via_dv_sql(
-    manager: Option<&Arc<hr_dataverse::DataverseManager>>,
+    manager: Option<&Arc<atelier_dataverse::DataverseManager>>,
     slug: &str,
     table: &str,
     legacy_filters: &[serde_json::Value],
@@ -2302,9 +2302,9 @@ async fn query_rows_via_dv_sql(
     order_by: Option<&str>,
     order_desc: bool,
 ) -> IpcResponse {
-    use hr_common::Identity;
-    use hr_dataverse::dv_io::run_list;
-    use hr_dataverse::query::{build_list_sql, Direction, ListQuery, OrderBy};
+    use atelier_common::Identity;
+    use atelier_dataverse::dv_io::run_list;
+    use atelier_dataverse::query::{build_list_sql, Direction, ListQuery, OrderBy};
 
     let Some(mgr) = manager else {
         return IpcResponse::err("postgres-dataverse backend not configured");
@@ -2445,7 +2445,7 @@ fn process_status_to_dto(slug: &str, s: &ProcessStatus) -> AppStatusData {
 }
 
 /// Initialise (idempotent) le working tree git de l'app et pointe `origin`
-/// vers le bare repo hr-git servi par Atelier (Smart-HTTP). Idempotent : safe
+/// vers le bare repo atelier-git servi par Atelier (Smart-HTTP). Idempotent : safe
 /// à re-rouler. Si `ATELIER_BUILD_HOST` est défini, exécute via SSH ; sinon
 /// localement dans le src_dir de l'app.
 pub(crate) async fn bind_git_remote_for_slug(slug: &str) -> anyhow::Result<()> {

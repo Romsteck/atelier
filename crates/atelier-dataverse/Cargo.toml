@@ -1,0 +1,28 @@
+[package]
+name = "atelier-dataverse"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+
+# Postgres driver — see workspace comment for why we don't use the sqlx meta-crate
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }
+
+# Expression language used for $filter and computed columns.
+atelier-dvexpr = { workspace = true }
+
+# Identity (User/App/System) threaded through every gateway operation.
+atelier-common = { workspace = true }
+
+[dev-dependencies]
+futures-util = { workspace = true }

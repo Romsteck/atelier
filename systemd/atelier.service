@@ -1,5 +1,5 @@
 [Unit]
-Description=Atelier — HomeRoute application platform
+Description=Atelier — Application Platform
 After=network-online.target
 Wants=network-online.target
 

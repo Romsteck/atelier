@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  ShieldAlert, RefreshCw, Play, Square, Terminal, Settings as SettingsIcon, ChevronDown, ChevronRight,
-  X, Check, AlertOctagon, Lightbulb, Clock, Save, ShieldCheck,
+  ShieldAlert, RefreshCw, Play, Square, Terminal, ChevronDown, ChevronRight,
+  X, Check, AlertOctagon, Lightbulb, Clock, ShieldCheck,
 } from 'lucide-react';
 import {
   getAppFindings,
@@ -11,8 +11,6 @@ import {
   cancelSurveillanceRun,
   getSurveillanceTranscript,
   listSurveillanceRuns,
-  getSurveillanceConfig,
-  updateSurveillanceConfig,
 } from '../api/client';
 import MarkdownView from './docs/MarkdownView';
 import useWebSocket from '../hooks/useWebSocket';
@@ -44,6 +42,11 @@ const STATUSES = [
   { key: 'resolved', label: 'Résolues', color: 'text-emerald-300' },
   { key: 'dismissed', label: 'Dismiss', color: 'text-gray-400' },
 ];
+
+// Per-kind cap on open findings (mirror MAX_OPEN_FINDINGS in atelier-watcher).
+// At/above this, a kind's scan is skipped server-side and its launch button is
+// disabled here.
+const MAX_OPEN_FINDINGS = 6;
 
 const sevMeta = (k) => SEVERITIES.find((s) => s.key === k) || SEVERITIES[3];
 const catLabel = (kind, cat) => (CATEGORIES[kind] && CATEGORIES[kind][cat]) || cat || 'autres';
@@ -205,51 +208,6 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
   );
 }
 
-function ConfigPanel({ slug, onClose }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    getSurveillanceConfig(slug).then((r) => setCfg(r.data)).catch((e) => setErr(e.response?.data?.error || e.message));
-  }, [slug]);
-
-  if (!cfg && !err) return <div className="p-3 text-xs text-gray-500">Chargement…</div>;
-  if (err) return <div className="p-3 text-xs text-red-400">{err}</div>;
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const r = await updateSurveillanceConfig(slug, {
-        throttle_threshold: cfg.throttle_threshold,
-        max_tokens_per_day: cfg.max_tokens_per_day,
-      });
-      setCfg(r.data);
-      onClose?.();
-    } catch (e) {
-      setErr(e.response?.data?.error || e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="p-3 space-y-2 text-xs">
-      <div className="text-gray-500">Runs manuels uniquement — gates appliqués à chaque lancement.</div>
-      <label className="flex items-center gap-2">
-        <span className="w-40">Throttle (findings open max)</span>
-        <input type="number" min={1} max={100} value={cfg.throttle_threshold} onChange={(e) => setCfg({ ...cfg, throttle_threshold: parseInt(e.target.value, 10) || 5 })} className="ml-auto bg-gray-900 border border-gray-700 px-1 py-0.5 rounded-sm text-gray-200 w-20" />
-      </label>
-      <label className="flex items-center gap-2">
-        <span className="w-40">Budget tokens / jour</span>
-        <input type="number" min={1000} step={1000} value={cfg.max_tokens_per_day} onChange={(e) => setCfg({ ...cfg, max_tokens_per_day: parseInt(e.target.value, 10) || 100000 })} className="ml-auto bg-gray-900 border border-gray-700 px-1 py-0.5 rounded-sm text-gray-200 w-24" />
-      </label>
-      <button onClick={save} disabled={saving} className="mt-2 px-3 py-1.5 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded-sm flex items-center gap-1 disabled:opacity-50">
-        <Save className="w-3 h-3" /> {saving ? 'Sauvegarde…' : 'Sauvegarder'}
-      </button>
-    </div>
-  );
-}
 
 export default function SurveillanceTab({ slug }) {
   const [activeKind, setActiveKind] = useState('code_review');
@@ -260,7 +218,9 @@ export default function SurveillanceTab({ slug }) {
   const [transcript, setTranscript] = useState([]); // live Codex output (ephemeral)
   const [err, setErr] = useState(null);
   const [statusFilter, setStatusFilter] = useState('open');
-  const [showConfig, setShowConfig] = useState(false);
+  // Open findings count for the active kind, independent of statusFilter — drives
+  // the launch-button cap. Refreshed on every reload (incl. WS-triggered).
+  const [openCount, setOpenCount] = useState(0);
 
   const kindMeta = KINDS.find((k) => k.id === activeKind) || KINDS[0];
 
@@ -278,10 +238,14 @@ export default function SurveillanceTab({ slug }) {
     Promise.all([
       getAppFindings(slug, { kind: activeKind, status: statusFilter || undefined, limit: 300 }),
       listSurveillanceRuns(slug, { limit: 12 }),
+      // Always fetch the open list for the active kind to drive the cap — the
+      // main list above is filtered by statusFilter, so it can't be trusted.
+      getAppFindings(slug, { kind: activeKind, status: 'open', limit: 50 }),
     ])
-      .then(([f, r]) => {
+      .then(([f, r, o]) => {
         setFindings(f.data?.findings || []);
         setRuns(r.data?.runs || []);
+        setOpenCount((o.data?.findings || []).length);
       })
       .catch((e) => {
         if (e.response?.status === 503) setErr('Surveillance désactivée (Postgres injoignable).');
@@ -378,6 +342,8 @@ export default function SurveillanceTab({ slug }) {
     catch (e) { alert('Resolve a échoué : ' + (e.response?.data?.error || e.message)); }
   };
 
+  const atCap = openCount >= MAX_OPEN_FINDINGS;
+
   return (
     <div className="h-full flex flex-col">
       {/* Kind segments */}
@@ -402,7 +368,9 @@ export default function SurveillanceTab({ slug }) {
             Arrêter {kindMeta.label.toLowerCase()}
           </button>
         ) : (
-          <button onClick={handleRun} disabled={busy} className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 ${kindMeta.btn}`}>
+          <button onClick={handleRun} disabled={busy || atCap}
+            title={atCap ? `${openCount} findings ouvertes (max ${MAX_OPEN_FINDINGS}) — résous-en avant de relancer` : `Lancer ${kindMeta.label.toLowerCase()}`}
+            className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed ${kindMeta.btn}`}>
             {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
             Lancer {kindMeta.label.toLowerCase()}
           </button>
@@ -418,16 +386,7 @@ export default function SurveillanceTab({ slug }) {
         <button onClick={reload} disabled={loading} className="px-2 py-1 text-xs text-gray-300 hover:text-white border border-gray-700 hover:border-gray-600 rounded-sm flex items-center gap-1 disabled:opacity-50">
           <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
         </button>
-        <button onClick={() => setShowConfig((v) => !v)} className={`px-2 py-1 text-xs border rounded-sm flex items-center gap-1 ${showConfig ? 'text-amber-300 border-amber-500/40' : 'text-gray-300 border-gray-700 hover:text-white hover:border-gray-600'}`}>
-          <SettingsIcon className="w-3 h-3" />
-        </button>
       </div>
-
-      {showConfig && (
-        <div className="border-b border-gray-700 bg-gray-900/30">
-          <ConfigPanel slug={slug} onClose={() => setShowConfig(false)} />
-        </div>
-      )}
 
       <div className="flex-1 overflow-y-auto flex">
         <div className="flex-1 p-4 space-y-4 min-w-0">

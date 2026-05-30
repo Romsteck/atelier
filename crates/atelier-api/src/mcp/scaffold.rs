@@ -1,7 +1,7 @@
 //! Scaffold minimal source trees for newly created apps.
 //!
 //! Templates are embedded at compile time from
-//! `crates/orchestrator/hr-apps/templates/{stack}/`. Files are written
+//! `crates/atelier-apps/templates/{stack}/`. Files are written
 //! idempotently — anything already present on disk is left untouched.
 //!
 //! # INVARIANT — workspace code-server
@@ -12,27 +12,27 @@
 //! `.env.example`) DOIT être placé directement sous `src/`.
 //!
 //! La génération de `CLAUDE.md`, `.claude/`, `.mcp.json` relève de
-//! [`hr_apps::context`] (appelé par le handler AppCreate juste après ce
+//! [`atelier_apps::context`] (appelé par le handler AppCreate juste après ce
 //! scaffold). Ne les écris pas ici.
 
 use std::path::Path;
 
-use hr_apps::types::{AppStack, Application};
+use atelier_apps::types::{AppStack, Application};
 use tracing::{info, warn};
 
-const T_AXUM_CARGO: &str = include_str!("../../../hr-apps/templates/axum/Cargo.toml");
-const T_AXUM_MAIN: &str = include_str!("../../../hr-apps/templates/axum/src/main.rs");
+const T_AXUM_CARGO: &str = include_str!("../../../atelier-apps/templates/axum/Cargo.toml");
+const T_AXUM_MAIN: &str = include_str!("../../../atelier-apps/templates/axum/src/main.rs");
 
-const T_AXUMVITE_CARGO: &str = include_str!("../../../hr-apps/templates/axum-vite/Cargo.toml");
-const T_AXUMVITE_MAIN: &str = include_str!("../../../hr-apps/templates/axum-vite/src/main.rs");
-const T_AXUMVITE_PKG: &str = include_str!("../../../hr-apps/templates/axum-vite/web/package.json");
-const T_AXUMVITE_VITE: &str = include_str!("../../../hr-apps/templates/axum-vite/web/vite.config.ts");
-const T_AXUMVITE_HTML: &str = include_str!("../../../hr-apps/templates/axum-vite/web/index.html");
+const T_AXUMVITE_CARGO: &str = include_str!("../../../atelier-apps/templates/axum-vite/Cargo.toml");
+const T_AXUMVITE_MAIN: &str = include_str!("../../../atelier-apps/templates/axum-vite/src/main.rs");
+const T_AXUMVITE_PKG: &str = include_str!("../../../atelier-apps/templates/axum-vite/web/package.json");
+const T_AXUMVITE_VITE: &str = include_str!("../../../atelier-apps/templates/axum-vite/web/vite.config.ts");
+const T_AXUMVITE_HTML: &str = include_str!("../../../atelier-apps/templates/axum-vite/web/index.html");
 
-const T_NEXT_PKG: &str = include_str!("../../../hr-apps/templates/next-js/package.json");
-const T_NEXT_CFG: &str = include_str!("../../../hr-apps/templates/next-js/next.config.js");
-const T_NEXT_PAGE: &str = include_str!("../../../hr-apps/templates/next-js/app/page.tsx");
-const T_NEXT_LAYOUT: &str = include_str!("../../../hr-apps/templates/next-js/app/layout.tsx");
+const T_NEXT_PKG: &str = include_str!("../../../atelier-apps/templates/next-js/package.json");
+const T_NEXT_CFG: &str = include_str!("../../../atelier-apps/templates/next-js/next.config.js");
+const T_NEXT_PAGE: &str = include_str!("../../../atelier-apps/templates/next-js/app/page.tsx");
+const T_NEXT_LAYOUT: &str = include_str!("../../../atelier-apps/templates/next-js/app/layout.tsx");
 
 #[tracing::instrument(skip(app), fields(slug = %app.slug, stack = ?app.stack))]
 pub async fn scaffold_stack_template(app: &Application) -> anyhow::Result<()> {

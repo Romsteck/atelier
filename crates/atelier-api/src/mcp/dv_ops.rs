@@ -2,22 +2,22 @@
 //! shared [`AppsContext`] (owns the `DataverseManager`) and returns a
 //! ready-to-send [`IpcResponse`].
 //!
-//! These handlers wrap the pure builders in [`hr_dataverse::query`],
-//! [`hr_dataverse::crud`] and [`hr_dataverse::audit`] — the builders stay
+//! These handlers wrap the pure builders in [`atelier_dataverse::query`],
+//! [`atelier_dataverse::crud`] and [`atelier_dataverse::audit`] — the builders stay
 //! IO-free and unit-testable; this module is the only one that touches
 //! Postgres for gateway operations.
 
 use std::collections::BTreeMap;
 
-use hr_common::Identity;
-use hr_dataverse::{
+use atelier_common::Identity;
+use atelier_dataverse::{
     audit::{build_audit_insert, AuditOp},
     crud::{build_get, build_insert, build_restore, build_soft_delete, build_update},
     dv_io::{run_count, run_get, run_list, run_mutation, MutationOutcome},
     query::{build_count_sql, build_list_sql, ListQuery, QueryParam},
     DatabaseSchema, TableDefinition,
 };
-use hr_ipc::types::IpcResponse;
+use atelier_ipc::types::IpcResponse;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
@@ -514,7 +514,7 @@ async fn audit_after(
         after_for_audit,
     );
 
-    let args = match hr_dataverse::dv_io::bind_all(&compiled.params) {
+    let args = match atelier_dataverse::dv_io::bind_all(&compiled.params) {
         Ok(a) => a,
         Err(e) => {
             warn!(table, ?op, error = %e, "audit bind failed — skipping audit row");

@@ -1,5 +1,5 @@
 /// Internal re-export facade so we can write `sqlx::query_as(...)` without
-/// turbofish boilerplate — see `hr-dataverse` for the same pattern.
+/// turbofish boilerplate — see `atelier-dataverse` for the same pattern.
 #[allow(unused_imports)]
 pub(crate) mod sqlx {
     pub use sqlx_core::Error;

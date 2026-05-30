@@ -10,13 +10,16 @@ members = [
     "crates/atelier-api",
     "crates/atelier-logging",
     "crates/atelier-watcher",
-    "crates/hr-apps",
-    "crates/hr-dataverse",
-    "crates/hr-dataverse-migrate",
-    "crates/hr-db",
-    "crates/hr-dv-codegen",
-    "crates/hr-dvexpr",
-    "crates/hr-git",
+    "crates/atelier-apps",
+    "crates/atelier-common",
+    "crates/atelier-ipc",
+    "crates/atelier-dataverse",
+    "crates/atelier-dataverse-migrate",
+    "crates/atelier-db",
+    "crates/atelier-docs",
+    "crates/atelier-dv-codegen",
+    "crates/atelier-dvexpr",
+    "crates/atelier-git",
 ]
 
 [workspace.package]
@@ -35,6 +38,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 
 # Logging
 tracing = "0.1"
@@ -55,6 +59,7 @@ base64 = "0.22"
 hex = "0.4"
 sha2 = "0.11"
 futures-util = "0.3"
+ipnet = "2.9"
 
 tokio-util = { version = "0.7", features = ["rt"] }
 
@@ -64,20 +69,19 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 # WebSocket client (used by atelier-api apps_proxy to bridge browser ↔ upstream apps)
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 
-# Path-deps shared homeroute (à terme : repo `homeroute-core` séparé)
-# La source de vérité reste /nvme/homeroute/crates/shared/. Ne pas modifier ces crates depuis Atelier.
-hr-common = { path = "/nvme/homeroute/crates/shared/hr-common" }
-hr-ipc    = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
-hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
-
-# Crates internes Atelier (déplacés depuis homeroute le 2026-05-09)
-hr-apps              = { path = "crates/hr-apps" }
-hr-dataverse         = { path = "crates/hr-dataverse" }
-hr-dataverse-migrate = { path = "crates/hr-dataverse-migrate" }
-hr-db                = { path = "crates/hr-db" }
-hr-dv-codegen        = { path = "crates/hr-dv-codegen" }
-hr-dvexpr            = { path = "crates/hr-dvexpr" }
-hr-git               = { path = "crates/hr-git" }
+# Crates internes Atelier (déplacés depuis homeroute le 2026-05-09 ; atelier-common,
+# atelier-ipc & atelier-docs le 2026-05-30 — Atelier est désormais autonome, plus aucun
+# path-dep vers /nvme/homeroute).
+atelier-common            = { path = "crates/atelier-common" }
+atelier-ipc               = { path = "crates/atelier-ipc" }
+atelier-apps              = { path = "crates/atelier-apps" }
+atelier-dataverse         = { path = "crates/atelier-dataverse" }
+atelier-dataverse-migrate = { path = "crates/atelier-dataverse-migrate" }
+atelier-db                = { path = "crates/atelier-db" }
+atelier-docs              = { path = "crates/atelier-docs" }
+atelier-dv-codegen        = { path = "crates/atelier-dv-codegen" }
+atelier-dvexpr            = { path = "crates/atelier-dvexpr" }
+atelier-git               = { path = "crates/atelier-git" }
 
 # Postgres + sqlx — voir commentaire dans homeroute Cargo.toml
 sqlx-core    = { version = "0.9.0", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json", "chrono", "uuid", "migrate"] }

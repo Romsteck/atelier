@@ -1,0 +1,30 @@
+[package]
+name = "atelier-dataverse-migrate"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "atelier_dataverse_migrate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "atelier-dataverse-migrate"
+path = "src/main.rs"
+
+[dependencies]
+atelier-db = { workspace = true }
+atelier-dataverse = { workspace = true }
+
+# Postgres driver — same shim convention as atelier-dataverse
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rusqlite = { workspace = true }

@@ -15,7 +15,7 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hr_git::types::{GitConfig, MirrorConfig};
+use atelier_git::types::{GitConfig, MirrorConfig};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -118,7 +118,7 @@ async fn git_info_refs(
     let path_info = format!("/{slug}.git/info/refs");
     let query_string = format!("service={}", q.service);
 
-    match hr_git::cgi::git_cgi(
+    match atelier_git::cgi::git_cgi(
         state.git.repos_dir(),
         &path_info,
         &query_string,
@@ -188,7 +188,7 @@ async fn git_pack_cgi(
 
     let path_info = format!("/{slug}.git/{service}");
 
-    match hr_git::cgi::git_cgi(
+    match atelier_git::cgi::git_cgi(
         state.git.repos_dir(),
         &path_info,
         "",
@@ -321,7 +321,7 @@ async fn enable_mirror(
         MirrorConfig {
             enabled: true,
             github_ssh_url: Some(format!("git@github.com:{org}/{slug}.git")),
-            visibility: hr_git::types::RepoVisibility::Private,
+            visibility: atelier_git::types::RepoVisibility::Private,
             last_sync: None,
             last_error: None,
         },

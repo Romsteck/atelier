@@ -7,9 +7,8 @@ use tokio::sync::{Semaphore, broadcast, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{RunKind, SurveillanceEvent, TranscriptLine};
+use crate::{MAX_OPEN_FINDINGS, RunKind, SurveillanceEvent, TranscriptLine};
 use crate::codex::{CodexConfig, CodexRunner};
-use crate::config::ConfigStore;
 use crate::findings::FindingsStore;
 use crate::git_watcher::GitWatcher;
 use crate::gitutil;
@@ -18,8 +17,8 @@ use crate::migration::{self, DEFAULT_DB_NAME};
 use crate::runs::RunsStore;
 use crate::sqlx::{Pool, Postgres};
 
-/// Minimal per-app metadata the surveillance service needs (config seeding +
-/// prompt stack hint + git_watcher slug list).
+/// Minimal per-app metadata the surveillance service needs (prompt stack hint +
+/// git_watcher slug list).
 #[derive(Debug, Clone)]
 pub struct AppMeta {
     pub slug: String,
@@ -35,7 +34,6 @@ struct Inner {
     findings: Option<FindingsStore>,
     runs: Option<RunsStore>,
     memory: Option<MemoryStore>,
-    config: Option<ConfigStore>,
     runner: CodexRunner,
     apps_src_root: PathBuf,
     stacks: HashMap<String, String>,
@@ -58,7 +56,7 @@ struct Inner {
 pub struct SurveillanceConfig {
     pub admin_dsn: Option<String>,
     pub db_name: Option<String>,
-    /// Apps to seed config for + stack hints for prompts.
+    /// Apps known to the service — stack hints for prompts + git_watcher slugs.
     pub seed_apps: Vec<AppMeta>,
     /// Root of app sources: `<root>/<slug>/src/`.
     pub apps_src_root: PathBuf,
@@ -78,24 +76,14 @@ impl SurveillanceService {
             }
         };
         let enabled = pool.is_some();
-        let (findings, runs, memory, config) = match pool.as_ref() {
+        let (findings, runs, memory) = match pool.as_ref() {
             Some(p) => (
                 Some(FindingsStore::new(p.clone())),
                 Some(RunsStore::new(p.clone())),
                 Some(MemoryStore::new(p.clone())),
-                Some(ConfigStore::new(p.clone())),
             ),
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
-
-        if let Some(cs) = config.as_ref() {
-            for app in &cfg.seed_apps {
-                if let Err(err) = cs.seed(&app.slug).await {
-                    warn!(slug = %app.slug, ?err, "surveillance_config seed failed");
-                }
-            }
-            info!(apps = cfg.seed_apps.len(), "atelier-watcher: surveillance_config seeded");
-        }
 
         let stacks: HashMap<String, String> = cfg
             .seed_apps
@@ -111,7 +99,6 @@ impl SurveillanceService {
                 findings,
                 runs,
                 memory,
-                config,
                 runner: CodexRunner::new(cfg.codex.clone()),
                 apps_src_root: cfg.apps_src_root.clone(),
                 stacks,
@@ -204,9 +191,6 @@ impl SurveillanceService {
     pub fn memory(&self) -> Option<&MemoryStore> {
         self.inner.memory.as_ref()
     }
-    pub fn config(&self) -> Option<&ConfigStore> {
-        self.inner.config.as_ref()
-    }
 
     /// Start a surveillance run. Creates the `surveillance_runs` row, spawns a
     /// detached task that runs the gates + Codex, and returns the run id
@@ -261,64 +245,33 @@ impl SurveillanceService {
         cancel_rx: oneshot::Receiver<()>,
     ) {
         let slug = slug.to_string();
-        let (Some(findings), Some(runs), Some(memory), Some(config)) = (
+        let (Some(findings), Some(runs), Some(memory)) = (
             self.inner.findings.as_ref(),
             self.inner.runs.as_ref(),
             self.inner.memory.as_ref(),
-            self.inner.config.as_ref(),
         ) else {
             return;
         };
 
-        let cfg = match config.get(&slug).await {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                let _ = runs.finish_failed(run_id, "no surveillance_config row").await;
-                return;
-            }
+        // Gate 1 — cap: skip when this kind already has MAX_OPEN_FINDINGS open
+        // findings (the UI disables the launch button at the same threshold;
+        // this is the server-side backstop). `open_now` is reused below to
+        // budget the prompt so Codex reports only the most important issues.
+        let open_now = match findings.count_open(&slug, kind.finding_kind()).await {
+            Ok(n) => n,
             Err(e) => {
-                let _ = runs.finish_failed(run_id, &format!("config read: {e}")).await;
-                return;
+                warn!(slug = %slug, ?e, "open findings count failed — proceeding");
+                0
             }
         };
-
-        // Gate 1 — throttle: too many stale OPEN findings unaddressed.
-        match findings
-            .count_stale_open(&slug, kind.finding_kind(), 48)
-            .await
-        {
-            Ok(stale) if stale > cfg.throttle_threshold as i64 => {
-                let reason = format!("throttle: {stale} findings open >48h (max {})", cfg.throttle_threshold);
-                let _ = runs.finish_skipped(run_id, &reason).await;
-                let _ = memory
-                    .upsert(
-                        &slug,
-                        "last_run",
-                        &format!("{}:skipped", kind.run_kind()),
-                        &serde_json::json!({"reason": reason, "ts": Utc::now()}),
-                        None,
-                    )
-                    .await;
-                info!(slug = %slug, kind = kind.run_kind(), "run skipped (throttle)");
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => warn!(slug = %slug, ?e, "throttle count failed — proceeding"),
+        if open_now >= MAX_OPEN_FINDINGS {
+            let reason = format!("cap: {open_now} findings open (max {MAX_OPEN_FINDINGS})");
+            let _ = runs.finish_skipped(run_id, &reason).await;
+            info!(slug = %slug, kind = kind.run_kind(), "run skipped (cap)");
+            return;
         }
 
-        // Gate 2 — budget: tokens consumed today.
-        match runs.tokens_today(&slug, kind.run_kind()).await {
-            Ok(used) if used > cfg.max_tokens_per_day as i64 => {
-                let reason = format!("budget: {used} tokens today (max {})", cfg.max_tokens_per_day);
-                let _ = runs.finish_skipped(run_id, &reason).await;
-                info!(slug = %slug, kind = kind.run_kind(), "run skipped (budget)");
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => warn!(slug = %slug, ?e, "budget count failed — proceeding"),
-        }
-
-        // Gate 3 — diff-aware (code_review + suggestions both track their SHA).
+        // Gate 2 — diff-aware (code_review + suggestions both track their SHA).
         let src = self.inner.apps_src_root.join(&slug).join("src");
         let head = gitutil::head_sha(&src).await;
         let last_sha = memory
@@ -358,7 +311,7 @@ impl SurveillanceService {
         let prompt = self
             .inner
             .runner
-            .build_prompt(&slug, &stack, kind, diff.as_deref(), &mem_entries);
+            .build_prompt(&slug, &stack, kind, diff.as_deref(), &mem_entries, open_now);
 
         // Acquire concurrency permit + run Codex.
         let _permit = self.inner.sem.acquire().await.ok();

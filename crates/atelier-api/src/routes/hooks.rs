@@ -2,7 +2,7 @@
 //!
 //! Stub minimaliste : log + 200 OK. Le vrai handler (rebuild app sur push) est
 //! un follow-up — l'idée ici est juste d'absorber le `curl` injecté par
-//! `hr_git::GitService::setup_pipeline_hook` pour éviter qu'il échoue
+//! `atelier_git::GitService::setup_pipeline_hook` pour éviter qu'il échoue
 //! silencieusement contre un port mort (l'ancien hr-orchestrator :4001).
 
 use axum::extract::State;

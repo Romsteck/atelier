@@ -2,7 +2,7 @@
 //!
 //! Lecture **et** écriture sur `state.app_registry` + `state.supervisor`.
 //! Atelier devient le canonical writer post-cutover. Les routes appellent
-//! directement la lib `hr-apps` (pas d'IPC orchestrator côté CloudMaster).
+//! directement la lib `atelier-apps` (pas d'IPC orchestrator côté CloudMaster).
 //!
 //! Endpoints exposés :
 //! - GET    /api/apps            (list)
@@ -40,7 +40,7 @@ pub fn router() -> Router<ApiState> {
 }
 
 fn validate_slug(slug: &str) -> Result<(), axum::response::Response> {
-    if hr_apps::valid_slug(slug) {
+    if atelier_apps::valid_slug(slug) {
         Ok(())
     } else {
         Err((

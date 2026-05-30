@@ -14,7 +14,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use hr_docs::{DocType, Frontmatter, Store, validate_app_id, validate_entry_name};
+use atelier_docs::{DocType, Frontmatter, Store, validate_app_id, validate_entry_name};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -48,12 +48,12 @@ const INVALID_PARAMS: i32 = -32602;
 #[derive(Clone)]
 pub struct McpState {
     pub token: Arc<String>,
-    pub git: Arc<hr_git::GitService>,
+    pub git: Arc<atelier_git::GitService>,
     pub apps_ctx: Option<crate::mcp::apps_ops::AppsContext>,
     /// FTS5 index for `docs.search`. None if FTS init failed at boot.
-    pub docs_index: Option<Arc<hr_docs::Index>>,
-    /// Docs filesystem root. Mirrors `ApiState::docs_dir`; required because
-    /// `hr_docs::DEFAULT_DOCS_DIR` is a homeroute-era path absent on Medion.
+    pub docs_index: Option<Arc<atelier_docs::Index>>,
+    /// Docs filesystem root. Mirrors `ApiState::docs_dir`; passed explicitly
+    /// (resolved from `ATELIER_DOCS_DIR`) rather than relying on the default.
     pub docs_dir: PathBuf,
     /// Surveillance IA service — exposes findings_* / memory_* / runs_* tools.
     pub surveillance: atelier_watcher::SurveillanceService,
@@ -586,7 +586,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "docs.delete" => tool_docs_delete(id, &arguments, state).await,
         "docs.diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
         // ── Database ──
-        // ── App* (V3 — hr-apps direct supervision) ──
+        // ── App* (V3 — atelier-apps direct supervision) ──
         "app.list" => tool_app_list(id, state).await,
         "app.get" => tool_app_get(id, &arguments, state).await,
         "app.control" => tool_app_control(id, &arguments, state).await,
@@ -767,7 +767,7 @@ fn parse_doc_type(s: &str) -> Option<DocType> {
     DocType::from_str(s)
 }
 
-fn entry_to_json(entry: &hr_docs::DocEntry, diagram: Option<&str>) -> Value {
+fn entry_to_json(entry: &atelier_docs::DocEntry, diagram: Option<&str>) -> Value {
     json!({
         "app_id": entry.app_id,
         "type": entry.doc_type.as_str(),
@@ -787,7 +787,7 @@ async fn tool_docs_overview(id: Value, args: &Value, state: &McpState) -> Value 
     }
     match docs_store(state).overview(app_id) {
         Ok(ov) => tool_success(id, serde_json::to_value(&ov).unwrap_or(json!({}))),
-        Err(hr_docs::StoreError::AppNotFound(_)) => tool_error(id, &format!("No docs found for '{app_id}'")),
+        Err(atelier_docs::StoreError::AppNotFound(_)) => tool_error(id, &format!("No docs found for '{app_id}'")),
         Err(e) => tool_error(id, &format!("overview failed: {e}")),
     }
 }
@@ -834,7 +834,7 @@ async fn tool_docs_get(id: Value, args: &Value, state: &McpState) -> Value {
             let diagram = store.read_diagram(app_id, doc_type, &entry.name).ok().flatten();
             tool_success(id, entry_to_json(&entry, diagram.as_deref()))
         }
-        Err(hr_docs::StoreError::EntryNotFound { .. }) => {
+        Err(atelier_docs::StoreError::EntryNotFound { .. }) => {
             tool_error(id, &format!("Entry not found: {app_id}/{doc_type_str}/{name}"))
         }
         Err(e) => tool_error(id, &format!("get failed: {e}")),
@@ -908,7 +908,7 @@ async fn tool_docs_completeness(id: Value, args: &Value, state: &McpState) -> Va
     let store = docs_store(state);
     let overview = match store.overview(app_id) {
         Ok(o) => o,
-        Err(hr_docs::StoreError::AppNotFound(_)) => {
+        Err(atelier_docs::StoreError::AppNotFound(_)) => {
             return tool_error(id, &format!("No docs found for '{app_id}'"));
         }
         Err(e) => return tool_error(id, &format!("completeness failed: {e}")),
@@ -1043,7 +1043,7 @@ async fn tool_docs_update(id: Value, args: &Value, state: &McpState) -> Value {
         let _ = std::fs::create_dir_all(store.app_dir(app_id));
     }
     if !store.app_dir(app_id).join("meta.json").exists() {
-        let _ = store.write_meta(app_id, &hr_docs::Meta::new(app_id));
+        let _ = store.write_meta(app_id, &atelier_docs::Meta::new(app_id));
     }
 
     match store.write_entry(app_id, doc_type, name, frontmatter, body) {
@@ -1187,13 +1187,13 @@ fn tool_error(id: Value, message: &str) -> Value {
     )
 }
 
-// ── App* / DB* tool definitions (V3 — hr-apps) ──────────────────────
+// ── App* / DB* tool definitions (V3 — atelier-apps) ──────────────────────
 
 fn tool_definitions_apps() -> Value {
     json!([
         {
             "name": "app.list",
-            "description": "List all HomeRoute applications managed by the AppSupervisor.",
+            "description": "List all Atelier applications managed by the AppSupervisor.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -1511,7 +1511,7 @@ fn require_apps_ctx<'a>(
     state
         .apps_ctx
         .as_ref()
-        .ok_or_else(|| tool_error(id.clone(), "hr-apps not initialized"))
+        .ok_or_else(|| tool_error(id.clone(), "atelier-apps not initialized"))
 }
 
 async fn tool_app_list(id: Value, state: &McpState) -> Value {
@@ -1738,7 +1738,7 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 /// Convert an `IpcResponse` into a JSON-RPC response Value.
-fn ipc_resp_to_mcp(id: Value, resp: hr_ipc::types::IpcResponse) -> Value {
+fn ipc_resp_to_mcp(id: Value, resp: atelier_ipc::types::IpcResponse) -> Value {
     if resp.ok {
         tool_success(id, resp.data.unwrap_or(json!({"ok": true})))
     } else {

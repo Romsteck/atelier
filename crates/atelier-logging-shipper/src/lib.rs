@@ -1,6 +1,6 @@
 //! Thin shipper that batches `tracing` events to Atelier's `/api/logs/ingest`.
 //!
-//! Stand-alone crate intended for the 6 HomeRoute apps — it does NOT pull
+//! Stand-alone crate intended for the 6 Atelier apps — it does NOT pull
 //! sqlx or any DB-side dep (that lives in `atelier-logging` for the core
 //! ingest service). Apps add this crate as a path-dep and call
 //! `HttpShipperLayer::from_env(service, app_slug)` at startup.

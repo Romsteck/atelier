@@ -88,14 +88,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atelier-api",
+ "atelier-apps",
+ "atelier-common",
+ "atelier-dataverse",
+ "atelier-docs",
+ "atelier-git",
  "atelier-logging",
  "atelier-watcher",
  "axum",
- "hr-apps",
- "hr-common",
- "hr-dataverse",
- "hr-docs",
- "hr-git",
  "serde",
  "serde_json",
  "tokio",
@@ -109,17 +109,17 @@ name = "atelier-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atelier-apps",
+ "atelier-common",
+ "atelier-dataverse",
+ "atelier-docs",
+ "atelier-git",
+ "atelier-ipc",
  "atelier-logging",
  "atelier-watcher",
  "axum",
  "chrono",
  "futures-util",
- "hr-apps",
- "hr-common",
- "hr-dataverse",
- "hr-docs",
- "hr-git",
- "hr-ipc",
  "reqwest",
  "rusqlite",
  "serde",
@@ -132,6 +132,162 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "atelier-apps"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atelier-common",
+ "atelier-db",
+ "chrono",
+ "hex",
+ "nix",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ipnet",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-dataverse"
+version = "0.1.0"
+dependencies = [
+ "atelier-common",
+ "atelier-dvexpr",
+ "base64",
+ "chrono",
+ "futures-util",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "sqlx-core",
+ "sqlx-postgres",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-dataverse-migrate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atelier-dataverse",
+ "atelier-db",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlx-core",
+ "sqlx-postgres",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-db"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-docs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "atelier-dv-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atelier-dataverse",
+ "chrono",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-dvexpr"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "atelier-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atelier-common",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -896,162 +1052,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
-]
-
-[[package]]
-name = "hr-apps"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hex",
- "hr-common",
- "hr-db",
- "nix",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "hr-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "ipnet",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "hr-dataverse"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "futures-util",
- "hr-common",
- "hr-dvexpr",
- "rand 0.10.1",
- "serde",
- "serde_json",
- "sqlx-core",
- "sqlx-postgres",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "hr-dataverse-migrate"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hr-dataverse",
- "hr-db",
- "rusqlite",
- "serde",
- "serde_json",
- "sqlx-core",
- "sqlx-postgres",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "hr-db"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "hr-docs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "hr-dv-codegen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "hex",
- "hr-dataverse",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "hr-dvexpr"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "hr-git"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "hr-ipc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hr-common",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]

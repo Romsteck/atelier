@@ -3,19 +3,19 @@ use std::sync::Arc;
 
 use atelier_logging::LogIngestService;
 use atelier_watcher::SurveillanceService;
-use hr_apps::{AppRegistry, AppSupervisor, PortRegistry, db_manager::DbManager};
-use hr_apps::context::ContextGenerator;
-use hr_common::events::EventBus;
-use hr_common::task_store::TaskStore;
+use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry, db_manager::DbManager};
+use atelier_apps::context::ContextGenerator;
+use atelier_common::events::EventBus;
+use atelier_common::task_store::TaskStore;
 
 #[derive(Clone)]
 pub struct ApiState {
     // Docs
     pub docs_dir: PathBuf,
-    pub docs_index: Option<Arc<hr_docs::Index>>,
+    pub docs_index: Option<Arc<atelier_docs::Index>>,
 
     // Git
-    pub git: Arc<hr_git::GitService>,
+    pub git: Arc<atelier_git::GitService>,
 
     // Apps : sources synced + canonical writer
     pub apps_state_dir: PathBuf,
@@ -26,7 +26,7 @@ pub struct ApiState {
     pub task_store: Arc<TaskStore>,
 
     // Dataverse
-    pub dv: Option<Arc<hr_dataverse::manager::DataverseManager>>,
+    pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
 
     // Apps supervisor (Phase 9 cutover) — Atelier devient le writer.
     pub events: Arc<EventBus>,
@@ -52,16 +52,23 @@ pub struct ApiState {
     /// `/api/findings` and `/api/apps/:slug/surveillance/*` return 503 when
     /// this service is in noop mode (Postgres unreachable at boot).
     pub surveillance: SurveillanceService,
+
+    /// Slugs whose `/apps/{slug}` path prefix must be PRESERVED (no-strip) when
+    /// proxying to the app — required by Next.js apps whose `basePath`/`assetPrefix`
+    /// expect the prefix on every request. SPA (Vite) / Axum apps want the prefix
+    /// stripped and are absent here. Parsed once at boot from
+    /// `ATELIER_PRESERVE_PREFIX_SLUGS` (comma-separated); defaults to `{"www"}`.
+    pub preserve_prefix_slugs: std::collections::HashSet<String>,
 }
 
 impl ApiState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         docs_dir: PathBuf,
-        docs_index: Option<Arc<hr_docs::Index>>,
-        git: Arc<hr_git::GitService>,
+        docs_index: Option<Arc<atelier_docs::Index>>,
+        git: Arc<atelier_git::GitService>,
         apps_state_dir: PathBuf,
-        dv: Option<Arc<hr_dataverse::manager::DataverseManager>>,
+        dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
         task_store: Arc<TaskStore>,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
@@ -92,6 +99,21 @@ impl ApiState {
             build_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             logs,
             surveillance,
+            preserve_prefix_slugs: parse_preserve_prefix_slugs(),
         }
+    }
+}
+
+/// Read `ATELIER_PRESERVE_PREFIX_SLUGS` (comma-separated app slugs) into a set.
+/// Defaults to `{"www"}` when unset — `www` is the canonical path-routed Next.js
+/// app, and this mirrors the `www` default of `ATELIER_NEXTJS_FALLBACK_SLUG`.
+fn parse_preserve_prefix_slugs() -> std::collections::HashSet<String> {
+    match std::env::var("ATELIER_PRESERVE_PREFIX_SLUGS") {
+        Ok(raw) => raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Err(_) => ["www".to_string()].into_iter().collect(),
     }
 }

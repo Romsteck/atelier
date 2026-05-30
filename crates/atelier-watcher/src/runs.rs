@@ -162,25 +162,6 @@ impl RunsStore {
             .await?;
         rows.iter().map(row_to_run).collect()
     }
-
-    /// Sum of tokens (in+out) consumed today for `(slug, kind)`. Used by the
-    /// budget gate.
-    pub async fn tokens_today(&self, slug: &str, kind: &str) -> anyhow::Result<i64> {
-        let sql = r#"
-            SELECT COALESCE(SUM(COALESCE(tokens_in,0) + COALESCE(tokens_out,0)), 0)::bigint AS t
-              FROM surveillance_runs
-             WHERE slug = $1
-               AND kind = $2
-               AND started_at >= date_trunc('day', now())
-        "#;
-        let row = query(sql)
-            .bind(slug)
-            .bind(kind)
-            .fetch_one(&self.pool)
-            .await?;
-        let t: i64 = row.try_get("t")?;
-        Ok(t)
-    }
 }
 
 fn row_to_run(row: &PgRow) -> anyhow::Result<Run> {

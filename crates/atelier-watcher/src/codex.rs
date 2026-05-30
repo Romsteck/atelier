@@ -7,8 +7,8 @@ use tokio::process::Command;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::RunKind;
 use crate::memory::Memory;
+use crate::{MAX_OPEN_FINDINGS, RunKind};
 
 const PROMPT_CODE_REVIEW: &str = include_str!("prompts/code_review.md");
 const PROMPT_SUGGESTIONS: &str = include_str!("prompts/suggestions.md");
@@ -75,6 +75,9 @@ impl CodexRunner {
 
     /// Build the full prompt for a run from the embedded template + dynamic
     /// context (diff, memory). `diff` is None for a full-codebase review.
+    /// `open_now` is the count of currently-open findings for this kind; it's
+    /// injected so Codex limits itself to the most important issues within the
+    /// remaining budget (`MAX_OPEN_FINDINGS - open_now`).
     pub fn build_prompt(
         &self,
         slug: &str,
@@ -82,6 +85,7 @@ impl CodexRunner {
         kind: RunKind,
         diff: Option<&str>,
         memory: &[Memory],
+        open_now: i64,
     ) -> String {
         let template = match kind {
             RunKind::CodeReview => PROMPT_CODE_REVIEW,
@@ -101,12 +105,16 @@ impl CodexRunner {
             _ => "Aucun diff fourni — fais une revue du code de l'app dans son répertoire courant.".to_string(),
         };
         let memory_block = format_memory(memory);
+        let remaining = (MAX_OPEN_FINDINGS - open_now).max(0);
         template
             .replace("{{SLUG}}", slug)
             .replace("{{STACK}}", stack)
             .replace("{{CATEGORIES}}", &categories_block)
             .replace("{{DIFF}}", &diff_block)
             .replace("{{MEMORY}}", &memory_block)
+            .replace("{{MAX_OPEN}}", &MAX_OPEN_FINDINGS.to_string())
+            .replace("{{OPEN_COUNT}}", &open_now.to_string())
+            .replace("{{REMAINING}}", &remaining.to_string())
     }
 
     /// Spawn the Codex CLI in `work_dir` with `prompt` on stdin. Returns a

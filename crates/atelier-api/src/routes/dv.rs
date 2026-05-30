@@ -12,7 +12,7 @@
 //! - DELETE /dv/{slug}/{table}/{id}  + If-Match: <ver>  → soft-delete
 //! - POST   /dv/{slug}/{table}/$restore/{id} + If-Match → restore from soft-delete
 //!
-//! Toutes les mutations passent par `hr_dataverse::dv_io::run_mutation` qui
+//! Toutes les mutations passent par `atelier_dataverse::dv_io::run_mutation` qui
 //! exécute la mutation + l'insert d'audit dans la même transaction.
 
 use axum::extract::{Path, Query, State};
@@ -20,8 +20,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hr_common::Identity;
-use hr_dataverse::{
+use atelier_common::Identity;
+use atelier_dataverse::{
     DatabaseSchema, TableDefinition,
     audit::{AuditOp, build_audit_insert},
     crud::{build_get, build_insert, build_restore, build_soft_delete, build_update},
@@ -289,7 +289,7 @@ async fn audit_after(
         after_for_audit,
     );
 
-    let args = match hr_dataverse::dv_io::bind_all(&compiled.params) {
+    let args = match atelier_dataverse::dv_io::bind_all(&compiled.params) {
         Ok(a) => a,
         Err(e) => {
             warn!(table, ?op, error = %e, "audit bind failed — skipping audit row");

@@ -11,8 +11,7 @@
 ### Restant à faire (différé)
 
 - **9.2 finition write endpoints Atelier** — list/get/env/control/status implémentés. Manquent : create/update/delete/build/deploy/exec/update_env/regenerate_context/logs/todos. Boutons Studio/DbExplorer correspondants → 404 silencieux. **Symptôme observé** : Files /api/files/upload retourne `dv: gateway error 405`, et le scheduler `home` log toutes les 10s `failed to log command_history: gateway error 405`.
-- **Refacto `homeroute-core`** — découpler `hr-common`/`hr-ipc`/`hr-docs` qu'Atelier path-dep encore vers `/nvme/homeroute/crates/shared/`.
-- **Path-routing `app.mynetwk.biz/apps/{slug}`** — but initial de la séparation Studio. Reporté ; cf. [.claude/rules/path-routing-pending.md](.claude/rules/path-routing-pending.md).
+- **Path-routing `app.mynetwk.biz/apps/{slug}`** — but initial de la séparation Studio. Le proxy par chemin est en place dans Atelier (`crates/atelier-api/src/routes/apps_proxy.rs`). `www` (Next.js) est servi en **no-strip** : son préfixe `/apps/www` est préservé jusqu'à l'app (requis par `basePath`/`assetPrefix`). Les slugs no-strip sont listés via `ATELIER_PRESERVE_PREFIX_SLUGS` (défaut `www`) ; les autres apps (Vite/Axum) restent en strip. La généralisation (basePath par app, auth path-aware, bascule des hostnames) reste reportée ; cf. [.claude/rules/path-routing-pending.md](.claude/rules/path-routing-pending.md).
 
 ## Système de flux — supprimé (2026-05-26)
 
@@ -122,19 +121,15 @@ Le script (`scripts/deploy-app.sh`) détecte `hostname == medion` → build in-p
 - **TOUJOURS** logger structuré (cf. `.claude/rules/logging.md`).
 - **JAMAIS** d'attribution Claude dans les commits.
 
-## Path-deps vers homeroute (résiduel)
+## Crates internes (plus aucun path-dep vers homeroute)
 
-Atelier consomme encore ces crates partagées de homeroute :
+Atelier est **autonome** : toutes ses crates vivent sous `crates/` et portent le préfixe `atelier-*` (renommées depuis `hr-*` le 2026-05-30, en même temps que la purge du code mort hérité de homeroute). Le découplage `homeroute-core` est **terminé** (2026-05-30) — les 3 dernières crates partagées (`atelier-common`, `atelier-ipc`, `atelier-docs`) ont été rapatriées depuis `/nvme/homeroute/crates/shared/` (snapshot du HEAD homeroute) car un refacto en cours côté homeroute avait divergé leur API et cassait le build d'Atelier.
 
-```toml
-hr-common = { path = "/nvme/homeroute/crates/shared/hr-common" }
-hr-ipc    = { path = "/nvme/homeroute/crates/shared/hr-ipc" }
-hr-docs   = { path = "/nvme/homeroute/crates/shared/hr-docs" }
-```
+Crates internes (`crates/atelier-XXX`, modifiables localement) :
+- `atelier-common`, `atelier-ipc`, `atelier-docs` — internalisées le 2026-05-30.
+- `atelier-apps`, `atelier-db`, `atelier-git`, `atelier-dataverse`, `atelier-dataverse-migrate`, `atelier-dvexpr`, `atelier-dv-codegen` — internalisées le 2026-05-09.
 
-Ne jamais modifier ces crates depuis Atelier — leur source de vérité reste dans `/nvme/homeroute/`. Refacto `homeroute-core` = travail futur.
-
-Les **6 crates applicatives** restantes (`hr-apps`, `hr-db`, `hr-git`, `hr-dataverse`, `hr-dataverse-migrate`, `hr-dvexpr`, `hr-dv-codegen`) ont été internalisées dans Atelier (`crates/hr-XXX`) le 2026-05-09 — modifiables localement. Les 4 crates `hr-flow*` ont été supprimées le 2026-05-26.
+Les 4 crates `hr-flow*` ont été supprimées le 2026-05-26. Atelier ne lit plus rien dans `/nvme/homeroute/` : éditer/refondre ces crates ne nécessite plus de garder homeroute compilable.
 
 ## Service naming + autonomie
 

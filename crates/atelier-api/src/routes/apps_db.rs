@@ -18,8 +18,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hr_common::Identity;
-use hr_dataverse::{
+use atelier_common::Identity;
+use atelier_dataverse::{
     TableDefinition,
     dv_io::run_list,
     query::{ListQuery, build_list_sql},
@@ -248,7 +248,7 @@ async fn describe_table(
         return err_response(StatusCode::NOT_FOUND, format!("table '{table}' not found"));
     };
     let row_count = engine.count_rows(&table).await.unwrap_or(0) as u64;
-    // Mirror exact serialization from hr_ipc::types::AppDbTableColumn:
+    // Mirror exact serialization from atelier_ipc::types::AppDbTableColumn:
     // skip choices when empty, skip formula_expression when None.
     let columns: Vec<Value> = t
         .columns
@@ -453,7 +453,7 @@ async fn query_rows(
     };
 
     // Atelier read-only: pas d'identité utilisateur — on injecte un Identity::system()
-    // pour passer les checks de hr-dataverse. Les apps existantes sur Medion sont
+    // pour passer les checks de atelier-dataverse. Les apps existantes sur Medion sont
     // toujours servies avec une vraie identité — c'est juste l'exploration côté
     // Atelier qui passe en mode système.
     let identity = Identity::system();
@@ -476,8 +476,8 @@ async fn query_rows(
     };
 
     // Total via count query
-    let total = match hr_dataverse::query::build_count_sql(table_def, &lq, &identity) {
-        Ok((sql, params)) => hr_dataverse::dv_io::run_count(engine.pool(), &sql, &params)
+    let total = match atelier_dataverse::query::build_count_sql(table_def, &lq, &identity) {
+        Ok((sql, params)) => atelier_dataverse::dv_io::run_count(engine.pool(), &sql, &params)
             .await
             .unwrap_or(0),
         Err(_) => 0,

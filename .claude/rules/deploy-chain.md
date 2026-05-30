@@ -42,7 +42,7 @@ Sous le capot ([scripts/deploy-app.sh](../../scripts/deploy-app.sh)) :
 - **JAMAIS** `cargo run` en local — toujours `make deploy` (sinon le binaire ne va pas en prod sur Medion).
 - **JAMAIS** modifier les sources des apps depuis CloudMaster (`/opt/homeroute/apps/<slug>/src/`) — ce sont des vestiges figés (snapshot tarball pour rollback). Les sources canoniques sont sur Medion (`/var/lib/atelier/apps/<slug>/src/`), éditées via Studio.
 - **TOUJOURS** vérifier le healthcheck dans la sortie du `make deploy*` avant de considérer un déploiement réussi.
-- Toute modification d'un crate partagé encore en path-dep (`hr-common`, `hr-ipc`, `hr-docs` sous `/nvme/homeroute/crates/shared/`) doit garder homeroute compilable : `cd /nvme/homeroute && cargo build --release` avant de pousser.
+- Atelier est autonome depuis le 2026-05-30 : `atelier-common`/`atelier-ipc`/`atelier-docs` sont internalisées (`crates/`), plus aucun path-dep vers `/nvme/homeroute/`. Plus besoin de garder homeroute compilable avant de pousser.
 
 ## Fenêtres d'indisponibilité
 

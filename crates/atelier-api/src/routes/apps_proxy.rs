@@ -7,11 +7,19 @@
 //!
 //! # Comportement
 //!
-//! - `/apps/{slug}` (sans trailing slash) → 308 redirect vers `/apps/{slug}/`
-//! - `/apps/{slug}/{rest}` HTTP → forward méthode+headers+body vers `127.0.0.1:port/{rest}`
-//! - `/apps/{slug}/{rest}` avec `Upgrade: websocket` → bridge bidirectionnel WS
-//! - Slug inconnu → 404
-//! - App stoppée (port inexistant dans `port_registry`) → 503
+//! Deux modes, selon que le slug est inscrit dans `ApiState::preserve_prefix_slugs`
+//! (cf. `upstream_path`) :
+//!
+//! - **strip** (défaut — SPA Vite / Axum) : l'app vit à la racine, on retire le
+//!   préfixe. `/apps/{slug}` → 308 vers `/apps/{slug}/` ; `/apps/{slug}/{rest}`
+//!   → `127.0.0.1:port/{rest}`.
+//! - **no-strip** (Next.js à `basePath`, ex. `www`) : l'app attend le préfixe sur
+//!   chaque requête, on le transmet tel quel. `/apps/{slug}/{rest}` →
+//!   `127.0.0.1:port/apps/{slug}/{rest}` ; pas de 308 à la racine (Next gère son
+//!   propre trailing-slash).
+//!
+//! Dans les deux modes : `Upgrade: websocket` → bridge bidirectionnel WS ; slug
+//! inconnu / app stoppée (absente de `port_registry`) → 404.
 //!
 //! # WebSocket bridging
 //!
@@ -65,24 +73,63 @@ pub fn router() -> Router<ApiState> {
         .route("/{slug}/{*rest}", any(proxy_with_path))
 }
 
-/// NextJS framework chunks (`/_next/static/chunks/webpack-*.js`, etc.) are
-/// emitted without `basePath` in the rendered HTML even when both `basePath`
-/// and `assetPrefix` are set in `next.config.ts`. This is a documented Next
-/// quirk — only user-route chunks honor the prefix; framework runtime chunks
-/// stay at `/_next/...`.
-///
-/// Workaround: Atelier serves any request to `/_next/...` at the public root
-/// by forwarding to a NextJS app slug, defaulting to `www`. Override with
-/// `ATELIER_NEXTJS_FALLBACK_SLUG` if a different app should own the framework
-/// chunks.
+/// Safety net for any NextJS asset requested at the public root `/_next/...`
+/// instead of under the app's `assetPrefix`. With `assetPrefix:"/apps/www"` set,
+/// www now emits its chunks under `/apps/www/_next/...` (served by
+/// `proxy_with_path`), so this fallback is rarely hit — but if a bare `/_next/...`
+/// request slips through, it is routed to a NextJS app slug (default `www`,
+/// override via `ATELIER_NEXTJS_FALLBACK_SLUG`). The forward is preserve-aware:
+/// for a no-strip slug it targets `/apps/{slug}/_next/...`, where the app
+/// actually serves its chunks.
 pub async fn next_fallback_handler(State(state): State<ApiState>, req: Request) -> Response {
     let slug = std::env::var("ATELIER_NEXTJS_FALLBACK_SLUG").unwrap_or_else(|_| "www".to_string());
     let path = req.uri().path().to_string();
     let rest = path.trim_start_matches('/').to_string();
-    forward(slug, rest, state, req).await
+    // Preserve-aware: a no-strip Next.js app serves its framework chunks under
+    // `/apps/{slug}/_next/...` (its `assetPrefix`), so forward there rather than
+    // to the bare `/_next/...` the app no longer exposes.
+    let up = upstream_path(preserve(&state, &slug), &slug, &rest);
+    forward(slug, up, state, req).await
 }
 
-async fn proxy_root_redirect(Path(slug): Path<String>, req: Request) -> Response {
+/// Whether `slug`'s `/apps/{slug}` prefix must be preserved (no-strip).
+/// See [`ApiState::preserve_prefix_slugs`].
+fn preserve(state: &ApiState, slug: &str) -> bool {
+    state.preserve_prefix_slugs.contains(slug)
+}
+
+/// Path forwarded upstream (no leading `/`).
+///
+/// - strip mode (SPA/Vite, Axum): the app lives at the server root, so we drop
+///   the `/apps/{slug}` prefix and forward only `rest`.
+/// - no-strip mode (Next.js `basePath`): the app expects the prefix on every
+///   request, so we forward `apps/{slug}/{rest}` verbatim. At the root we emit
+///   `apps/{slug}` WITHOUT a trailing slash — Next.js (`trailingSlash=false`)
+///   treats that as canonical and serves the home page directly; forwarding
+///   `apps/{slug}/` would make it 308 back to `apps/{slug}`, an extra hop.
+fn upstream_path(preserve: bool, slug: &str, rest: &str) -> String {
+    if !preserve {
+        rest.to_string()
+    } else if rest.is_empty() {
+        format!("apps/{slug}")
+    } else {
+        format!("apps/{slug}/{rest}")
+    }
+}
+
+async fn proxy_root_redirect(
+    Path(slug): Path<String>,
+    State(state): State<ApiState>,
+    req: Request,
+) -> Response {
+    if preserve(&state, &slug) {
+        // Next.js owns its own trailing-slash policy; forward `/apps/{slug}`
+        // verbatim. A 308 to `/apps/{slug}/` here would loop against Next's own
+        // `/apps/{slug}/` → `/apps/{slug}` redirect.
+        let up = upstream_path(true, &slug, "");
+        return forward(slug, up, state, req).await;
+    }
+    // SPA: normalize to a trailing slash so relative asset URLs resolve.
     let target = match req.uri().query() {
         Some(q) => format!("/apps/{slug}/?{q}"),
         None => format!("/apps/{slug}/"),
@@ -95,7 +142,8 @@ async fn proxy_root(
     State(state): State<ApiState>,
     req: Request,
 ) -> Response {
-    forward(slug, String::new(), state, req).await
+    let up = upstream_path(preserve(&state, &slug), &slug, "");
+    forward(slug, up, state, req).await
 }
 
 async fn proxy_with_path(
@@ -103,11 +151,12 @@ async fn proxy_with_path(
     State(state): State<ApiState>,
     req: Request,
 ) -> Response {
-    forward(slug, rest, state, req).await
+    let up = upstream_path(preserve(&state, &slug), &slug, &rest);
+    forward(slug, up, state, req).await
 }
 
 #[instrument(skip(state, req), fields(method = %req.method(), uri = %req.uri()))]
-async fn forward(slug: String, rest: String, state: ApiState, req: Request) -> Response {
+async fn forward(slug: String, upstream_path: String, state: ApiState, req: Request) -> Response {
     let port = match state.port_registry.get(&slug).await {
         Some(p) => p,
         None => {
@@ -120,19 +169,19 @@ async fn forward(slug: String, rest: String, state: ApiState, req: Request) -> R
         // Hand the head to the WebSocketUpgrade extractor; the body is empty
         // for a valid WS handshake so we drop it.
         let (parts, _body) = req.into_parts();
-        return ws_forward(slug, rest, port, parts).await;
+        return ws_forward(slug, upstream_path, port, parts).await;
     }
-    http_forward(slug, rest, port, req).await
+    http_forward(slug, upstream_path, port, req).await
 }
 
 // ─── HTTP path ────────────────────────────────────────────────────────────────
 
-async fn http_forward(slug: String, rest: String, port: u16, req: Request) -> Response {
+async fn http_forward(slug: String, upstream_path: String, port: u16, req: Request) -> Response {
     let method = req.method().clone();
     let original_uri = req.uri().clone();
     let original_headers = req.headers().clone();
 
-    let mut upstream_url = format!("http://127.0.0.1:{port}/{rest}");
+    let mut upstream_url = format!("http://127.0.0.1:{port}/{upstream_path}");
     if let Some(q) = original_uri.query() {
         upstream_url = format!("{upstream_url}?{q}");
     }
@@ -256,12 +305,12 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
 
 async fn ws_forward(
     slug: String,
-    rest: String,
+    upstream_path: String,
     port: u16,
     mut parts: axum::http::request::Parts,
 ) -> Response {
     let query = parts.uri.query().map(|s| s.to_string());
-    let mut upstream_url = format!("ws://127.0.0.1:{port}/{rest}");
+    let mut upstream_url = format!("ws://127.0.0.1:{port}/{upstream_path}");
     if let Some(q) = query {
         upstream_url = format!("{upstream_url}?{q}");
     }
@@ -529,6 +578,29 @@ mod tests {
             HeaderValue::from_str(value).unwrap(),
         );
         h
+    }
+
+    #[test]
+    fn upstream_path_strip_mode() {
+        // strip: prefix removed, only `rest` forwarded.
+        assert_eq!(upstream_path(false, "files", ""), "");
+        assert_eq!(upstream_path(false, "files", "about"), "about");
+        assert_eq!(
+            upstream_path(false, "files", "_next/static/x.js"),
+            "_next/static/x.js"
+        );
+    }
+
+    #[test]
+    fn upstream_path_no_strip_mode() {
+        // no-strip: full prefix preserved; root has NO trailing slash.
+        assert_eq!(upstream_path(true, "www", ""), "apps/www");
+        assert_eq!(upstream_path(true, "www", "about"), "apps/www/about");
+        assert_eq!(
+            upstream_path(true, "www", "_next/static/x.js"),
+            "apps/www/_next/static/x.js"
+        );
+        assert_eq!(upstream_path(true, "www", "api/health"), "apps/www/api/health");
     }
 
     #[test]
