@@ -592,8 +592,8 @@ export default function Studio() {
       ].map(({ id, Icon, title }) => (
         <button key={id} onClick={() => handleSetLayoutMode(id)}
           disabled={id === 'split' && isNarrow} title={title}
-          className={`p-1.5 rounded-sm transition-colors ${layoutMode === id ? 'bg-gray-700 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'} disabled:opacity-30 disabled:cursor-not-allowed`}>
-          <Icon className="w-4 h-4" />
+          className={`p-2 rounded-sm transition-colors ${layoutMode === id ? 'bg-gray-700 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'} disabled:opacity-30 disabled:cursor-not-allowed`}>
+          <Icon className="w-5 h-5" />
         </button>
       ))}
     </div>
@@ -618,14 +618,14 @@ export default function Studio() {
       <div className="flex flex-col flex-1 min-w-0 h-full">
         {/* Barre d'onglets (haut) — uniquement en mode 'tabs' ; en split les onglets passent à droite */}
         {selectedSlug && effectiveMode === 'tabs' && (
-          <div className="flex items-center h-[38px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
+          <div className="flex items-center h-[44px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
             {visibleTabs.map(tab => {
               const active = tab.id === activeTab;
               const Icon = tab.icon;
               return (
                 <button key={tab.id} onClick={() => handleSelectTab(tab.id)}
-                  className={`relative h-full px-4 border-none cursor-pointer text-[13px] bg-transparent transition-colors flex items-center gap-1.5 ${active ? 'text-white font-medium' : 'text-gray-400 hover:text-gray-200'}`}>
-                  <Icon className="w-3.5 h-3.5" />
+                  className={`relative h-full px-5 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 ${active ? 'text-white font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
+                  <Icon className="w-4 h-4" />
                   {tab.label}
                   {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}
                 </button>
@@ -664,14 +664,14 @@ export default function Studio() {
           {selectedSlug && effectiveMode === 'split' && (
             <div className="absolute top-0 bottom-0 right-0 flex flex-col bg-gray-900" style={{ width: `${100 - leftPct}%`, zIndex: 2 }}>
               <SplitDivider containerRef={contentRef} onResize={setLeftPct} setDragging={setDragging} />
-              <div className="flex items-center h-[34px] shrink-0 border-b border-gray-700 bg-gray-800/40 pl-3 overflow-x-auto">
+              <div className="flex items-center h-[40px] shrink-0 border-b border-gray-700 bg-gray-800/40 pl-3 overflow-x-auto">
                 {rightTabs.map(tab => {
                   const active = tab.id === rightTab;
                   const Icon = tab.icon;
                   return (
                     <button key={tab.id} onClick={() => handleSelectRightTab(tab.id)}
-                      className={`relative h-full px-3 border-none cursor-pointer text-[13px] bg-transparent transition-colors flex items-center gap-1.5 shrink-0 ${active ? 'text-white font-medium' : 'text-gray-400 hover:text-gray-200'}`}>
-                      <Icon className="w-3.5 h-3.5" />
+                      className={`relative h-full px-4 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 shrink-0 ${active ? 'text-white font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
+                      <Icon className="w-4 h-4" />
                       {tab.label}
                       {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}
                     </button>

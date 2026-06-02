@@ -29,7 +29,7 @@ const linkClass = ({ isActive }) =>
       : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
   }`;
 
-function Sidebar({ onClose }) {
+function Sidebar({ onClose, collapsed }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
@@ -41,6 +41,17 @@ function Sidebar({ onClose }) {
 
   const onStudio = location.pathname === '/studio';
 
+  // Rail replié (lg) → rétabli au survol de l'aside (group/aside). Gated lg: →
+  // mobile + sidebar étendue intacts.
+  //  - railRow   : centre l'icône dans le rail au repos, repasse à gauche au survol.
+  //  - railLabel : sort le libellé du flux (display:none) → l'icône reste seule et
+  //                centrée (pas d'écrasement) ; réapparaît au survol.
+  //  - railText  : textes SANS icône (label de groupe, version) → on garde leur
+  //                place (visibility) pour préserver le rythme vertical.
+  const railRow = collapsed ? 'lg:justify-center lg:group-hover/aside:justify-start' : '';
+  const railLabel = collapsed ? 'lg:hidden lg:group-hover/aside:block' : '';
+  const railText = collapsed ? 'lg:invisible lg:group-hover/aside:visible' : '';
+
   // Selecting a recent app opens its studio.
   function handleSelectApp(slug) {
     navigate(`/studio?app=${encodeURIComponent(slug)}&tab=${activeTab || 'code'}`);
@@ -48,11 +59,17 @@ function Sidebar({ onClose }) {
   }
 
   return (
-    <aside className="w-64 h-full bg-gray-800 border-r border-gray-700 flex flex-col">
-      <div className="p-4 border-b border-gray-700 flex items-center justify-between">
-        <h1 className="text-xl font-bold flex items-center gap-2">
-          <Hammer className="w-6 h-6 text-amber-400" />
-          Atelier
+    <aside
+      className={`group/aside w-64 h-full bg-gray-800 border-r border-gray-700 flex flex-col ${
+        collapsed
+          ? "lg:absolute lg:inset-y-0 lg:left-0 lg:w-16 lg:hover:w-64 lg:overflow-hidden lg:transition-[width] lg:duration-200 lg:ease-out lg:shadow-xl"
+          : ""
+      }`}
+    >
+      <div className={`p-4 border-b border-gray-700 flex items-center justify-between ${railRow}`}>
+        <h1 className="text-xl font-bold flex items-center gap-2 whitespace-nowrap">
+          <Hammer className="w-6 h-6 shrink-0 text-amber-400" />
+          <span className={railLabel}>Atelier</span>
         </h1>
         {onClose && (
           <button
@@ -64,11 +81,11 @@ function Sidebar({ onClose }) {
         )}
       </div>
 
-      <nav className="flex-1 py-2 overflow-y-auto">
+      <nav className="flex-1 min-h-0 py-2 overflow-y-auto overflow-x-hidden">
         {navGroups.map((group, gi) => (
           <div key={gi}>
             {group.label && (
-              <div className="px-4 pt-4 pb-1 text-xs text-gray-500 uppercase tracking-wider">
+              <div className={`px-4 pt-4 pb-1 text-xs text-gray-500 uppercase tracking-wider whitespace-nowrap ${railText}`}>
                 {group.label}
               </div>
             )}
@@ -82,10 +99,10 @@ function Sidebar({ onClose }) {
                         href={href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30"
+                        className={`flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30 ${railRow}`}
                       >
-                        <Icon className="w-5 h-5" />
-                        <span className="flex-1">{label}</span>
+                        <Icon className="w-5 h-5 shrink-0" />
+                        <span className={`flex-1 whitespace-nowrap ${railLabel}`}>{label}</span>
                         <ExternalLink className="w-3.5 h-3.5 text-gray-500" />
                       </a>
                     </li>
@@ -96,12 +113,12 @@ function Sidebar({ onClose }) {
                 if (to === '/studio') {
                   return (
                     <li key={to}>
-                      <NavLink to={to} className={linkClass}>
-                        <Icon className={`w-5 h-5${highlight ? ' text-amber-400' : ''}`} />
-                        <span className="flex-1">{label}</span>
+                      <NavLink to={to} className={(s) => `${linkClass(s)} ${railRow}`}>
+                        <Icon className={`w-5 h-5 shrink-0${highlight ? ' text-amber-400' : ''}`} />
+                        <span className={`flex-1 whitespace-nowrap ${railLabel}`}>{label}</span>
                       </NavLink>
                       {onStudio && (
-                        <div className="py-0.5">
+                        <div className={`py-0.5 ${collapsed ? "lg:hidden lg:group-hover/aside:block" : ""}`}>
                           {recentApps.map((app) => {
                             const state = (app.state || '').toLowerCase();
                             const isRunning = state === 'running';
@@ -142,9 +159,9 @@ function Sidebar({ onClose }) {
                 }
                 return (
                   <li key={to}>
-                    <NavLink to={to} className={linkClass}>
-                      <Icon className={`w-5 h-5${highlight ? ' text-amber-400' : ''}`} />
-                      <span className="flex-1">{label}</span>
+                    <NavLink to={to} className={(s) => `${linkClass(s)} ${railRow}`}>
+                      <Icon className={`w-5 h-5 shrink-0${highlight ? ' text-amber-400' : ''}`} />
+                      <span className={`flex-1 whitespace-nowrap ${railLabel}`}>{label}</span>
                     </NavLink>
                   </li>
                 );
@@ -156,26 +173,26 @@ function Sidebar({ onClose }) {
 
       <div className="p-4 border-t border-gray-700">
         {user && (
-          <div className="flex items-center justify-between">
+          <div className={`flex items-center justify-between ${collapsed ? 'lg:justify-center lg:group-hover/aside:justify-between' : ''}`}>
             <div className="flex items-center gap-2 min-w-0">
               <User className="w-4 h-4 text-gray-400 shrink-0" />
-              <div className="min-w-0">
+              <div className={`min-w-0 ${railLabel}`}>
                 <p className="text-sm text-gray-300 truncate">
                   {user.displayName || user.username}
                 </p>
-                <p className="text-xs text-amber-400">CloudMaster</p>
+                <p className="text-xs text-amber-400 whitespace-nowrap">CloudMaster</p>
               </div>
             </div>
             <button
               onClick={logout}
-              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 transition-[background-color,color] duration-300 ease-out hover:duration-0"
+              className={`p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${railLabel}`}
               title="Deconnexion"
             >
               <LogOut className="w-4 h-4" />
             </button>
           </div>
         )}
-        <p className="text-xs text-gray-500 mt-2">Atelier · v0.1.0</p>
+        <p className={`text-xs text-gray-500 mt-2 ${railText}`}>Atelier · v0.1.0</p>
       </div>
     </aside>
   );

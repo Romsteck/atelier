@@ -191,6 +191,10 @@ function LayoutInner({ children }) {
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
   const location = useLocation();
   const isStudio = location.pathname === '/studio';
+  const { selectedSlug } = useStudio();
+  // En Studio avec une app ouverte : le menu de gauche se replie en rail
+  // d'icônes (place rendue à l'éditeur/preview), réétendu au survol en overlay.
+  const collapsed = isStudio && Boolean(selectedSlug);
   const registerSlot = usePageHeaderSlotRegister();
 
   return (
@@ -203,11 +207,11 @@ function LayoutInner({ children }) {
       )}
 
       <div
-        className={`fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-200 ease-out lg:relative lg:translate-x-0 ${
-          sidebarOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
+        className={`fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-200 ease-out lg:relative lg:translate-x-0 lg:transition-[width] ${
+          collapsed ? "lg:w-16" : "lg:w-64"
+        } ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
       >
-        <Sidebar onClose={closeSidebar} />
+        <Sidebar onClose={closeSidebar} collapsed={collapsed} />
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
