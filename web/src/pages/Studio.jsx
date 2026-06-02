@@ -4,12 +4,14 @@ import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
 import StudioIframe from '../components/StudioIframe';
+import PreviewTab from '../components/PreviewTab';
+import SplitDivider from '../components/SplitDivider';
 import DocsTab from '../components/docs/DocsTab';
 import SurveillanceTab from '../components/SurveillanceTab';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X,
-  Eye, EyeOff, ShieldAlert,
+  Eye, EyeOff, ShieldAlert, Monitor, Columns2,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
@@ -27,6 +29,7 @@ const STACKS = [
 
 const TABS = [
   { id: 'code', label: 'Code', icon: Code2 },
+  { id: 'preview', label: 'Preview', icon: Monitor },
   { id: 'db', label: 'DB', icon: Database, requiresDb: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'docs', label: 'Docs', icon: BookOpen },
@@ -418,6 +421,17 @@ export default function Studio() {
     catch { return []; }
   });
 
+  // ── Disposition (mode 'tabs' classique vs 'split' éditeur+onglets) ──
+  const contentRef = useRef(null);
+  const [layoutMode, setLayoutMode] = useState(() => localStorage.getItem('studio:layoutMode') || 'tabs');
+  const [rightTab, setRightTab] = useState(() => localStorage.getItem('studio:rightTab') || 'preview');
+  const [leftPct, setLeftPct] = useState(() => {
+    const v = parseFloat(localStorage.getItem('studio:splitRatio'));
+    return Number.isFinite(v) && v >= 20 && v <= 80 ? v : 50;
+  });
+  const [dragging, setDragging] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < 900);
+
   // ── Fetch apps list ──
   const fetchApps = useCallback(async () => {
     try {
@@ -440,6 +454,24 @@ export default function Studio() {
 
   // ── Persist last-used tab ──
   useEffect(() => { localStorage.setItem('studio:activeTab', activeTab); }, [activeTab]);
+
+  // ── Persist disposition ──
+  useEffect(() => { localStorage.setItem('studio:layoutMode', layoutMode); }, [layoutMode]);
+  useEffect(() => { localStorage.setItem('studio:rightTab', rightTab); }, [rightTab]);
+  useEffect(() => { localStorage.setItem('studio:splitRatio', String(leftPct)); }, [leftPct]);
+
+  // ── Détection écran étroit (désactive le split) ──
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth < 900);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // ── L'onglet droit doit rester disponible (ex. app sans DB) → sinon retomber sur preview ──
+  useEffect(() => {
+    const available = TABS.filter(t => t.id !== 'code' && (!t.requiresDb || app?.has_db)).map(t => t.id);
+    if (!available.includes(rightTab)) setRightTab('preview');
+  }, [app?.has_db, rightTab]);
 
   // ── Track recently-opened apps ──
   useEffect(() => {
@@ -494,6 +526,17 @@ export default function Studio() {
     }
   }
 
+  function handleSetLayoutMode(mode) {
+    if (mode === 'split' && isNarrow) return;
+    setLayoutMode(mode);
+    // entrer en split impose d'avoir l'éditeur monté (il est épinglé à gauche)
+    if (mode === 'split' && selectedSlug) {
+      setOpenedCode(prev => prev.has(selectedSlug) ? prev : new Set(prev).add(selectedSlug));
+    }
+  }
+
+  function handleSelectRightTab(tab) { setRightTab(tab); }
+
   const handleControl = useCallback(async (slugOrAction, actionOpt) => {
     const slug = actionOpt ? slugOrAction : selectedSlug;
     const action = actionOpt || slugOrAction;
@@ -523,6 +566,38 @@ export default function Studio() {
     if (t.requiresDb && !currentApp?.has_db) return false;
     return true;
   });
+  const rightTabs = visibleTabs.filter(t => t.id !== 'code'); // en split, le code est à gauche
+  const effectiveMode = (layoutMode === 'split' && !isNarrow) ? 'split' : 'tabs';
+
+  // Contenu d'un onglet — helper unique partagé par le mode 'tabs' et le panneau droit du 'split'
+  // (une seule des deux branches est montée à la fois → pas de double instance des composants lourds).
+  function renderTabContent(tab) {
+    switch (tab) {
+      case 'preview':      return <PreviewTab key={selectedSlug} slug={selectedSlug} status={status} onControl={handleControl} />;
+      case 'db':           return currentApp?.has_db ? <DbExplorer appSlug={selectedSlug} embedded /> : null;
+      case 'logs':         return <LogsTab slug={selectedSlug} />;
+      case 'docs':         return <DocsTab slug={selectedSlug} />;
+      case 'surveillance': return <SurveillanceTab slug={selectedSlug} />;
+      case 'env':          return <EnvTab slug={selectedSlug} />;
+      case 'settings':     return <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />;
+      default:             return null;
+    }
+  }
+
+  const renderModeSwitcher = () => (
+    <div className="ml-auto flex items-center gap-1 pr-3">
+      {[
+        { id: 'tabs', Icon: Square, title: 'Onglets' },
+        { id: 'split', Icon: Columns2, title: 'Split — éditeur + onglets' },
+      ].map(({ id, Icon, title }) => (
+        <button key={id} onClick={() => handleSetLayoutMode(id)}
+          disabled={id === 'split' && isNarrow} title={title}
+          className={`p-1.5 rounded-sm transition-colors ${layoutMode === id ? 'bg-gray-700 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'} disabled:opacity-30 disabled:cursor-not-allowed`}>
+          <Icon className="w-4 h-4" />
+        </button>
+      ))}
+    </div>
+  );
 
   // 4 most-recently-opened apps, resolved to live app objects, for the nav sub-menu
   const recentApps = useMemo(
@@ -541,8 +616,8 @@ export default function Studio() {
   return (
     <div className="flex h-full overflow-hidden">
       <div className="flex flex-col flex-1 min-w-0 h-full">
-        {/* Tabs — only when an app is open */}
-        {selectedSlug && (
+        {/* Barre d'onglets (haut) — uniquement en mode 'tabs' ; en split les onglets passent à droite */}
+        {selectedSlug && effectiveMode === 'tabs' && (
           <div className="flex items-center h-[38px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
             {visibleTabs.map(tab => {
               const active = tab.id === activeTab;
@@ -556,37 +631,60 @@ export default function Studio() {
                 </button>
               );
             })}
+            {renderModeSwitcher()}
           </div>
         )}
 
         {/* Content */}
-        <div className="flex-1 overflow-hidden relative">
-          {/* Code iframes: always mounted (keep-alive), shown only for the selected app on the code tab */}
+        <div className="flex-1 overflow-hidden relative" ref={contentRef}>
+          {/* (A) Pool keep-alive code-server — jamais remonté ; géométrie variable selon le mode */}
           {[...openedCode].map(slug => {
-            const visible = !!selectedSlug && activeTab === 'code' && selectedSlug === slug;
-            return (
-              <div key={slug} className="absolute inset-0" style={visible ? { visibility: 'visible', zIndex: 1 } : { visibility: 'hidden', zIndex: 0, pointerEvents: 'none' }}>
-                <CodeTab slug={slug} />
-              </div>
+            const isSel = selectedSlug === slug;
+            const codeVisible = isSel && (
+              (effectiveMode === 'tabs' && activeTab === 'code') || effectiveMode === 'split'
             );
+            const vis = { visibility: codeVisible ? 'visible' : 'hidden', zIndex: codeVisible ? 1 : 0, pointerEvents: codeVisible ? 'auto' : 'none' };
+            const style = effectiveMode === 'split' && isSel
+              ? { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${leftPct}%`, ...vis }
+              : { position: 'absolute', inset: 0, ...vis };
+            return <div key={slug} style={style}><CodeTab slug={slug} /></div>;
           })}
 
-          {/* Default view: apps gallery (no app selected) */}
+          {/* (B) Gallery (aucune app sélectionnée) */}
           {!selectedSlug && (
             <AppsGallery apps={apps} onOpen={handleOpenApp} onAdd={() => setShowCreate(true)} onControl={handleControl} />
           )}
 
-          {/* Non-code tabs */}
-          {selectedSlug && activeTab !== 'code' && (
-            <div className="h-full">
-              {activeTab === 'db' && currentApp?.has_db && <DbExplorer appSlug={selectedSlug} embedded />}
-              {activeTab === 'logs' && <LogsTab slug={selectedSlug} />}
-              {activeTab === 'docs' && <DocsTab slug={selectedSlug} />}
-              {activeTab === 'surveillance' && <SurveillanceTab slug={selectedSlug} />}
-              {activeTab === 'env' && <EnvTab slug={selectedSlug} />}
-              {activeTab === 'settings' && <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />}
+          {/* (C) Mode 'tabs' : onglet non-code plein écran */}
+          {selectedSlug && effectiveMode === 'tabs' && activeTab !== 'code' && (
+            <div className="h-full">{renderTabContent(activeTab)}</div>
+          )}
+
+          {/* (D) Mode 'split' : panneau droit (divider + barre d'onglets droite + contenu) */}
+          {selectedSlug && effectiveMode === 'split' && (
+            <div className="absolute top-0 bottom-0 right-0 flex flex-col bg-gray-900" style={{ width: `${100 - leftPct}%`, zIndex: 2 }}>
+              <SplitDivider containerRef={contentRef} onResize={setLeftPct} setDragging={setDragging} />
+              <div className="flex items-center h-[34px] shrink-0 border-b border-gray-700 bg-gray-800/40 pl-3 overflow-x-auto">
+                {rightTabs.map(tab => {
+                  const active = tab.id === rightTab;
+                  const Icon = tab.icon;
+                  return (
+                    <button key={tab.id} onClick={() => handleSelectRightTab(tab.id)}
+                      className={`relative h-full px-3 border-none cursor-pointer text-[13px] bg-transparent transition-colors flex items-center gap-1.5 shrink-0 ${active ? 'text-white font-medium' : 'text-gray-400 hover:text-gray-200'}`}>
+                      <Icon className="w-3.5 h-3.5" />
+                      {tab.label}
+                      {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}
+                    </button>
+                  );
+                })}
+                {renderModeSwitcher()}
+              </div>
+              <div className="flex-1 overflow-hidden">{renderTabContent(rightTab)}</div>
             </div>
           )}
+
+          {/* (E) Overlay de drag — empêche les iframes d'avaler pointermove */}
+          {dragging && <div className="absolute inset-0 z-50 cursor-col-resize" />}
         </div>
       </div>
 
