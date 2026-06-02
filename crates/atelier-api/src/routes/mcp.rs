@@ -278,6 +278,30 @@ fn tool_definitions_core() -> Value {
                 "required": ["repo"]
             }
         },
+        {
+            "name": "git.activity",
+            "description": "Per-day commit counts of a repository over the last N days (GitHub-style contribution timeline).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Repository slug" },
+                    "days": { "type": "integer", "description": "Window in days (default 365, max 1825)", "default": 365 }
+                },
+                "required": ["repo"]
+            }
+        },
+        {
+            "name": "git.show",
+            "description": "Full detail of a single commit: metadata, per-file changes (status + lines added/removed) and the unified diff patch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Repository slug" },
+                    "sha": { "type": "string", "description": "Commit SHA (hex, 4-40 chars)" }
+                },
+                "required": ["repo", "sha"]
+            }
+        },
     ])
 }
 
@@ -573,6 +597,8 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "git.repos" => tool_git_repos(id, state).await,
         "git.log" => tool_git_log(id, &arguments, state).await,
         "git.branches" => tool_git_branches(id, &arguments, state).await,
+        "git.activity" => tool_git_activity(id, &arguments, state).await,
+        "git.show" => tool_git_show(id, &arguments, state).await,
         // ── Docs (v2) ──
         "docs.overview" => tool_docs_overview(id, &arguments, state).await,
         "docs.list_entries" => tool_docs_list_entries(id, &arguments, state).await,
@@ -719,6 +745,9 @@ async fn tool_git_log(id: Value, args: &Value, state: &McpState) -> Value {
                         "author_email": c.author_email,
                         "date": c.date,
                         "message": c.message,
+                        "additions": c.additions,
+                        "deletions": c.deletions,
+                        "files_changed": c.files_changed,
                     })
                 })
                 .collect();
@@ -753,6 +782,76 @@ async fn tool_git_branches(id: Value, args: &Value, state: &McpState) -> Value {
             tool_success(id, json!({ "branches": data }))
         }
         Err(e) => tool_error(id, &format!("get_branches: {e}")),
+    }
+}
+
+async fn tool_git_activity(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(repo) = args.get("repo").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing repo".into());
+    };
+    let days = args
+        .get("days")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(365)
+        .clamp(1, 1825) as u32;
+
+    match state.git.get_commit_activity(repo, days).await {
+        Ok(activity) => {
+            let data: Vec<Value> = activity
+                .iter()
+                .map(|a| json!({ "date": a.date, "count": a.count }))
+                .collect();
+            tool_success(id, json!({ "repo": repo, "activity": data }))
+        }
+        Err(e) => tool_error(id, &format!("get_commit_activity: {e}")),
+    }
+}
+
+async fn tool_git_show(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(repo) = args.get("repo").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing repo".into());
+    };
+    let Some(sha) = args.get("sha").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing sha".into());
+    };
+
+    match state.git.get_commit_detail(repo, sha).await {
+        Ok(c) => {
+            let files: Vec<Value> = c
+                .files
+                .iter()
+                .map(|f| {
+                    json!({
+                        "path": f.path,
+                        "old_path": f.old_path,
+                        "status": f.status,
+                        "additions": f.additions,
+                        "deletions": f.deletions,
+                    })
+                })
+                .collect();
+            tool_success(
+                id,
+                json!({
+                    "hash": c.hash,
+                    "author_name": c.author_name,
+                    "author_email": c.author_email,
+                    "author_date": c.author_date,
+                    "committer_name": c.committer_name,
+                    "committer_email": c.committer_email,
+                    "committer_date": c.committer_date,
+                    "parents": c.parents,
+                    "subject": c.subject,
+                    "body": c.body,
+                    "files": files,
+                    "additions": c.additions,
+                    "deletions": c.deletions,
+                    "patch": c.patch,
+                    "truncated": c.truncated,
+                }),
+            )
+        }
+        Err(e) => tool_error(id, &format!("get_commit_detail: {e}")),
     }
 }
 

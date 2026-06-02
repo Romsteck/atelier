@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use atelier_git::types::{GitConfig, MirrorConfig};
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, warn};
 
 use crate::state::ApiState;
 
@@ -27,6 +27,8 @@ pub fn router() -> Router<ApiState> {
         .route("/repos", get(list_repos))
         .route("/repos/{slug}", get(get_repo))
         .route("/repos/{slug}/commits", get(get_commits))
+        .route("/repos/{slug}/commits/{sha}", get(get_commit_detail))
+        .route("/repos/{slug}/activity", get(get_activity))
         .route("/repos/{slug}/branches", get(get_branches))
         // Smart HTTP (clone / fetch / push)
         .route("/repos/{slug_git}/info/refs", get(git_info_refs))
@@ -96,6 +98,57 @@ async fn get_branches(
     match state.git.get_branches(&slug).await {
         Ok(branches) => Json(json!({"branches": branches})).into_response(),
         Err(e) => err500(e),
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct ActivityQuery {
+    #[serde(default = "default_activity_days")]
+    days: u32,
+}
+fn default_activity_days() -> u32 {
+    365
+}
+
+#[instrument(skip(state, q))]
+async fn get_activity(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Query(q): Query<ActivityQuery>,
+) -> impl IntoResponse {
+    let days = q.days.clamp(1, 1825); // cap ~5 ans
+    match state.git.get_commit_activity(&slug, days).await {
+        Ok(activity) => Json(json!({"activity": activity})).into_response(),
+        Err(e) => err500(e),
+    }
+}
+
+#[instrument(skip(state))]
+async fn get_commit_detail(
+    State(state): State<ApiState>,
+    Path((slug, sha)): Path<(String, String)>,
+) -> impl IntoResponse {
+    // Validation hex-only en amont → 400 (la méthode re-valide en défense
+    // en profondeur). Bloque toute injection d'argument git.
+    let valid_sha = (4..=40).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    if !valid_sha {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid commit sha"})),
+        )
+            .into_response();
+    }
+    match state.git.get_commit_detail(&slug, &sha).await {
+        Ok(commit) => Json(json!({"commit": commit})).into_response(),
+        Err(e) => {
+            // SHA bien formé mais introuvable → 404, sinon 500.
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response()
+            } else {
+                err500(e)
+            }
+        }
     }
 }
 

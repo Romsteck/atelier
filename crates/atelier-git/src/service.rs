@@ -7,8 +7,12 @@ use tracing::{error, info, warn};
 
 use crate::github::GitHubClient;
 use crate::types::{
-    BranchInfo, CommitInfo, GitConfig, MirrorConfig, RepoInfo, RepoVisibility, SshKeyInfo,
+    BranchInfo, CommitActivityBucket, CommitDetail, CommitInfo, FileChange, FileStatus, GitConfig,
+    MirrorConfig, RepoInfo, RepoVisibility, SshKeyInfo,
 };
+
+/// Borne de taille d'un patch renvoyé par `get_commit_detail` (au-delà → tronqué).
+const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct GitService {
     repos_dir: PathBuf,
@@ -159,11 +163,19 @@ impl GitService {
             return Ok(Vec::new());
         }
 
+        let limit = limit.clamp(1, 500);
+
+        // Séparateurs de contrôle : RS (0x1e) préfixe chaque commit, US (0x1f)
+        // sépare les champs du header. Ces octets ne peuvent pas apparaître
+        // dans un sujet/auteur git → parsing déterministe. `--numstat` ajoute,
+        // après le header, une ligne `add\tdel\tpath` par fichier modifié.
         let output = Command::new("git")
             .args([
                 "log",
-                &format!("--format=%H|%an|%ae|%aI|%s"),
                 &format!("-{limit}"),
+                "--numstat",
+                "--no-color",
+                "--format=%x1ecommit%x1f%H%x1f%an%x1f%ae%x1f%aI%x1f%s",
             ])
             .current_dir(&repo_path)
             .output()
@@ -175,32 +187,167 @@ impl GitService {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut commits = Vec::new();
+        Ok(parse_commit_log(&stdout))
+    }
 
-        for line in stdout.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(5, '|').collect();
-            if parts.len() < 5 {
-                warn!(line, "Malformed git log line");
-                continue;
-            }
-
-            let date = DateTime::parse_from_rfc3339(parts[3])
-                .map(|d| d.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
-
-            commits.push(CommitInfo {
-                hash: parts[0].to_string(),
-                author_name: parts[1].to_string(),
-                author_email: parts[2].to_string(),
-                date,
-                message: parts[4].to_string(),
-            });
+    /// Timeline de commits agrégée par jour (calendrier de contributions).
+    /// Bucket sur la **date du committer** (`%cd`) dans le fuseau local
+    /// enregistré du commit (`--date=short`, pas `short-local`) — c'est ce
+    /// qu'affiche `git log` et ce qu'attend un heatmap GitHub-like. Renvoie un
+    /// vecteur épars trié (jours sans commit omis ; le front remplit la grille).
+    pub async fn get_commit_activity(
+        &self,
+        slug: &str,
+        days: u32,
+    ) -> anyhow::Result<Vec<CommitActivityBucket>> {
+        let repo_path = self.repo_path(slug);
+        if !repo_path.exists() {
+            bail!("Repository '{slug}' not found");
+        }
+        if !self.has_commits(&repo_path).await {
+            return Ok(Vec::new());
         }
 
-        Ok(commits)
+        let output = Command::new("git")
+            .args([
+                "log",
+                &format!("--since={days}.days.ago"),
+                "--date=short",
+                "--pretty=%cd",
+                "--no-color",
+            ])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .context("Failed to run git log for activity")?;
+
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for line in stdout.lines() {
+            let date = line.trim();
+            // "YYYY-MM-DD" attendu ; on ignore toute ligne mal formée.
+            if date.len() != 10 || !date.as_bytes().iter().enumerate().all(valid_date_byte) {
+                continue;
+            }
+            *counts.entry(date.to_string()).or_insert(0) += 1;
+        }
+
+        Ok(counts
+            .into_iter()
+            .map(|(date, count)| CommitActivityBucket { date, count })
+            .collect())
+    }
+
+    /// Détail complet d'un commit : métadonnées, fichiers modifiés (status +
+    /// add/del) et diff unifié brut (capé à `MAX_PATCH_BYTES`). `sha` est
+    /// validé hex-only en amont (anti-injection d'argument git).
+    pub async fn get_commit_detail(&self, slug: &str, sha: &str) -> anyhow::Result<CommitDetail> {
+        validate_sha(sha)?;
+        let repo_path = self.repo_path(slug);
+        if !repo_path.exists() {
+            bail!("Repository '{slug}' not found");
+        }
+
+        // --- Passe 1 : métadonnées (sans patch). 10 champs séparés par US. ---
+        let meta_fmt =
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%s%x1f%b";
+        let out = Command::new("git")
+            .args(["show", "--no-color", "--no-patch", meta_fmt, sha])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .context("Failed to run git show (metadata)")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!("commit '{sha}' not found: {stderr}");
+        }
+        let meta = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = meta.splitn(10, '\x1f').collect();
+        if parts.len() < 10 {
+            bail!("Malformed git show metadata");
+        }
+        let author_date = parse_git_date(parts[4]);
+        let committer_date = parse_git_date(parts[7]);
+        let parents: Vec<String> = parts[1]
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+
+        // --- Passe 2 : fichiers. name-status (status + chemins) et numstat
+        // (add/del) sortent un enregistrement par fichier dans le même ordre →
+        // on les zippe positionnellement. ---
+        let name_out = Command::new("git")
+            .args(["show", "--no-color", "--format=", "--name-status", sha])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .context("Failed to run git show (name-status)")?;
+        let num_out = Command::new("git")
+            .args(["show", "--no-color", "--format=", "--numstat", sha])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .context("Failed to run git show (numstat)")?;
+
+        let name_str = String::from_utf8_lossy(&name_out.stdout);
+        let num_str = String::from_utf8_lossy(&num_out.stdout);
+        let stats = parse_numstat_lines(&num_str);
+        let files: Vec<FileChange> = parse_name_status(&name_str)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (status, path, old_path))| {
+                let (additions, deletions) = stats.get(i).copied().unwrap_or((0, 0));
+                FileChange {
+                    path,
+                    old_path,
+                    status,
+                    additions,
+                    deletions,
+                }
+            })
+            .collect();
+        let additions: u32 = files.iter().map(|f| f.additions).sum();
+        let deletions: u32 = files.iter().map(|f| f.deletions).sum();
+
+        // --- Passe 3 : patch unifié (capé). ---
+        let patch_out = Command::new("git")
+            .args(["show", "--no-color", "--format=", "-p", sha])
+            .current_dir(&repo_path)
+            .output()
+            .await
+            .context("Failed to run git show (patch)")?;
+        let patch_full = String::from_utf8_lossy(&patch_out.stdout);
+        let (patch, truncated) = if patch_full.len() > MAX_PATCH_BYTES {
+            let mut end = MAX_PATCH_BYTES;
+            while end > 0 && !patch_full.is_char_boundary(end) {
+                end -= 1;
+            }
+            (patch_full[..end].to_string(), true)
+        } else {
+            (patch_full.into_owned(), false)
+        };
+
+        Ok(CommitDetail {
+            hash: parts[0].to_string(),
+            author_name: parts[2].to_string(),
+            author_email: parts[3].to_string(),
+            author_date,
+            committer_name: parts[5].to_string(),
+            committer_email: parts[6].to_string(),
+            committer_date,
+            parents,
+            subject: parts[8].to_string(),
+            body: parts[9].trim_end().to_string(),
+            files,
+            additions,
+            deletions,
+            patch,
+            truncated,
+        })
     }
 
     pub async fn get_branches(&self, slug: &str) -> anyhow::Result<Vec<BranchInfo>> {
@@ -703,4 +850,213 @@ async fn dir_size(path: &Path) -> anyhow::Result<u64> {
     }
 
     Ok(0)
+}
+
+/// Valide un SHA git pour usage en argument de commande : hex-only, 4..=40.
+/// Bloque toute injection d'option (`--upload-pack=…`), ref, `..`, traversal.
+fn validate_sha(sha: &str) -> anyhow::Result<()> {
+    let ok = (4..=40).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    if !ok {
+        bail!("invalid commit sha");
+    }
+    Ok(())
+}
+
+/// Octet valide à la position `i` d'une date "YYYY-MM-DD" (digits + tirets en 4 et 7).
+fn valid_date_byte((i, b): (usize, &u8)) -> bool {
+    if i == 4 || i == 7 {
+        *b == b'-'
+    } else {
+        b.is_ascii_digit()
+    }
+}
+
+fn parse_git_date(s: &str) -> DateTime<chrono::Utc> {
+    DateTime::parse_from_rfc3339(s.trim())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now())
+}
+
+/// Parse la sortie de
+/// `git log --numstat --format=%x1ecommit%x1f%H%x1f%an%x1f%ae%x1f%aI%x1f%s`.
+/// Chaque commit est un chunk préfixé par RS+`commit`+US ; le header (jusqu'au
+/// 1er `\n`) porte les champs séparés par US, suivi des lignes numstat.
+fn parse_commit_log(stdout: &str) -> Vec<CommitInfo> {
+    let mut commits = Vec::new();
+    for chunk in stdout.split('\x1e') {
+        // Le chunk initial (avant le 1er RS) est vide → strip_prefix échoue → skip.
+        let chunk = match chunk.strip_prefix("commit\x1f") {
+            Some(c) => c,
+            None => continue,
+        };
+        let (header, rest) = chunk.split_once('\n').unwrap_or((chunk, ""));
+        let parts: Vec<&str> = header.splitn(5, '\x1f').collect();
+        if parts.len() < 5 {
+            warn!(header, "Malformed git log header");
+            continue;
+        }
+        let date = parse_git_date(parts[3]);
+
+        let mut additions = 0u32;
+        let mut deletions = 0u32;
+        let mut files_changed = 0u32;
+        for (add, del) in parse_numstat_lines(rest) {
+            additions += add;
+            deletions += del;
+            files_changed += 1;
+        }
+
+        commits.push(CommitInfo {
+            hash: parts[0].to_string(),
+            author_name: parts[1].to_string(),
+            author_email: parts[2].to_string(),
+            date,
+            message: parts[4].to_string(),
+            additions,
+            deletions,
+            files_changed,
+        });
+    }
+    commits
+}
+
+/// Parse des lignes numstat `add\tdel\tpath` (une par fichier modifié, dans
+/// l'ordre du diff). Les fichiers binaires affichent `-\t-` → 0/0. Le chemin
+/// est ignoré (seules les stats comptent ici).
+fn parse_numstat_lines(s: &str) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut cols = line.splitn(3, '\t');
+        let add = cols.next().unwrap_or("");
+        let del = cols.next().unwrap_or("");
+        // Pas de 3e colonne (chemin) → ce n'est pas une ligne numstat.
+        if cols.next().is_none() {
+            continue;
+        }
+        out.push((add.parse::<u32>().unwrap_or(0), del.parse::<u32>().unwrap_or(0)));
+    }
+    out
+}
+
+/// Parse `git show --name-status` → `(status, new_path, old_path?)` par fichier.
+/// Renommages/copies : `R100\told\tnew` → status R, path=new, old_path=Some(old).
+fn parse_name_status(s: &str) -> Vec<(FileStatus, String, Option<String>)> {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        let code = cols.next().unwrap_or("");
+        let first = code.chars().next().unwrap_or('X');
+        let status = FileStatus::from_letter(first);
+        let (path, old_path) = if matches!(first, 'R' | 'C') {
+            let old = cols.next().unwrap_or("").to_string();
+            let new = cols.next().unwrap_or("").to_string();
+            (new, Some(old))
+        } else {
+            (cols.next().unwrap_or("").to_string(), None)
+        };
+        if path.is_empty() {
+            continue;
+        }
+        out.push((status, path, old_path));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RS: char = '\x1e';
+    const US: char = '\x1f';
+
+    fn log_block(hash: &str, subject: &str, numstat: &[&str]) -> String {
+        let header = format!(
+            "{RS}commit{US}{hash}{US}Romain{US}r@x{US}2026-06-01T10:00:00+02:00{US}{subject}\n"
+        );
+        let body = numstat
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect::<String>();
+        // git insère une ligne vide entre le header et le bloc numstat.
+        format!("{header}\n{body}")
+    }
+
+    #[test]
+    fn parses_basic_commit_with_stats() {
+        let log = log_block("abc123", "feat: x", &["10\t2\tsrc/a.rs", "0\t5\tsrc/b.rs"]);
+        let commits = parse_commit_log(&log);
+        assert_eq!(commits.len(), 1);
+        let c = &commits[0];
+        assert_eq!(c.hash, "abc123");
+        assert_eq!(c.message, "feat: x");
+        assert_eq!(c.additions, 10);
+        assert_eq!(c.deletions, 7);
+        assert_eq!(c.files_changed, 2);
+    }
+
+    #[test]
+    fn binary_files_count_but_dont_add() {
+        let log = log_block("def456", "bin", &["-\t-\timg.png", "3\t1\tnote.txt"]);
+        let commits = parse_commit_log(&log);
+        let c = &commits[0];
+        assert_eq!(c.additions, 3);
+        assert_eq!(c.deletions, 1);
+        assert_eq!(c.files_changed, 2); // le binaire compte comme fichier changé
+    }
+
+    #[test]
+    fn empty_or_merge_commit_has_zero_stats() {
+        // Pas de ligne numstat (merge / empty commit).
+        let log = log_block("merge0", "Merge branch 'x'", &[]);
+        let commits = parse_commit_log(&log);
+        let c = &commits[0];
+        assert_eq!((c.additions, c.deletions, c.files_changed), (0, 0, 0));
+    }
+
+    #[test]
+    fn parses_multiple_commits() {
+        let mut log = log_block("c1", "first", &["1\t0\ta"]);
+        log.push_str(&log_block("c2", "second", &["2\t2\tb", "4\t0\tc"]));
+        let commits = parse_commit_log(&log);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].hash, "c1");
+        assert_eq!(commits[0].files_changed, 1);
+        assert_eq!(commits[1].additions, 6);
+        assert_eq!(commits[1].files_changed, 2);
+    }
+
+    #[test]
+    fn name_status_handles_rename() {
+        let parsed = parse_name_status("R100\told/path.rs\tnew/path.rs\nM\tsrc/x.rs\n");
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed[0].0, FileStatus::R));
+        assert_eq!(parsed[0].1, "new/path.rs");
+        assert_eq!(parsed[0].2.as_deref(), Some("old/path.rs"));
+        assert!(matches!(parsed[1].0, FileStatus::M));
+        assert_eq!(parsed[1].1, "src/x.rs");
+        assert_eq!(parsed[1].2, None);
+    }
+
+    #[test]
+    fn numstat_lines_skip_blanks_and_binaries() {
+        let stats = parse_numstat_lines("\n10\t2\ta.rs\n-\t-\tb.png\n");
+        assert_eq!(stats, vec![(10, 2), (0, 0)]);
+    }
+
+    #[test]
+    fn validate_sha_accepts_hex_rejects_injection() {
+        assert!(validate_sha("abc123").is_ok());
+        assert!(validate_sha("0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(validate_sha("HEAD").is_err());
+        assert!(validate_sha("--upload-pack=evil").is_err());
+        assert!(validate_sha("../etc").is_err());
+        assert!(validate_sha("abc").is_err()); // trop court
+        assert!(validate_sha("").is_err());
+    }
 }

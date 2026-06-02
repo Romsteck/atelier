@@ -142,6 +142,8 @@ export const getEdgeStats = () => api.get('/edge/stats');
 export const getGitRepos = () => api.get('/git/repos');
 export const getGitRepo = (slug) => api.get(`/git/repos/${slug}`);
 export const getGitCommits = (slug, limit = 50) => api.get(`/git/repos/${slug}/commits`, { params: { limit } });
+export const getGitCommitDetail = (slug, sha) => api.get(`/git/repos/${slug}/commits/${sha}`);
+export const getGitActivity = (slug, days = 365) => api.get(`/git/repos/${slug}/activity`, { params: { days } });
 export const getGitBranches = (slug) => api.get(`/git/repos/${slug}/branches`);
 export const triggerGitMirrorSync = (slug) => api.post(`/git/repos/${slug}/mirror/sync`);
 export const syncAllGitRepos = () => api.post('/git/repos/sync-all');

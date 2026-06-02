@@ -6,36 +6,23 @@ import {
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
+import CommitHeatmap from '../components/git/CommitHeatmap';
+import DiffStatBar from '../components/git/DiffStatBar';
+import CommitDetailModal from '../components/git/CommitDetailModal';
+import { timeAgo, formatBytes } from '../utils/gitFormat';
 import {
-  getGitRepos, getGitCommits, getGitBranches,
+  getGitRepos, getGitCommits, getGitActivity, getGitBranches,
   triggerGitMirrorSync, syncAllGitRepos, getGitSshKey,
   generateGitSshKey, getGitConfig, updateGitConfig
 } from '../api/client';
-
-const timeAgo = (dateStr) => {
-  if (!dateStr) return '--';
-  const now = Date.now();
-  const d = new Date(dateStr).getTime();
-  const diff = Math.floor((now - d) / 1000);
-  if (diff < 60) return 'quelques secondes';
-  if (diff < 3600) return `${Math.floor(diff / 60)}min`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}j`;
-  return new Date(dateStr).toLocaleDateString('fr-FR');
-};
-
-const formatBytes = (bytes) => {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-};
 
 function Git() {
   const [repos, setRepos] = useState([]);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [commits, setCommits] = useState([]);
+  const [activity, setActivity] = useState([]);
+  const [loadingActivity, setLoadingActivity] = useState(false);
+  const [openSha, setOpenSha] = useState(null);
   const [branches, setBranches] = useState([]);
   const [sshKey, setSshKey] = useState(null);
   const [config, setConfig] = useState(null);
@@ -105,19 +92,24 @@ function Git() {
     if (selectedRepo === slug) return;
     setSelectedRepo(slug);
     setLoadingDetail(true);
+    setLoadingActivity(true);
     setCommits([]);
+    setActivity([]);
     setBranches([]);
     try {
-      const [commitsRes, branchesRes] = await Promise.all([
+      const [commitsRes, branchesRes, activityRes] = await Promise.all([
         getGitCommits(slug).catch(() => ({ data: { commits: [] } })),
         getGitBranches(slug).catch(() => ({ data: { branches: [] } })),
+        getGitActivity(slug).catch(() => ({ data: { activity: [] } })),
       ]);
       setCommits(commitsRes.data?.commits || commitsRes.data || []);
       setBranches(branchesRes.data?.branches || branchesRes.data || []);
+      setActivity(activityRes.data?.activity || activityRes.data || []);
     } catch {
       setMessage({ type: 'error', text: 'Erreur lors du chargement du depot' });
     } finally {
       setLoadingDetail(false);
+      setLoadingActivity(false);
     }
   };
 
@@ -533,6 +525,9 @@ function Git() {
                 </div>
               )}
 
+              {/* Heatmap d'activité */}
+              <CommitHeatmap data={activity} loading={loadingActivity} />
+
               {/* Commits */}
               <div>
                 <div className="px-4 sm:px-6 py-2 border-b border-gray-700 bg-gray-900/80 sticky top-0 z-10">
@@ -554,9 +549,10 @@ function Git() {
                 ) : (
                   <div>
                     {commits.map((c, i) => (
-                      <div
+                      <button
                         key={c.hash || i}
-                        className="px-4 sm:px-6 py-2.5 border-b border-gray-700/30 hover:bg-gray-800/50 transition-colors"
+                        onClick={() => c.hash && setOpenSha(c.hash)}
+                        className="w-full text-left px-4 sm:px-6 py-2.5 border-b border-gray-700/30 hover:bg-gray-800/50 transition-colors"
                       >
                         <div className="flex items-start gap-3">
                           <span className="text-xs font-mono text-blue-400 bg-blue-900/20 px-1.5 py-0.5 mt-0.5 shrink-0">
@@ -572,8 +568,18 @@ function Git() {
                               {timeAgo(c.date || c.timestamp)}
                             </p>
                           </div>
+                          {(c.additions != null || c.deletions != null) && (
+                            <div className="flex items-center gap-2 shrink-0 mt-0.5">
+                              <span className="text-[11px] text-gray-600 hidden sm:inline">
+                                {c.files_changed || 0} fichier{(c.files_changed || 0) > 1 ? 's' : ''}
+                              </span>
+                              <span className="text-[11px] font-mono text-green-500">+{c.additions || 0}</span>
+                              <span className="text-[11px] font-mono text-red-500">−{c.deletions || 0}</span>
+                              <DiffStatBar additions={c.additions || 0} deletions={c.deletions || 0} />
+                            </div>
+                          )}
                         </div>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -616,6 +622,15 @@ function Git() {
           </div>
         </div>
       </div>
+
+      {openSha && (
+        <CommitDetailModal
+          slug={selectedRepo}
+          sha={openSha}
+          org={orgInput && config?.github_token ? orgInput : null}
+          onClose={() => setOpenSha(null)}
+        />
+      )}
     </div>
   );
 }
