@@ -1023,29 +1023,43 @@ fn render_surveillance_rule_md(app: &Application) -> String {
     format!(
         "# Surveillance IA — {slug}\n\
          \n\
-         Cette app est surveillée par un agent Codex via 3 scans dédiés \
-         (code-review, sécurité, suggestions). Les findings sont catégorisées et \
-         apparaissent dans le tab **Surveillance** du Studio et via les tools MCP \
-         `findings_*`.\n\
+         Cette app possède **un seul scan**, que **TU** définis et fais évoluer \
+         (aucune validation humaine — tu en es responsable). Le scan tourne en \
+         lecture seule via Codex et écrit des findings catégorisées, visibles dans \
+         le tab **Surveillance** du Studio. **Vide par défaut** : tant que tu ne l'as \
+         pas défini, il est en veille (aucun run).\n\
          \n\
-         ## Quand l'utilisateur veut traiter les findings\n\
+         ## Rituel à CHAQUE session\n\
          \n\
-         - Bugs / code-review → skill **surveillance-bugs** (`kind=code_review`).\n\
-         - Sécurité → skill **surveillance-security** (`kind=security`).\n\
-         - Améliorations → skill **surveillance-improvements** (`kind=suggestion`).\n\
+         1. **`scan_get`** — relis la définition actuelle de ton scan.\n\
+         2. Au vu de l'évolution du projet depuis la dernière fois, mets-la à jour \
+         avec **`scan_set`** : `label` (nom affiché), `prompt` (les instructions du \
+         scan), `cadence` (manual|daily|weekly), `gate` (code|data|manual), `gate_sql` \
+         (un SELECT scalaire de fraîcheur si gate=data), `categories` (les axes de \
+         findings). Le `prompt` doit contenir les slots `{{{{SLUG}}}}`, \
+         `{{{{CATEGORIES}}}}`, `{{{{DIFF}}}}`, `{{{{MEMORY}}}}`, `{{{{OPEN_COUNT}}}}`, \
+         `{{{{REMAINING}}}}`, `{{{{MAX_OPEN}}}}`.\n\
+         3. Maintiens le contexte support dans **`.claude/rules/`** (invariants \
+         métier, pièges, schéma data) — ce que ton scan doit savoir pour être pertinent.\n\
          \n\
-         ## Tools MCP disponibles\n\
+         > Un bon scan répond à une question utile et RÉCURRENTE propre à ce projet. \
+         Le `prompt` doit demander à Codex d'émettre chaque finding via \
+         `findings_upsert(category=<une de tes categories>, severity, title, summary, \
+         plan, fingerprint)`, de fingerprinter par CAUSE (un scan récurrent met à jour \
+         au lieu de dupliquer), et de rester dans le budget `{{{{REMAINING}}}}`.\n\
          \n\
-         - `findings_list` (filtre kind/severity/status), `findings_dismiss`, `findings_resolve`\n\
-         - `memory_get`, `memory_remember` (préférences durables)\n\
-         - `runs_list` (historique des runs)\n\
+         ## Tools MCP\n\
+         \n\
+         - `scan_get`, `scan_set` — lire / définir ton scan.\n\
+         - `findings_list` (filtre severity/status), `findings_dismiss`, `findings_resolve`\n\
+         - `memory_get`, `memory_remember` (préférences/mémoire durables)\n\
+         - `runs_list` (historique des runs), `pm_query` (SELECT read-only sur la base de l'app)\n\
          \n\
          ## Convention de commit\n\
          \n\
          Quand tu corriges une finding, commit avec le message \
-         `fix(surveillance:<id>): <résumé>` (ex. `fix(surveillance:42): valide le content-type`). \
-         Atelier détecte ce pattern et marque la finding `resolved` automatiquement. \
-         Appelle aussi `findings_resolve(id, commit_sha)` pour fiabiliser.\n",
+         `fix(surveillance:<id>): <résumé>`. Atelier détecte ce pattern et marque la \
+         finding `resolved` automatiquement. Appelle aussi `findings_resolve(id, commit_sha)`.\n",
         slug = app.slug,
     )
 }
@@ -1379,70 +1393,31 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
         )),
     ];
 
-    // ── Surveillance : process des findings (équivalent des slash-commands
-    // /bugs et /improvements, en skills pour rester aligné avec la convention
-    // "tout est skill" du workspace). ──
-    skills.push(("surveillance-bugs", format!(
+    // ── Surveillance : un seul scan par app, possédé par l'agent. Une skill
+    // consolidée couvre à la fois la MAINTENANCE du scan (scan_get/scan_set) et
+    // le TRAITEMENT des findings qu'il produit. ──
+    skills.push(("surveillance", format!(
         "---\n\
-         name: surveillance-bugs\n\
-         description: Traite une à une les findings de CODE REVIEW (bugs/régressions) de l'app {slug} repérées par la surveillance IA. Utilise-moi quand l'utilisateur dit \"traite les bugs\", \"/bugs\", \"corrige les findings\", \"fix le code-review\".\n\
+         name: surveillance\n\
+         description: Gère le scan de surveillance unique de l'app {slug} — le DÉFINIR/le faire évoluer (scan_set) et TRAITER ses findings. Utilise-moi quand l'utilisateur dit \"surveillance\", \"définis/mets à jour le scan\", \"/scan\", \"traite les findings\", ou en début de session pour maintenir le scan.\n\
          allowed-tools: \n\
          ---\n\
          \n\
-         # Traiter les findings de code-review — `{slug}`\n\
+         # Surveillance — `{slug}`\n\
          \n\
-         1. `findings_list` avec `kind=code_review`, `status=open`. Trie par sévérité décroissante.\n\
-         2. Pour chaque finding :\n\
-         \x20  a. Affiche titre + summary + plan à l'utilisateur.\n\
-         \x20  b. Demande confirmation avant d'appliquer.\n\
-         \x20  c. Si OK : implémente le plan (lis les fichiers, fais les edits).\n\
-         \x20  d. Lance les vérifs (build / typecheck selon la stack — voir `.claude/rules/workflow.md`).\n\
-         \x20  e. Si tout passe : commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`.\n\
-         \x20  f. Si l'utilisateur juge la finding non pertinente : `findings_dismiss(id, reason)`.\n\
-         3. Récap final : N résolues, M dismiss, K laissées ouvertes.\n\
+         Cette app a **un seul scan**, que tu possèdes (aucune validation humaine). Vois `.claude/rules/surveillance.md`.\n\
+         \n\
+         ## Maintenir le scan (début de session / quand le projet évolue)\n\
+         1. `scan_get` — lis la définition actuelle (`blank=true` = pas encore défini).\n\
+         2. Décide ce que ce projet a besoin de surveiller de façon RÉCURRENTE (une question utile qu'un simple build ne couvre pas). Puis `scan_set` : `label`, `prompt` (avec les slots `{{{{SLUG}}}}`/`{{{{CATEGORIES}}}}`/`{{{{DIFF}}}}`/`{{{{MEMORY}}}}`/`{{{{OPEN_COUNT}}}}`/`{{{{REMAINING}}}}`/`{{{{MAX_OPEN}}}}`), `cadence`, `gate` (+ `gate_sql` si `data`), `categories`.\n\
+         3. Maintiens aussi le contexte support dans `.claude/rules/` (ce que le scan doit savoir).\n\
+         \n\
+         ## Traiter les findings\n\
+         1. `findings_list` (`status=open`), trie par sévérité décroissante.\n\
+         2. Pour chaque finding : affiche titre+summary+plan ; demande confirmation ; implémente ; vérifie (build/typecheck) ; commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`. Faux positif → `findings_dismiss(id, reason)`.\n\
+         3. Récap : N résolues, M dismiss, K ouvertes.\n\
          \n\
          **Ne lance JAMAIS `make deploy` toi-même** — l'utilisateur livre après revue des commits.\n",
-        slug = app.slug,
-    )));
-    skills.push(("surveillance-improvements", format!(
-        "---\n\
-         name: surveillance-improvements\n\
-         description: Traite une à une les SUGGESTIONS d'amélioration de l'app {slug} repérées par la surveillance IA. Utilise-moi quand l'utilisateur dit \"traite les améliorations\", \"/improvements\", \"applique les suggestions\".\n\
-         allowed-tools: \n\
-         ---\n\
-         \n\
-         # Traiter les suggestions d'amélioration — `{slug}`\n\
-         \n\
-         1. `findings_list` avec `kind=suggestion`, `status=open`. Trie par sévérité décroissante.\n\
-         2. Pour chaque suggestion :\n\
-         \x20  a. Affiche titre + summary + plan.\n\
-         \x20  b. Demande confirmation (les suggestions sont optionnelles — l'utilisateur tranche).\n\
-         \x20  c. Si OK : implémente, commit atomique `fix(surveillance:<id>): <résumé>`, puis `findings_resolve(id, commit_sha)`.\n\
-         \x20  d. Sinon : `findings_dismiss(id, reason)`.\n\
-         3. Préfère des commits petits et séparés (une suggestion = un commit).\n\
-         \n\
-         **Ne lance JAMAIS `make deploy` toi-même.**\n",
-        slug = app.slug,
-    )));
-    skills.push(("surveillance-security", format!(
-        "---\n\
-         name: surveillance-security\n\
-         description: Traite une à une les failles de SÉCURITÉ de l'app {slug} repérées par le scan sécurité de la surveillance IA. Utilise-moi quand l'utilisateur dit \"traite la sécurité\", \"/security\", \"corrige les failles\".\n\
-         allowed-tools: \n\
-         ---\n\
-         \n\
-         # Traiter les failles de sécurité — `{slug}`\n\
-         \n\
-         1. `findings_list` avec `kind=security`, `status=open`. Trie par sévérité décroissante (critical d'abord).\n\
-         2. Pour chaque faille :\n\
-         \x20  a. Affiche titre + summary (vecteur + impact) + plan.\n\
-         \x20  b. Demande confirmation avant d'appliquer (un correctif sécurité peut changer un comportement).\n\
-         \x20  c. Si OK : implémente, lance les vérifs (build/typecheck selon stack).\n\
-         \x20  d. Commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`.\n\
-         \x20  e. Si faux positif : `findings_dismiss(id, reason)`.\n\
-         3. Récap : N corrigées, M dismiss, K ouvertes.\n\
-         \n\
-         **Ne lance JAMAIS `make deploy` toi-même.**\n",
         slug = app.slug,
     )));
 

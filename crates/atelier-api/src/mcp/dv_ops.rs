@@ -418,6 +418,76 @@ pub async fn dv_audit_list(
     }
 }
 
+/// SELECT-only forensic read against an app's database, for the surveillance
+/// post-mortem scan. Unlike the gateway `dv_*` tools (no JOIN/aggregate/temporal
+/// filter), this allows the cross-table correlation + freeze/gap detection a
+/// causal post-mortem needs.
+///
+/// Read-only is enforced two ways: (1) a keyword guard rejecting write verbs and
+/// multi-statements, and (2) — the hard guarantee — the user SQL is run as a
+/// FROM-subquery (`SELECT to_jsonb(t) FROM ( <sql> ) t`). Postgres forbids
+/// INSERT/UPDATE/DELETE/MERGE and data-modifying CTEs inside a sub-SELECT, so
+/// even a guard miss cannot mutate. `statement_timeout` is inherited from the
+/// pool's session defaults. Rows come back schema-less as JSON (`to_jsonb`), so
+/// arbitrary projections decode without per-type handling. NOT exposed to app
+/// (`?project=`) contexts — surveillance MCP tool set only.
+pub async fn pm_query(ctx: &AppsContext, slug: String, sql: String, limit: u32) -> IpcResponse {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return IpcResponse::err("pm_query: empty sql");
+    }
+    let head = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if head != "SELECT" && head != "WITH" {
+        return IpcResponse::err("pm_query is SELECT-only (must start with SELECT or WITH)");
+    }
+    if trimmed.contains(';') {
+        return IpcResponse::err("pm_query: a single statement only (no ';')");
+    }
+    let upper = format!(" {} ", trimmed.to_ascii_uppercase());
+    const FORBIDDEN: &[&str] = &[
+        " INSERT ", " UPDATE ", " DELETE ", " DROP ", " ALTER ", " TRUNCATE ", " CREATE ",
+        " GRANT ", " REVOKE ", " COPY ", " CALL ", " MERGE ", " DO ", " VACUUM ", " LOCK ",
+    ];
+    if let Some(kw) = FORBIDDEN.iter().find(|kw| upper.contains(**kw)) {
+        return IpcResponse::err(format!(
+            "pm_query: forbidden keyword '{}' — SELECT-only",
+            kw.trim()
+        ));
+    }
+    let engine = match ctx.dv_engine_for(&slug).await {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let limit = limit.clamp(1, 5000);
+    let wrapped = format!("SELECT to_jsonb(t) AS j FROM ( {trimmed} ) t LIMIT {limit}");
+    match sqlx_core::query::query_with(
+        sqlx_core::sql_str::AssertSqlSafe(wrapped.as_str()),
+        sqlx_postgres::PgArguments::default(),
+    )
+    .fetch_all(engine.pool())
+    .await
+    {
+        Ok(rows) => {
+            use sqlx_core::row::Row as _;
+            let out: Vec<Value> = rows
+                .iter()
+                .filter_map(|r| {
+                    r.try_get::<sqlx_core::types::Json<Value>, _>("j")
+                        .ok()
+                        .map(|j| j.0)
+                })
+                .collect();
+            let count = out.len();
+            IpcResponse::ok_data(json!({ "rows": out, "count": count }))
+        }
+        Err(e) => IpcResponse::err(format!("pm_query: {e}")),
+    }
+}
+
 /// `DvRotateToken` — admin op. Mints a fresh gateway token, then syncs
 /// the app's `.env` so the new value lands on disk for the next restart.
 /// (The currently-running process keeps the old token until it restarts.)

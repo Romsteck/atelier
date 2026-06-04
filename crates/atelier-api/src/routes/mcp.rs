@@ -134,6 +134,12 @@ pub async fn mcp_handler(
     body: String,
 ) -> axum::response::Response {
     let project_slug = query.get("project").cloned();
+    // Read-only surveillance scope: `?scope=surveillance` restricts the tool set
+    // (list + dispatch) to a read-only whitelist, so the surveillance Codex
+    // cannot reach destructive tools (app.delete, db_drop_table, app.exec, …)
+    // even with the global MCP token. Enforced by capability, not just by the
+    // AGENTS.md instruction. Inert unless the param is present.
+    let readonly = query.get("scope").map(|s| s == "surveillance").unwrap_or(false);
     // ── Auth ──
     let authorized = headers
         .get("authorization")
@@ -197,8 +203,8 @@ pub async fn mcp_handler(
     // ── Route method ──
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id, &project_slug),
-        "tools/call" => handle_tools_call(id, request.params, &state, project_slug).await,
+        "tools/list" => handle_tools_list(id, &project_slug, readonly),
+        "tools/call" => handle_tools_call(id, request.params, &state, project_slug, readonly).await,
         _ => error_response(
             id,
             METHOD_NOT_FOUND,
@@ -238,14 +244,15 @@ fn tool_definitions() -> Value {
 /// variants in `tool_definitions_project()` omit `slug` (auto-injected).
 fn tool_definitions_surveillance() -> Value {
     json!([
-        { "name": "findings_list", "description": "List surveillance findings across apps (or one app via slug). Filter by kind/category/severity/status.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
-        { "name": "findings_upsert", "description": "Create/update a finding for an app (dedup by fingerprint). `category` is coerced to the kind's allowed set.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string" }, "summary": { "type": "string" }, "plan": { "type": "string" }, "fingerprint": { "type": "string" }, "evidence": { "type": "object" } }, "required": ["slug", "kind", "category", "severity", "title", "summary", "plan", "fingerprint"] } },
+        { "name": "findings_list", "description": "List surveillance findings across apps (or one app via slug). Filter by kind/category/severity/status.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
+        { "name": "findings_upsert", "description": "Create/update a finding for an app (dedup by fingerprint). `category` is coerced to the kind's allowed set.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string" }, "summary": { "type": "string" }, "plan": { "type": "string" }, "fingerprint": { "type": "string" }, "evidence": { "type": "object" } }, "required": ["slug", "category", "severity", "title", "summary", "plan", "fingerprint"] } },
         { "name": "findings_dismiss", "description": "Dismiss a finding as false positive (records dismissed_pattern memory).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "id": { "type": "integer" }, "reason": { "type": "string" } }, "required": ["slug", "id"] } },
         { "name": "findings_resolve", "description": "Mark a finding resolved (records applied_fix memory).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "id": { "type": "integer" }, "commit_sha": { "type": "string" } }, "required": ["slug", "id"] } },
-        { "name": "surveillance_run", "description": "Trigger a surveillance run for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["code_review", "suggestions", "security"] } }, "required": ["slug", "kind"] } },
+        { "name": "surveillance_run", "description": "Trigger the app's scan run (the single per-app scan defined via scan_set). Async — findings appear via findings_list once Codex finishes.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" } }, "required": ["slug"] } },
         { "name": "memory_get", "description": "Read an app's surveillance memory.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" } }, "required": ["slug"] } },
         { "name": "memory_remember", "description": "Store a surveillance memory entry for an app (upsert by kind+key).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" }, "key": { "type": "string" }, "value": {} }, "required": ["slug", "kind", "key", "value"] } },
-        { "name": "runs_list", "description": "List recent surveillance runs for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } }
+        { "name": "runs_list", "description": "List recent surveillance runs for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } },
+        { "name": "pm_query", "description": "Read-only SELECT against an app's database for surveillance forensics (post-mortem). JOINs/aggregates/temporal windows allowed; the `_dv_audit` table holds row mutation history (before/after/diff) for corroborating data freezes and score changes. SELECT-only — any mutation is rejected. Rows returned as JSON.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "sql": { "type": "string", "description": "A single SELECT (or read-only WITH) statement." }, "limit": { "type": "integer", "minimum": 1, "maximum": 5000 } }, "required": ["slug", "sql"] } }
     ])
 }
 
@@ -454,7 +461,58 @@ fn handle_initialize(id: Value) -> Value {
     )
 }
 
-fn handle_tools_list(id: Value, project_slug: &Option<String>) -> Value {
+/// Tools permitted in the read-only surveillance scope (`?scope=surveillance`).
+/// Allowed: the surveillance findings/memory/runs surface (writes only to the
+/// `atelier_meta` meta-DB — the scan's job), the forensic read `pm_query`, and
+/// read-only schema/git/docs/app-status introspection. EXCLUDED: everything that
+/// mutates app code, business data, schema, or lifecycle (app.delete/create/
+/// build/exec/control, db.execute, db_create_table/drop_table/add_column/…,
+/// raw db_query/db_exec).
+fn is_readonly_tool(name: &str) -> bool {
+    matches!(
+        name,
+        // Surveillance surface (meta-DB only) + forensic read
+        "findings_list" | "findings_upsert" | "findings_dismiss" | "findings_resolve"
+            | "surveillance_run" | "memory_get" | "memory_remember" | "runs_list" | "pm_query"
+            | "scan_get"
+            // Read-only schema/counts (no row data except via pm_query)
+            | "db_tables" | "db_schema" | "db_overview" | "db_count_rows" | "db_get_schema"
+            | "db.tables" | "db.list_tables" | "db.describe" | "db.describe_table"
+            | "db.overview" | "db.count_rows" | "db.get_schema"
+            // Git read
+            | "git.repos" | "git.log" | "git.branches" | "git.activity" | "git.show"
+            | "git_log" | "git_branches"
+            // Docs read
+            | "docs.overview" | "docs.list_entries" | "docs.get" | "docs.search"
+            | "docs.list_apps" | "docs.completeness" | "docs.diagram_get"
+            | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
+            | "docs_completeness" | "docs_diagram_get"
+            // App read-only introspection
+            | "app.list" | "app.get" | "app.status" | "status"
+    )
+}
+
+fn handle_tools_list(id: Value, project_slug: &Option<String>, readonly: bool) -> Value {
+    if readonly {
+        // Read-only surveillance scope: the global set filtered to the read-only
+        // whitelist (findings/memory/runs + pm_query + read-only schema/git/docs).
+        let all = tool_definitions();
+        let filtered: Vec<Value> = all
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|t| {
+                        t.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(is_readonly_tool)
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        return success_response(id, json!({ "tools": filtered }));
+    }
     if project_slug.is_some() {
         // Project-scoped: only app/db/docs/studio/git tools
         success_response(id, json!({ "tools": tool_definitions_project() }))
@@ -485,7 +543,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "git_log" | "git_branches"
             | "findings_list" | "findings_upsert" | "findings_dismiss"
             | "findings_resolve" | "surveillance_run"
-            | "memory_get" | "memory_remember" | "runs_list"
+            | "memory_get" | "memory_remember" | "runs_list" | "scan_get" | "scan_set"
     )
 }
 
@@ -510,7 +568,7 @@ fn is_dispatched_project_tool(name: &str) -> bool {
             | "git_log" | "git_branches"
             | "findings_list" | "findings_upsert" | "findings_dismiss"
             | "findings_resolve" | "surveillance_run"
-            | "memory_get" | "memory_remember" | "runs_list"
+            | "memory_get" | "memory_remember" | "runs_list" | "scan_get" | "scan_set"
     )
 }
 
@@ -552,20 +610,38 @@ fn tool_definitions_project() -> Value {
         { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
         { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
         // ── Surveillance IA (findings de code-review / suggestions + mémoire) ──
-        { "name": "findings_list", "description": "List the app's surveillance findings (code-review bugs, improvement suggestions, security issues). Filter by kind/category/severity/status. Read this at the start of a /bugs, /improvements or /security session.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
-        { "name": "findings_upsert", "description": "Create or update a finding (dedup by fingerprint). For the Codex reviewer: emit one call per genuine issue. `category` MUST be one of the kind's allowed categories (see the prompt). `plan` is markdown the user will execute later in Claude Code. Do NOT inflate severity.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["code_review", "suggestion", "security"] }, "category": { "type": "string", "description": "One of the kind's allowed categories; anything else is coerced to 'autres'." }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string", "description": "≤120 chars" }, "summary": { "type": "string", "description": "markdown" }, "plan": { "type": "string", "description": "markdown actionable steps" }, "fingerprint": { "type": "string", "description": "stable hash of the issue for dedup" }, "evidence": { "type": "object", "description": "{file_path?, diff?, ...}" } }, "required": ["kind", "category", "severity", "title", "summary", "plan", "fingerprint"] } },
+        { "name": "findings_list", "description": "List the app's surveillance findings (code-review bugs, improvement suggestions, security issues). Filter by kind/category/severity/status. Read this at the start of a /bugs, /improvements or /security session.", "inputSchema": { "type": "object", "properties": { "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
+        { "name": "findings_upsert", "description": "Create or update a finding (dedup by fingerprint). For the Codex reviewer: emit one call per genuine issue. `category` MUST be one of the kind's allowed categories (see the prompt). `plan` is markdown the user will execute later in Claude Code. Do NOT inflate severity.", "inputSchema": { "type": "object", "properties": { "category": { "type": "string", "description": "One of the kind's allowed categories; anything else is coerced to 'autres'." }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string", "description": "≤120 chars" }, "summary": { "type": "string", "description": "markdown" }, "plan": { "type": "string", "description": "markdown actionable steps" }, "fingerprint": { "type": "string", "description": "stable hash of the issue for dedup" }, "evidence": { "type": "object", "description": "{file_path?, diff?, ...}" } }, "required": ["category", "severity", "title", "summary", "plan", "fingerprint"] } },
         { "name": "findings_dismiss", "description": "Dismiss a finding as a false positive. Records a dismissed_pattern in memory so future runs skip it. Use when the user (or you) judge the finding irrelevant.", "inputSchema": { "type": "object", "properties": { "id": { "type": "integer" }, "reason": { "type": "string" } }, "required": ["id"] } },
         { "name": "findings_resolve", "description": "Mark a finding as resolved after applying its fix. Records an applied_fix in memory. Pass the commit_sha if you committed the fix (convention: `fix(surveillance:<id>): ...`).", "inputSchema": { "type": "object", "properties": { "id": { "type": "integer" }, "commit_sha": { "type": "string" } }, "required": ["id"] } },
-        { "name": "surveillance_run", "description": "Trigger a surveillance run (code_review, suggestions or security) for this app. Async — findings appear via findings_list once Codex finishes.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["code_review", "suggestions", "security"] } }, "required": ["kind"] } },
+        { "name": "surveillance_run", "description": "Trigger this app's scan run (the single scan you defined via scan_set). Skipped if the scan is blank or nothing is fresh. Async — findings appear via findings_list once Codex finishes.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "memory_get", "description": "Read the app's surveillance memory (user_preference, dismissed_pattern, applied_fix, recurring_issue). Codex reads this at run start to avoid re-suggesting dismissed/applied items and to respect user preferences.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["dismissed_pattern", "recurring_issue", "user_preference", "last_run", "applied_fix", "notified"] } } } },
         { "name": "memory_remember", "description": "Store a surveillance memory entry. Use kind=user_preference to record a durable preference (e.g. key='no_new_deps', value='user prefers native code'). Upserts by (kind, key).", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["dismissed_pattern", "recurring_issue", "user_preference", "applied_fix"] }, "key": { "type": "string" }, "value": {} }, "required": ["kind", "key", "value"] } },
-        { "name": "runs_list", "description": "List recent surveillance runs for this app (status, skip_reason, findings_count, tokens). Use to debug why a cron produced nothing.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } }
+        { "name": "runs_list", "description": "List recent surveillance runs for this app (status, skip_reason, findings_count, tokens). Use to debug why a cron produced nothing.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } },
+        { "name": "scan_get", "description": "Read this app's surveillance scan definition (its label, prompt, cadence, gate, gate_sql, categories). `blank=true` means no scan is defined yet. Read this at session start before maintaining your scan.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "scan_set", "description": "Create/replace this app's SINGLE surveillance scan (you own it — no human approval). The prompt is Codex's instructions, run read-only; include the placeholders {{SLUG}} {{STACK}} {{CATEGORIES}} {{DIFF}} {{MEMORY}} {{MAX_OPEN}} {{OPEN_COUNT}} {{REMAINING}}. Emit findings via findings_upsert(category=<one of categories>, severity, title, summary, plan, fingerprint). Maintain it as the project evolves.", "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "short UI name, e.g. 'Post-mortem trades'" }, "prompt": { "type": "string", "description": "the scan's full Codex instructions (with the {{…}} slots)" }, "cadence": { "type": "string", "description": "manual | daily | weekly" }, "gate": { "type": "string", "enum": ["code", "data", "manual"], "description": "code=re-run on git change; data=re-run on new data (needs gate_sql); manual=always" }, "gate_sql": { "type": "string", "description": "read-only SELECT returning ONE scalar high-water mark (required when gate=data), e.g. SELECT max(closed_at)::text AS w FROM trades" }, "categories": { "type": "array", "items": { "type": "string" }, "description": "finding buckets (snake_case); 'autres' is added automatically" } }, "required": ["label", "prompt", "cadence", "gate", "categories"] } }
     ])
 }
 
-async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_slug: Option<String>) -> Value {
+async fn handle_tools_call(
+    id: Value,
+    params: Value,
+    state: &McpState,
+    project_slug: Option<String>,
+    readonly: bool,
+) -> Value {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    // Read-only surveillance scope: reject any tool outside the read-only
+    // whitelist by CAPABILITY (the surveillance Codex cannot mutate app code,
+    // data, schema or lifecycle even though it holds the global MCP token).
+    if readonly && !is_readonly_tool(tool_name) {
+        return tool_error(
+            id,
+            &format!("tool '{tool_name}' is not permitted in read-only surveillance scope"),
+        );
+    }
 
     // Pre-contextualize: inject project slug into tools that need it
     if let Some(ref slug) = project_slug {
@@ -692,6 +768,9 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "memory_get" => tool_memory_get(id, &arguments, state).await,
         "memory_remember" => tool_memory_remember(id, &arguments, state).await,
         "runs_list" => tool_runs_list(id, &arguments, state).await,
+        "pm_query" => tool_pm_query(id, &arguments, state).await,
+        "scan_get" => tool_scan_get(id, &arguments, state).await,
+        "scan_set" => tool_scan_set(id, &arguments, state).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
@@ -1809,6 +1888,28 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
     )
 }
 
+/// Surveillance forensic read — SELECT-only against an app's DB. Lives in the
+/// surveillance MCP tool set (NOT the project set), so the read-only post-mortem
+/// scanner can do cross-table correlation + `_dv_audit` freeze/gap detection
+/// that the gateway `dv_*` tools can't. Read-only is enforced inside `pm_query`.
+async fn tool_pm_query(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing sql".into());
+    };
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::pm_query(ctx, slug.to_string(), sql.to_string(), limit).await,
+    )
+}
+
 /// Convert an `IpcResponse` into a JSON-RPC response Value.
 fn ipc_resp_to_mcp(id: Value, resp: atelier_ipc::types::IpcResponse) -> Value {
     if resp.ok {
@@ -2070,8 +2171,7 @@ async fn tool_findings_upsert(id: Value, args: &Value, state: &McpState) -> Valu
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    let (Some(kind), Some(severity), Some(title), Some(summary), Some(plan), Some(fingerprint)) = (
-        args.get("kind").and_then(|v| v.as_str()),
+    let (Some(severity), Some(title), Some(summary), Some(plan), Some(fingerprint)) = (
         args.get("severity").and_then(|v| v.as_str()),
         args.get("title").and_then(|v| v.as_str()),
         args.get("summary").and_then(|v| v.as_str()),
@@ -2081,22 +2181,25 @@ async fn tool_findings_upsert(id: Value, args: &Value, state: &McpState) -> Valu
         return error_response(
             id,
             INVALID_PARAMS,
-            "Missing one of: kind, severity, title, summary, plan, fingerprint".into(),
+            "Missing one of: severity, title, summary, plan, fingerprint".into(),
         );
     };
-    if !matches!(kind, "code_review" | "suggestion" | "security") {
-        return tool_error(id, "kind must be code_review|suggestion|security");
-    }
     if !matches!(severity, "critical" | "high" | "medium" | "low") {
         return tool_error(id, "severity must be critical|high|medium|low");
     }
-    // Coerce the category to the kind's allowed set (unknown → "autres").
-    let category = atelier_watcher::RunKind::from_finding_kind(kind)
-        .map(|rk| rk.normalize_category(args.get("category").and_then(|v| v.as_str())))
-        .unwrap_or_else(|| "autres".to_string());
+    // Every app has a single scan (kind = "scan"). Coerce the category to the
+    // scan's declared categories (unknown → "autres").
+    let category = match state.surveillance.scan_get(slug).await {
+        Some(scan) => scan.normalize_category(args.get("category").and_then(|v| v.as_str())),
+        None => args
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("autres")
+            .to_string(),
+    };
     let draft = atelier_watcher::NewFinding {
         slug: slug.to_string(),
-        kind: kind.to_string(),
+        kind: atelier_watcher::SCAN_KIND.to_string(),
         severity: severity.to_string(),
         title: title.to_string(),
         summary: summary.to_string(),
@@ -2188,17 +2291,69 @@ async fn tool_surveillance_run(id: Value, args: &Value, state: &McpState) -> Val
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let Some(kind) = atelier_watcher::RunKind::from_str(kind_str) else {
-        return tool_error(id, "kind must be code_review|suggestions");
-    };
+    // MCP-triggered runs are manual/debug; the scheduled cadence (with the data
+    // gate watermark) goes through the REST endpoint. Pass no watermark → a
+    // data-gated scan runs unconditionally here.
     match state
         .surveillance
-        .run_now(slug.to_string(), kind, "manual")
+        .run_now(slug.to_string(), "manual", None)
         .await
     {
         Ok(run_id) => tool_success(id, json!({ "ok": true, "run_id": run_id, "status": "running" })),
         Err(e) => tool_error(id, &format!("surveillance_run failed: {e}")),
+    }
+}
+
+/// Read the app's single scan definition.
+async fn tool_scan_get(id: Value, args: &Value, state: &McpState) -> Value {
+    if state.surveillance.findings().is_none() {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
+    }
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let scan = state.surveillance.scan_get(slug).await;
+    let blank = scan.as_ref().map(|s| s.is_blank()).unwrap_or(true);
+    tool_success(id, json!({ "scan": scan, "blank": blank }))
+}
+
+/// Create/replace the app's single scan (agent-owned, no approval).
+async fn tool_scan_set(id: Value, args: &Value, state: &McpState) -> Value {
+    if state.surveillance.findings().is_none() {
+        return tool_error(id, "surveillance disabled (postgres unreachable)");
+    }
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let f = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let (label, prompt, cadence, gate) = (f("label"), f("prompt"), f("cadence"), f("gate"));
+    if label.trim().is_empty() || prompt.trim().is_empty() {
+        return tool_error(id, "label and prompt are required");
+    }
+    let cadence = if cadence.is_empty() { "manual" } else { cadence };
+    let gate = if gate.is_empty() { "code" } else { gate };
+    let gate_sql = args.get("gate_sql").and_then(|v| v.as_str());
+    let categories: Vec<String> = args
+        .get("categories")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    match state
+        .surveillance
+        .scan_set(
+            slug,
+            label,
+            prompt,
+            cadence,
+            gate,
+            gate_sql,
+            &categories,
+            &format!("agent:{slug}"),
+        )
+        .await
+    {
+        Ok(()) => tool_success(id, json!({ "ok": true, "slug": slug, "label": label })),
+        Err(e) => tool_error(id, &e),
     }
 }
 

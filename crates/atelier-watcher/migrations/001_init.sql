@@ -14,12 +14,12 @@ CREATE TABLE IF NOT EXISTS findings (
     evidence          JSONB,
     plan              TEXT         NOT NULL,             -- markdown actionnable
     fingerprint       TEXT         NOT NULL,
-    category          TEXT         NOT NULL DEFAULT 'autres',  -- axe (par kind), voir RunKind::categories
+    category          TEXT         NOT NULL DEFAULT 'autres',  -- axe (cf. app_scan.categories)
     status            TEXT         NOT NULL DEFAULT 'open',  -- open | dismissed | resolved
     first_seen        TIMESTAMPTZ  NOT NULL DEFAULT now(),
     last_seen         TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT findings_kind_chk     CHECK (kind IN ('code_review', 'suggestion', 'security')),
+    CONSTRAINT findings_kind_chk     CHECK (kind = 'scan'),  -- un seul scan par app (slug discrimine)
     CONSTRAINT findings_severity_chk CHECK (severity IN ('critical', 'high', 'medium', 'low')),
     CONSTRAINT findings_status_chk   CHECK (status IN ('open', 'dismissed', 'resolved'))
 );
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS surveillance_runs (
     git_sha_before    TEXT,
     git_sha_reviewed  TEXT,
     error             TEXT,
-    CONSTRAINT runs_kind_chk    CHECK (kind IN ('code_review', 'suggestions', 'security')),
+    CONSTRAINT runs_kind_chk    CHECK (kind = 'scan'),
     CONSTRAINT runs_trigger_chk CHECK (trigger IN ('cron', 'manual')),
     CONSTRAINT runs_status_chk  CHECK (status IN ('running', 'success', 'success_empty', 'skipped', 'failed'))
 );
@@ -97,14 +97,47 @@ CREATE INDEX IF NOT EXISTS memory_app_used_idx
 DROP TABLE IF EXISTS surveillance_config;
 
 -- ---------------------------------------------------------------------------
--- Schema evolution (idempotent) — pour les DB déjà créées avant l'ajout du
--- 3e kind `security`, du champ `category` et du cron sécurité.
+-- app_scan — UN SEUL scan par app, défini en données et possédé par l'agent du
+-- projet (créé/maintenu via le tool MCP `scan_set`, sans validation humaine).
+-- Remplace l'enum RunKind (code_review/security/suggestions) + l'ancien portail
+-- `scan_type_registry`. Le scan est VIDE par défaut (prompt='') → en veille.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_scan (
+    slug         TEXT         PRIMARY KEY,
+    label        TEXT         NOT NULL DEFAULT '',          -- nom UI choisi par l'agent ; '' = vierge
+    prompt       TEXT         NOT NULL DEFAULT '',          -- template avec slots ; '' = en veille (aucun run)
+    cadence      TEXT         NOT NULL DEFAULT 'manual',    -- 'manual' | 'daily' | 'weekly'
+    gate         TEXT         NOT NULL DEFAULT 'code',      -- 'code' | 'data' | 'manual'
+    gate_sql     TEXT,                                      -- SELECT-only watermark (gate='data')
+    categories   JSONB        NOT NULL DEFAULT '[]'::jsonb, -- ["bug","perf",...] (cible de coercion)
+    updated_by   TEXT,                                      -- 'agent:<slug>' | 'system'
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT app_scan_gate_chk CHECK (gate IN ('code', 'data', 'manual'))
+);
+
+-- ---------------------------------------------------------------------------
+-- Schema evolution (idempotent).
 -- ---------------------------------------------------------------------------
 ALTER TABLE findings           ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'autres';
+
+-- Backfill une ligne de scan VIDE pour chaque app déjà vue en surveillance
+-- (le boot loop + AppCreate couvrent le reste).
+INSERT INTO app_scan(slug) SELECT DISTINCT slug FROM surveillance_runs ON CONFLICT DO NOTHING;
+INSERT INTO app_scan(slug) SELECT DISTINCT slug FROM findings          ON CONFLICT DO NOTHING;
+
+-- Collapse de TOUS les kinds vers l'unique 'scan' (un seul scan par app).
+-- Dédup sur (slug,fingerprint) en gardant la plus récente AVANT le remap (l'index
+-- unique est (slug,kind,fingerprint) ; collapser le kind pourrait collisionner).
 ALTER TABLE findings           DROP CONSTRAINT IF EXISTS findings_kind_chk;
-ALTER TABLE findings           ADD  CONSTRAINT findings_kind_chk CHECK (kind IN ('code_review', 'suggestion', 'security'));
 ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_kind_chk;
-ALTER TABLE surveillance_runs  ADD  CONSTRAINT runs_kind_chk CHECK (kind IN ('code_review', 'suggestions', 'security'));
+DELETE FROM findings a USING findings b
+  WHERE a.slug = b.slug AND a.fingerprint = b.fingerprint AND a.id < b.id;
+UPDATE findings          SET kind = 'scan' WHERE kind <> 'scan';
+UPDATE surveillance_runs SET kind = 'scan' WHERE kind <> 'scan';
+ALTER TABLE findings           ADD CONSTRAINT findings_kind_chk CHECK (kind = 'scan');
+ALTER TABLE surveillance_runs  ADD CONSTRAINT runs_kind_chk     CHECK (kind = 'scan');
+
 -- Ajout du statut `cancelled` (kill d'un run in-progress depuis l'UI).
 ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_status_chk;
 ALTER TABLE surveillance_runs  ADD  CONSTRAINT runs_status_chk CHECK (status IN ('running', 'success', 'success_empty', 'skipped', 'failed', 'cancelled'));
@@ -113,3 +146,6 @@ UPDATE findings SET status = 'open' WHERE status = 'promoted';
 ALTER TABLE findings DROP COLUMN IF EXISTS promoted_todo_id;
 ALTER TABLE findings DROP CONSTRAINT IF EXISTS findings_status_chk;
 ALTER TABLE findings ADD  CONSTRAINT findings_status_chk CHECK (status IN ('open', 'dismissed', 'resolved'));
+
+-- Démontage de l'ancien portail de gouvernance (remplacé par app_scan).
+DROP TABLE IF EXISTS scan_type_registry;

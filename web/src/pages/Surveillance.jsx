@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ShieldAlert, RefreshCw, Filter, ChevronDown, ChevronRight, X, Check, AlertOctagon, Lightbulb, ShieldCheck } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Filter, ChevronDown, ChevronRight, X, Check, AlertOctagon, Lightbulb, ShieldCheck, Clock } from 'lucide-react';
 import {
   getFindings,
   dismissFinding,
@@ -16,19 +16,12 @@ const SEVERITIES = [
   { key: 'low',      label: 'Low',      color: 'text-blue-300', bg: 'bg-blue-500/20 border-blue-500/30' },
 ];
 
+// Each app has a single scan (kind='scan'). Findings carry agent-defined,
+// snake_case categories — humanize the key for display.
 const KINDS = [
-  { key: 'code_review', label: 'Code Review', icon: AlertOctagon, color: 'text-red-300' },
-  { key: 'security',    label: 'Sécurité',    icon: ShieldCheck,  color: 'text-fuchsia-300' },
-  { key: 'suggestion',  label: 'Suggestion',  icon: Lightbulb,    color: 'text-blue-300' },
+  { key: 'scan', label: 'Scan', icon: Clock, color: 'text-emerald-300' },
 ];
-
-// Category labels per kind (mirror RunKind::categories / SurveillanceTab).
-const CATEGORIES = {
-  code_review: { bug: 'Bug / logique', architecture: 'Architecture', performance: 'Performance', composants: 'Composants', gestion_erreurs: "Gestion d'erreurs", autres: 'Autres' },
-  suggestion: { performance: 'Performance', ux: 'UX / ergonomie', autres: 'Autres' },
-  security: { auth: 'Auth', injection: 'Injection', secrets: 'Secrets', exposition: 'Exposition', autres: 'Autres' },
-};
-const catLabel = (kind, cat) => (CATEGORIES[kind] && CATEGORIES[kind][cat]) || cat || 'autres';
+const catLabel = (cat) => (cat || 'autres').replace(/_/g, ' ');
 
 const STATUSES = [
   { key: 'open',      label: 'Ouvertes',  color: 'text-amber-300' },
@@ -66,7 +59,7 @@ function FindingRow({ finding, onDismiss, onResolve }) {
               {sev.label}
             </span>
             <span className="text-xs text-gray-400">{finding.slug}</span>
-            <span className="text-xs px-1.5 py-0.5 rounded-sm bg-gray-700/60 text-gray-300">{catLabel(finding.kind, finding.category)}</span>
+            <span className="text-xs px-1.5 py-0.5 rounded-sm bg-gray-700/60 text-gray-300">{catLabel(finding.category)}</span>
             <span className={`text-xs ${status.color}`}>{status.label}</span>
             <span className="text-sm text-white truncate">{finding.title}</span>
           </div>
@@ -156,7 +149,6 @@ export default function Surveillance() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
   const [filterSlug, setFilterSlug] = useState(null);
-  const [filterKind, setFilterKind] = useState(null);
   const [filterSeverity, setFilterSeverity] = useState(null);
   const [filterStatus, setFilterStatus] = useState('open');
 
@@ -165,7 +157,6 @@ export default function Surveillance() {
     setErr(null);
     getFindings({
       slug: filterSlug || undefined,
-      kind: filterKind || undefined,
       severity: filterSeverity || undefined,
       status: filterStatus || undefined,
       limit: 300,
@@ -181,7 +172,7 @@ export default function Surveillance() {
         }
       })
       .finally(() => setLoading(false));
-  }, [filterSlug, filterKind, filterSeverity, filterStatus]);
+  }, [filterSlug, filterSeverity, filterStatus]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -242,19 +233,6 @@ export default function Surveillance() {
               color={s.color}
             >
               {s.label}
-            </FilterPill>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500 mr-1">Kind</span>
-          {KINDS.map((k) => (
-            <FilterPill
-              key={k.key}
-              active={filterKind === k.key}
-              onClick={() => setFilterKind(filterKind === k.key ? null : k.key)}
-              color={k.color}
-            >
-              {k.label}
             </FilterPill>
           ))}
         </div>

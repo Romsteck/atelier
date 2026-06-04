@@ -45,6 +45,7 @@ pub fn app_router() -> Router<ApiState> {
             get(get_transcript),
         )
         .route("/{slug}/surveillance/runs", get(list_runs))
+        .route("/{slug}/surveillance/scan", get(get_scan))
 }
 
 fn err503() -> axum::response::Response {
@@ -189,9 +190,42 @@ async fn resolve_finding(
     (StatusCode::OK, Json(json!({"ok": true}))).into_response()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct RunBody {
-    kind: String,
+    /// `manual` (default) or `cron` (a scheduled timer).
+    #[serde(default)]
+    trigger: Option<String>,
+}
+
+/// Run a data-gated scan's `gate_sql` (a read-only SELECT) and return its scalar
+/// watermark (empty string when no rows). `None` only when the dataverse backend
+/// is unreachable — the gate then can't evaluate and the run proceeds. Keeps the
+/// app-specific SQL out of `atelier-watcher`, which stays dataverse-agnostic.
+/// The user SQL is wrapped as a FROM-subquery so it cannot mutate (same guarantee
+/// as `pm_query`); `scan_set` already validated it is SELECT-only.
+async fn data_watermark(state: &ApiState, slug: &str, gate_sql: &str) -> Option<String> {
+    use sqlx_core::row::Row;
+    let mgr = state.dv.as_ref()?;
+    let engine = mgr.engine_for(slug).await.ok()?;
+    let inner = gate_sql.trim().trim_end_matches(';');
+    let wrapped = format!(
+        "SELECT (to_jsonb(t)->>(SELECT jsonb_object_keys(to_jsonb(t)) LIMIT 1))::text AS w \
+         FROM ( {inner} ) t LIMIT 1"
+    );
+    match sqlx_core::query::query_with(
+        sqlx_core::sql_str::AssertSqlSafe(wrapped.as_str()),
+        sqlx_postgres::PgArguments::default(),
+    )
+    .fetch_optional(engine.pool())
+    .await
+    {
+        Ok(Some(row)) => Some(row.try_get::<Option<String>, _>("w").ok().flatten().unwrap_or_default()),
+        Ok(None) => Some(String::new()),
+        Err(e) => {
+            warn!(slug = %slug, ?e, "gate_sql watermark failed — running unconditionally");
+            None
+        }
+    }
 }
 
 #[instrument(skip(state, body))]
@@ -203,14 +237,34 @@ async fn run_surveillance(
     if state.surveillance.findings().is_none() {
         return err503();
     }
-    let Some(kind) = atelier_watcher::RunKind::from_str(&body.kind) else {
-        return err(StatusCode::BAD_REQUEST, "kind must be code_review|suggestions|security");
+    let trigger = match body.trigger.as_deref() {
+        None | Some("manual") => "manual",
+        Some("cron") => "cron",
+        Some(other) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!("trigger must be manual|cron (got '{other}')"),
+            );
+        }
+    };
+    // For a data-gated scan, compute the freshness watermark by running its
+    // gate_sql (the REST layer has dataverse access; the watcher does not).
+    let data_watermark = match state.surveillance.scan_get(&slug).await {
+        Some(scan) if scan.gate == atelier_watcher::Gate::Data => match scan.gate_sql.as_deref() {
+            Some(sql) => data_watermark(&state, &slug, sql).await,
+            None => None,
+        },
+        _ => None,
     };
     // Fire-and-forget: spawns Codex async, returns the run id immediately.
-    match state.surveillance.run_now(slug.clone(), kind, "manual").await {
+    match state
+        .surveillance
+        .run_now(slug.clone(), trigger, data_watermark)
+        .await
+    {
         Ok(run_id) => (
             StatusCode::ACCEPTED,
-            Json(json!({"ok": true, "run_id": run_id, "slug": slug, "kind": body.kind})),
+            Json(json!({"ok": true, "run_id": run_id, "slug": slug})),
         )
             .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -247,6 +301,22 @@ async fn get_transcript(
     let lines = state.surveillance.transcript(run_id);
     let total = lines.len();
     (StatusCode::OK, Json(json!({"lines": lines, "total": total}))).into_response()
+}
+
+/// The app's single scan definition (label/prompt/cadence/gate/categories). The
+/// UI reads this to render the scan by its agent-given name (or "en veille" when
+/// blank). Returns `{scan: null}` when no row yet.
+#[instrument(skip(state))]
+async fn get_scan(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if state.surveillance.findings().is_none() {
+        return err503();
+    }
+    let scan = state.surveillance.scan_get(&slug).await;
+    let blank = scan.as_ref().map(|s| s.is_blank()).unwrap_or(true);
+    (StatusCode::OK, Json(json!({ "scan": scan, "blank": blank }))).into_response()
 }
 
 #[derive(Debug, Deserialize)]

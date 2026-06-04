@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   ShieldAlert, RefreshCw, Play, Square, Terminal, ChevronDown, ChevronRight,
-  X, Check, AlertOctagon, Lightbulb, Clock, ShieldCheck,
+  X, Check, Clock,
 } from 'lucide-react';
 import {
   getAppFindings,
@@ -11,24 +11,16 @@ import {
   cancelSurveillanceRun,
   getSurveillanceTranscript,
   listSurveillanceRuns,
+  getScan,
 } from '../api/client';
 import MarkdownView from './docs/MarkdownView';
 import useWebSocket from '../hooks/useWebSocket';
 
-// The three scan kinds. `id` is the finding kind (singular for suggestions);
-// `runKind` is what surveillance_run expects (plural for suggestions).
-const KINDS = [
-  { id: 'code_review', label: 'Bugs', runKind: 'code_review', icon: AlertOctagon, color: 'text-red-300', btn: 'bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30' },
-  { id: 'security', label: 'Sécurité', runKind: 'security', icon: ShieldCheck, color: 'text-fuchsia-300', btn: 'bg-fuchsia-500/20 text-fuchsia-200 hover:bg-fuchsia-500/30 border-fuchsia-500/30' },
-  { id: 'suggestion', label: 'Améliorations', runKind: 'suggestions', icon: Lightbulb, color: 'text-blue-300', btn: 'bg-blue-500/20 text-blue-200 hover:bg-blue-500/30 border-blue-500/30' },
-];
-
-// Category labels per kind (mirror RunKind::categories in atelier-watcher).
-const CATEGORIES = {
-  code_review: { bug: 'Bug / logique', architecture: 'Architecture', performance: 'Performance', composants: 'Composants', gestion_erreurs: "Gestion d'erreurs", autres: 'Autres' },
-  suggestion: { performance: 'Performance', ux: 'UX / ergonomie', autres: 'Autres' },
-  security: { auth: 'Auth / autorisation', injection: 'Injection', secrets: 'Secrets', exposition: 'Exposition données', autres: 'Autres' },
-};
+// Each app has ONE scan, defined as data by its agent (label/prompt/cadence/gate/
+// categories) via the `scan_set` MCP tool — see /surveillance/scan. The tab shows
+// the scan by its agent-given label (or "en veille" when blank) + its findings.
+const SCAN_COLOR = 'text-emerald-300';
+const SCAN_BTN = 'bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30';
 
 const SEVERITIES = [
   { key: 'critical', label: 'Critical', color: 'text-red-300', bg: 'bg-red-500/20 border-red-500/30' },
@@ -49,7 +41,8 @@ const STATUSES = [
 const MAX_OPEN_FINDINGS = 6;
 
 const sevMeta = (k) => SEVERITIES.find((s) => s.key === k) || SEVERITIES[3];
-const catLabel = (kind, cat) => (CATEGORIES[kind] && CATEGORIES[kind][cat]) || cat || 'autres';
+// Categories are agent-defined (snake_case) — humanize the key for display.
+const catLabel = (cat) => (cat || 'autres').replace(/_/g, ' ');
 
 function timeSince(iso) {
   if (!iso) return '?';
@@ -107,7 +100,7 @@ function RunRow({ run }) {
     skipped: 'text-yellow-400', failed: 'text-red-400', running: 'text-blue-400',
     cancelled: 'text-orange-300',
   };
-  const kindShort = { code_review: 'review', suggestions: 'sugg.', security: 'sécu' };
+  const kindShort = { scan: 'scan' };
   return (
     <div className="flex items-center gap-2 text-xs px-2 py-1 border-b border-gray-700/30 last:border-b-0">
       <Clock className="w-3 h-3 text-gray-500 shrink-0" />
@@ -210,7 +203,9 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
 
 
 export default function SurveillanceTab({ slug }) {
-  const [activeKind, setActiveKind] = useState('code_review');
+  const [scan, setScan] = useState(null); // the app's single scan definition
+  const [blank, setBlank] = useState(true);
+  const [showDef, setShowDef] = useState(false); // definition panel toggle
   const [findings, setFindings] = useState([]);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -218,17 +213,15 @@ export default function SurveillanceTab({ slug }) {
   const [transcript, setTranscript] = useState([]); // live Codex output (ephemeral)
   const [err, setErr] = useState(null);
   const [statusFilter, setStatusFilter] = useState('open');
-  // Open findings count for the active kind, independent of statusFilter — drives
-  // the launch-button cap. Refreshed on every reload (incl. WS-triggered).
+  // Open findings count, independent of statusFilter — drives the launch-button cap.
   const [openCount, setOpenCount] = useState(0);
 
-  const kindMeta = KINDS.find((k) => k.id === activeKind) || KINDS[0];
+  const scanLabel = (scan?.label && scan.label.trim()) || (blank ? 'Scan (en veille)' : 'Scan');
 
-  // The in-progress run for the active kind (drives the launch/stop button).
-  // `runs.kind` stores the run_kind (plural for suggestions), matching runKind.
+  // The in-progress run drives the launch/stop button (kind is always 'scan').
   const activeRun = useMemo(
-    () => runs.find((r) => r.kind === kindMeta.runKind && r.status === 'running'),
-    [runs, kindMeta.runKind],
+    () => runs.find((r) => r.status === 'running'),
+    [runs],
   );
   const activeRunId = activeRun?.id;
 
@@ -236,13 +229,14 @@ export default function SurveillanceTab({ slug }) {
     setLoading(true);
     setErr(null);
     Promise.all([
-      getAppFindings(slug, { kind: activeKind, status: statusFilter || undefined, limit: 300 }),
+      getScan(slug),
+      getAppFindings(slug, { status: statusFilter || undefined, limit: 300 }),
       listSurveillanceRuns(slug, { limit: 12 }),
-      // Always fetch the open list for the active kind to drive the cap — the
-      // main list above is filtered by statusFilter, so it can't be trusted.
-      getAppFindings(slug, { kind: activeKind, status: 'open', limit: 50 }),
+      getAppFindings(slug, { status: 'open', limit: 50 }),
     ])
-      .then(([f, r, o]) => {
+      .then(([s, f, r, o]) => {
+        setScan(s.data?.scan || null);
+        setBlank(s.data?.blank ?? true);
         setFindings(f.data?.findings || []);
         setRuns(r.data?.runs || []);
         setOpenCount((o.data?.findings || []).length);
@@ -252,7 +246,7 @@ export default function SurveillanceTab({ slug }) {
         else setErr(e.response?.data?.error || e.message);
       })
       .finally(() => setLoading(false));
-  }, [slug, activeKind, statusFilter]);
+  }, [slug, statusFilter]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -262,8 +256,6 @@ export default function SurveillanceTab({ slug }) {
       if (!data || !data.slug || data.slug === slug) reload();
     },
     'surveillance:transcript': (data) => {
-      // Only the active run's lines (lines before activeRunId is known are
-      // recovered via the buffer replay below).
       if (!data || data.slug !== slug || data.run_id !== activeRunId) return;
       setTranscript((prev) => mergeLines(prev, [data]));
     },
@@ -282,9 +274,9 @@ export default function SurveillanceTab({ slug }) {
     return () => { cancelled = true; };
   }, [activeRunId, slug]);
 
-  // Group findings by category for the active kind.
+  // Group findings by category, ordered by the scan's declared categories.
   const grouped = useMemo(() => {
-    const order = Object.keys(CATEGORIES[activeKind] || { autres: 1 });
+    const order = scan?.categories?.length ? scan.categories : ['autres'];
     const byCat = {};
     for (const f of findings) {
       const c = f.category || 'autres';
@@ -293,21 +285,18 @@ export default function SurveillanceTab({ slug }) {
     return order
       .filter((c) => byCat[c]?.length)
       .map((c) => ({ cat: c, items: byCat[c] }))
-      // include any unexpected categories at the end
       .concat(
         Object.keys(byCat)
           .filter((c) => !order.includes(c))
           .map((c) => ({ cat: c, items: byCat[c] })),
       );
-  }, [findings, activeKind]);
+  }, [findings, scan]);
 
   const handleRun = async () => {
     setBusy(true);
     setTranscript([]);
     try {
-      await runSurveillance(slug, kindMeta.runKind);
-      // The run is fire-and-forget server-side; the running row + WS events
-      // drive the button state from here on.
+      await runSurveillance(slug);
       await reload();
     } catch (e) {
       alert(e.response?.status === 501 ? 'Runner Codex non implémenté.' : (e.response?.data?.error || e.message));
@@ -346,33 +335,49 @@ export default function SurveillanceTab({ slug }) {
 
   return (
     <div className="h-full flex flex-col">
-      {/* Kind segments */}
-      <div className="px-4 pt-3 flex items-center gap-1 border-b border-gray-700/50">
-        {KINDS.map((k) => {
-          const Icon = k.icon;
-          const active = k.id === activeKind;
-          return (
-            <button key={k.id} onClick={() => setActiveKind(k.id)}
-              className={`px-3 py-1.5 text-[13px] rounded-t flex items-center gap-1.5 border-b-2 -mb-px ${active ? `${k.color} border-current font-medium` : 'text-gray-400 border-transparent hover:text-gray-200'}`}>
-              <Icon className="w-3.5 h-3.5" /> {k.label}
-            </button>
-          );
-        })}
+      {/* Scan header — the app's single scan, by its agent-given name */}
+      <div className="px-4 pt-3 pb-2 flex items-center gap-2 border-b border-gray-700/50">
+        <Clock className={`w-4 h-4 ${blank ? 'text-gray-500' : SCAN_COLOR}`} />
+        <span className={`text-sm font-medium ${blank ? 'text-gray-400' : SCAN_COLOR}`}>{scanLabel}</span>
+        {scan && !blank && (
+          <span className="text-[11px] text-gray-500">· {scan.cadence} · gate {scan.gate}</span>
+        )}
+        <button onClick={() => setShowDef((v) => !v)} className="ml-1 text-[11px] text-gray-400 hover:text-gray-200 underline decoration-dotted">
+          {showDef ? 'masquer la définition' : 'voir la définition'}
+        </button>
       </div>
+
+      {/* Read-only definition panel (the agent edits it via the scan_set MCP tool) */}
+      {showDef && (
+        <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/40 text-xs text-gray-300 space-y-1">
+          {blank ? (
+            <div className="text-gray-500">Aucun scan défini. L'agent du projet le crée/maintient via le tool MCP <code className="text-gray-300">scan_set</code> (cf. <code className="text-gray-300">.claude/rules/surveillance.md</code>).</div>
+          ) : (
+            <>
+              <div><span className="text-gray-500">catégories :</span> {(scan.categories || []).join(', ') || '—'}</div>
+              {scan.gate === 'data' && scan.gate_sql && (
+                <div className="truncate"><span className="text-gray-500">gate_sql :</span> <code>{scan.gate_sql}</code></div>
+              )}
+              {scan.updated_by && <div className="text-gray-500">maintenu par {scan.updated_by}</div>}
+              <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap bg-black/30 p-2 rounded-sm border border-gray-800 text-gray-400">{scan.prompt}</pre>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Action bar */}
       <div className="px-4 py-2 border-b border-gray-700 bg-gray-800/30 flex items-center gap-2 flex-wrap">
         {activeRun ? (
           <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30">
             {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
-            Arrêter {kindMeta.label.toLowerCase()}
+            Arrêter le scan
           </button>
         ) : (
-          <button onClick={handleRun} disabled={busy || atCap}
-            title={atCap ? `${openCount} findings ouvertes (max ${MAX_OPEN_FINDINGS}) — résous-en avant de relancer` : `Lancer ${kindMeta.label.toLowerCase()}`}
-            className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed ${kindMeta.btn}`}>
+          <button onClick={handleRun} disabled={busy || atCap || blank}
+            title={blank ? 'Scan en veille — défini par l\'agent du projet' : atCap ? `${openCount} findings ouvertes (max ${MAX_OPEN_FINDINGS}) — résous-en avant de relancer` : 'Lancer le scan'}
+            className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed ${SCAN_BTN}`}>
             {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-            Lancer {kindMeta.label.toLowerCase()}
+            Lancer le scan
           </button>
         )}
         <div className="flex-1" />
@@ -393,13 +398,13 @@ export default function SurveillanceTab({ slug }) {
           {err && <div className="p-3 bg-red-900/30 border border-red-700/50 text-red-300 rounded-sm text-sm">{err}</div>}
           {!err && findings.length === 0 && !loading && (
             <div className="text-center py-12 text-gray-500 text-sm">
-              Aucune finding « {kindMeta.label} » pour ce statut. Lance un scan ci-dessus.
+              {blank ? 'Scan en veille — il sera défini par l\'agent du projet.' : 'Aucune finding pour ce statut. Lance le scan ci-dessus.'}
             </div>
           )}
           {grouped.map(({ cat, items }) => (
             <div key={cat} className="space-y-2">
               <div className="flex items-center gap-2">
-                <span className={`text-xs font-semibold uppercase tracking-wider ${kindMeta.color}`}>{catLabel(activeKind, cat)}</span>
+                <span className={`text-xs font-semibold uppercase tracking-wider ${SCAN_COLOR}`}>{catLabel(cat)}</span>
                 <span className="text-xs text-gray-600">({items.length})</span>
                 <div className="flex-1 h-px bg-gray-700/50" />
               </div>
@@ -413,7 +418,7 @@ export default function SurveillanceTab({ slug }) {
         {(activeRun || transcript.length > 0) && (
           <LiveScanPanel
             lines={transcript}
-            kindLabel={kindMeta.label.toLowerCase()}
+            kindLabel={scanLabel.toLowerCase()}
             onStop={activeRun ? handleStop : undefined}
             stopping={busy}
           />

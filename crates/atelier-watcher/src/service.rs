@@ -7,7 +7,6 @@ use tokio::sync::{Semaphore, broadcast, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{MAX_OPEN_FINDINGS, RunKind, SurveillanceEvent, TranscriptLine};
 use crate::codex::{CodexConfig, CodexRunner};
 use crate::findings::FindingsStore;
 use crate::git_watcher::GitWatcher;
@@ -15,7 +14,9 @@ use crate::gitutil;
 use crate::memory::MemoryStore;
 use crate::migration::{self, DEFAULT_DB_NAME};
 use crate::runs::RunsStore;
+use crate::scandef::{AppScanStore, Gate, ScanDef, SCAN_KIND, SHA_KEY, WATERMARK_KEY};
 use crate::sqlx::{Pool, Postgres};
+use crate::{MAX_OPEN_FINDINGS, SurveillanceEvent, TranscriptLine};
 
 /// Minimal per-app metadata the surveillance service needs (prompt stack hint +
 /// git_watcher slug list).
@@ -34,6 +35,8 @@ struct Inner {
     findings: Option<FindingsStore>,
     runs: Option<RunsStore>,
     memory: Option<MemoryStore>,
+    /// Per-app scan definitions (`app_scan` table). `None` in noop mode.
+    app_scan: Option<AppScanStore>,
     runner: CodexRunner,
     apps_src_root: PathBuf,
     stacks: HashMap<String, String>,
@@ -76,13 +79,14 @@ impl SurveillanceService {
             }
         };
         let enabled = pool.is_some();
-        let (findings, runs, memory) = match pool.as_ref() {
+        let (findings, runs, memory, app_scan) = match pool.as_ref() {
             Some(p) => (
                 Some(FindingsStore::new(p.clone())),
                 Some(RunsStore::new(p.clone())),
                 Some(MemoryStore::new(p.clone())),
+                Some(AppScanStore::new(p.clone())),
             ),
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
 
         let stacks: HashMap<String, String> = cfg
@@ -99,6 +103,7 @@ impl SurveillanceService {
                 findings,
                 runs,
                 memory,
+                app_scan,
                 runner: CodexRunner::new(cfg.codex.clone()),
                 apps_src_root: cfg.apps_src_root.clone(),
                 stacks,
@@ -125,6 +130,18 @@ impl SurveillanceService {
                     svc.inner.tx.clone(),
                 );
                 tokio::spawn(gw.run_loop());
+            }
+            // Ensure every known app has a (blank) scan row — provisioning safety
+            // net on top of AppCreate + the migration backfill.
+            if let Some(store) = svc.inner.app_scan.clone() {
+                let slugs: Vec<String> = cfg.seed_apps.iter().map(|a| a.slug.clone()).collect();
+                tokio::spawn(async move {
+                    for slug in slugs {
+                        if let Err(e) = store.ensure(&slug).await {
+                            warn!(slug = %slug, ?e, "ensure app_scan blank row failed");
+                        }
+                    }
+                });
             }
             info!("atelier-watcher: started (stores + git_watcher, manual runs only)");
         }
@@ -192,31 +209,85 @@ impl SurveillanceService {
         self.inner.memory.as_ref()
     }
 
-    /// Start a surveillance run. Creates the `surveillance_runs` row, spawns a
+    /// Read an app's scan definition (the single per-app scan). `None` if the
+    /// app has no row yet (or in noop mode).
+    pub async fn scan_get(&self, slug: &str) -> Option<ScanDef> {
+        self.inner.app_scan.as_ref()?.get(slug).await.ok().flatten()
+    }
+
+    /// Create the blank scan row for an app if absent (idempotent provisioning
+    /// — called at AppCreate so every app starts with an empty scan).
+    pub async fn ensure_app_scan(&self, slug: &str) -> Result<(), String> {
+        let Some(store) = self.inner.app_scan.as_ref() else {
+            return Err("surveillance disabled (postgres unreachable)".into());
+        };
+        store.ensure(slug).await.map_err(|e| e.to_string())
+    }
+
+    /// Create/replace an app's scan definition (agent-owned, NO approval). The
+    /// project's agent calls this via the `scan_set` MCP tool. Validates the
+    /// gate + (when data-gated) the SELECT-only `gate_sql`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_set(
+        &self,
+        slug: &str,
+        label: &str,
+        prompt: &str,
+        cadence: &str,
+        gate: &str,
+        gate_sql: Option<&str>,
+        categories: &[String],
+        updated_by: &str,
+    ) -> Result<(), String> {
+        let Some(store) = self.inner.app_scan.as_ref() else {
+            return Err("surveillance disabled (postgres unreachable)".into());
+        };
+        let gate = Gate::parse(gate);
+        if gate == Gate::Data {
+            let sql = gate_sql.unwrap_or("").trim();
+            if sql.is_empty() {
+                return Err("gate='data' requires a gate_sql (a read-only SELECT watermark)".into());
+            }
+            let head = sql.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+            if head != "SELECT" && head != "WITH" {
+                return Err("gate_sql must be a read-only SELECT (start with SELECT or WITH)".into());
+            }
+        }
+        store
+            .upsert(slug, label, prompt, cadence, gate, gate_sql, categories, updated_by)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Start the app's scan run. Creates the `surveillance_runs` row, spawns a
     /// detached task that runs the gates + Codex, and returns the run id
-    /// immediately (the work is async — findings appear via findings_list once
-    /// Codex finishes). `trigger` is always "manual" today (no scheduler).
+    /// immediately (the work is async). `trigger` is "manual" or "cron".
+    ///
+    /// `data_watermark` is the freshness signal for a data-gated scan: the caller
+    /// (which has dataverse access) runs the scan's `gate_sql` and passes the
+    /// resulting watermark, so `atelier-watcher` stays decoupled from the
+    /// dataverse. `None` for code-gated/manual scans.
     pub async fn run_now(
         &self,
         slug: String,
-        kind: RunKind,
         trigger: &str,
+        data_watermark: Option<String>,
     ) -> Result<Uuid, String> {
         let Some(runs) = self.inner.runs.as_ref() else {
             return Err("surveillance disabled (postgres unreachable)".into());
         };
         let run_id = runs
-            .start(&slug, kind.run_kind(), trigger, None)
+            .start(&slug, SCAN_KIND, trigger, None)
             .await
             .map_err(|e| format!("failed to create run: {e}"))?;
         let svc = self.clone();
         tokio::spawn(async move {
-            svc.execute(run_id, slug, kind).await;
+            svc.execute(run_id, slug, data_watermark).await;
         });
         Ok(run_id)
     }
 
-    async fn execute(&self, run_id: Uuid, slug: String, kind: RunKind) {
+    async fn execute(&self, run_id: Uuid, slug: String, data_watermark: Option<String>) {
         // Register a cancel channel for the whole run lifetime so a stop request
         // can kill the Codex subprocess. The Sender is held in the registry
         // until the run ends, so the Receiver only fires on an explicit cancel.
@@ -228,7 +299,8 @@ impl SurveillanceService {
             .insert(run_id, cancel_tx);
 
         self.emit("run", &slug, "started");
-        self.execute_inner(run_id, &slug, kind, cancel_rx).await;
+        self.execute_inner(run_id, &slug, data_watermark, cancel_rx)
+            .await;
         self.inner.running.lock().unwrap().remove(&run_id);
         // Drop the buffered transcript — the run has settled (panel disappears).
         self.inner.transcripts.lock().unwrap().remove(&run_id);
@@ -241,23 +313,40 @@ impl SurveillanceService {
         &self,
         run_id: Uuid,
         slug: &str,
-        kind: RunKind,
+        data_watermark: Option<String>,
         cancel_rx: oneshot::Receiver<()>,
     ) {
         let slug = slug.to_string();
-        let (Some(findings), Some(runs), Some(memory)) = (
+        let (Some(findings), Some(runs), Some(memory), Some(app_scan)) = (
             self.inner.findings.as_ref(),
             self.inner.runs.as_ref(),
             self.inner.memory.as_ref(),
+            self.inner.app_scan.as_ref(),
         ) else {
             return;
         };
 
-        // Gate 1 — cap: skip when this kind already has MAX_OPEN_FINDINGS open
+        // Load the app's scan definition. A blank scan (no prompt) is "en veille":
+        // nothing to run.
+        let scan = match app_scan.get(&slug).await {
+            Ok(Some(s)) if !s.is_blank() => s,
+            Ok(_) => {
+                let _ = runs.finish_skipped(run_id, "blank (scan non défini)").await;
+                info!(slug = %slug, "run skipped (blank scan)");
+                return;
+            }
+            Err(e) => {
+                let _ = runs.finish_failed(run_id, &format!("scan load failed: {e}")).await;
+                warn!(slug = %slug, ?e, "scan load failed");
+                return;
+            }
+        };
+
+        // Gate 1 — cap: skip when this app already has MAX_OPEN_FINDINGS open
         // findings (the UI disables the launch button at the same threshold;
         // this is the server-side backstop). `open_now` is reused below to
         // budget the prompt so Codex reports only the most important issues.
-        let open_now = match findings.count_open(&slug, kind.finding_kind()).await {
+        let open_now = match findings.count_open(&slug, SCAN_KIND).await {
             Ok(n) => n,
             Err(e) => {
                 warn!(slug = %slug, ?e, "open findings count failed — proceeding");
@@ -267,37 +356,69 @@ impl SurveillanceService {
         if open_now >= MAX_OPEN_FINDINGS {
             let reason = format!("cap: {open_now} findings open (max {MAX_OPEN_FINDINGS})");
             let _ = runs.finish_skipped(run_id, &reason).await;
-            info!(slug = %slug, kind = kind.run_kind(), "run skipped (cap)");
+            info!(slug = %slug, "run skipped (cap)");
             return;
         }
 
-        // Gate 2 — diff-aware (code_review + suggestions both track their SHA).
+        // Gate 2 — freshness, per the scan's gate. `code` → git-diff (skip when
+        // HEAD unchanged); `data` → watermark from the scan's gate_sql (skip when
+        // unchanged); `manual` → always run.
         let src = self.inner.apps_src_root.join(&slug).join("src");
         let head = gitutil::head_sha(&src).await;
-        let last_sha = memory
-            .get(&slug, Some("last_run"), Some(kind.sha_memory_key()))
-            .await
-            .ok()
-            .and_then(|v| v.into_iter().next())
-            .and_then(|m| m.value.as_str().map(String::from));
-
-        let diff: Option<String> = match (&last_sha, &head) {
-            (Some(last), Some(h)) if last == h => {
-                let _ = runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await;
-                info!(slug = %slug, kind = kind.run_kind(), "run skipped (no_diff)");
-                return;
-            }
-            (Some(last), Some(_)) => {
-                let d = gitutil::diff_since(&src, last).await;
-                if d.is_none() {
-                    let _ = runs.finish_skipped(run_id, "no_diff (empty range)").await;
-                    info!(slug = %slug, kind = kind.run_kind(), "run skipped (no_diff empty)");
-                    return;
+        let diff: Option<String> = match scan.gate {
+            Gate::Code => {
+                let last_sha = memory
+                    .get(&slug, Some("last_run"), Some(SHA_KEY))
+                    .await
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .and_then(|m| m.value.as_str().map(String::from));
+                match (&last_sha, &head) {
+                    (Some(last), Some(h)) if last == h => {
+                        let _ = runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await;
+                        info!(slug = %slug, "run skipped (no_diff)");
+                        return;
+                    }
+                    (Some(last), Some(_)) => {
+                        let d = gitutil::diff_since(&src, last).await;
+                        if d.is_none() {
+                            let _ = runs.finish_skipped(run_id, "no_diff (empty range)").await;
+                            info!(slug = %slug, "run skipped (no_diff empty)");
+                            return;
+                        }
+                        d
+                    }
+                    // First run (no recorded SHA) → full review, no diff.
+                    _ => None,
                 }
-                d
             }
-            // First run (no recorded SHA) → full review, no diff.
-            _ => None,
+            Gate::Data => {
+                // The watermark is the latest "material" the scan would analyse.
+                // Empty ⇒ nothing to analyse; unchanged vs last run ⇒ no new material.
+                match &data_watermark {
+                    None => None, // caller couldn't compute it → run unconditionally
+                    Some(w) if w.is_empty() => {
+                        let _ = runs.finish_skipped(run_id, "no_new_data").await;
+                        info!(slug = %slug, "run skipped (no_new_data)");
+                        return;
+                    }
+                    Some(w) => {
+                        let last = memory
+                            .get(&slug, Some("last_run"), Some(WATERMARK_KEY))
+                            .await
+                            .ok()
+                            .and_then(|v| v.into_iter().next())
+                            .and_then(|m| m.value.as_str().map(String::from));
+                        if last.as_deref() == Some(w.as_str()) {
+                            let _ = runs.finish_skipped(run_id, "no_new_data").await;
+                            info!(slug = %slug, "run skipped (no_new_data)");
+                            return;
+                        }
+                        None
+                    }
+                }
+            }
+            Gate::Manual => None,
         };
 
         // Build prompt.
@@ -311,7 +432,7 @@ impl SurveillanceService {
         let prompt = self
             .inner
             .runner
-            .build_prompt(&slug, &stack, kind, diff.as_deref(), &mem_entries, open_now);
+            .build_prompt(&scan, &stack, diff.as_deref(), &mem_entries, open_now);
 
         // Acquire concurrency permit + run Codex.
         let _permit = self.inner.sem.acquire().await.ok();
@@ -319,7 +440,7 @@ impl SurveillanceService {
         // Stream each stdout line to the live console (ephemeral; not persisted)
         // and append to the per-run buffer for mid-run tab re-opens.
         let inner = self.inner.clone();
-        let run_kind = kind.run_kind().to_string();
+        let run_kind = SCAN_KIND.to_string();
         let slug_line = slug.clone();
         let mut seq: u64 = 0;
         let exec = self
@@ -350,13 +471,13 @@ impl SurveillanceService {
 
         if exec.cancelled {
             let _ = runs.finish_cancelled(run_id).await;
-            info!(slug = %slug, kind = kind.run_kind(), "codex run cancelled by user");
+            info!(slug = %slug, "codex run cancelled by user");
             return;
         }
         if let Some(err) = exec.spawn_error {
             let _ = runs.finish_failed(run_id, &err).await;
-            self.note_failure(&slug, kind, memory).await;
-            warn!(slug = %slug, kind = kind.run_kind(), %err, "codex spawn failed");
+            self.note_failure(&slug, memory).await;
+            warn!(slug = %slug, %err, "codex spawn failed");
             return;
         }
         if !exec.exit_ok {
@@ -366,14 +487,14 @@ impl SurveillanceService {
                 exec.stderr.clone()
             };
             let _ = runs.finish_failed(run_id, &msg).await;
-            self.note_failure(&slug, kind, memory).await;
-            warn!(slug = %slug, kind = kind.run_kind(), "codex run failed");
+            self.note_failure(&slug, memory).await;
+            warn!(slug = %slug, "codex run failed");
             return;
         }
 
         // Success — measure how many findings Codex touched during the run.
         let delta = findings
-            .count_touched_since(&slug, kind.finding_kind(), measure_from)
+            .count_touched_since(&slug, SCAN_KIND, measure_from)
             .await
             .unwrap_or(0);
         let empty = delta == 0;
@@ -388,38 +509,53 @@ impl SurveillanceService {
             )
             .await;
 
-        // Record reviewed SHA for diff-aware next time.
-        if let Some(h) = &head {
-            let _ = memory
-                .upsert(
-                    &slug,
-                    "last_run",
-                    kind.sha_memory_key(),
-                    &serde_json::Value::String(h.clone()),
-                    None,
-                )
-                .await;
+        // Record the freshness watermark for the next run's gate: the reviewed
+        // git SHA for code-gated scans, the data watermark for data-gated scans.
+        match scan.gate {
+            Gate::Code => {
+                if let Some(h) = &head {
+                    let _ = memory
+                        .upsert(
+                            &slug,
+                            "last_run",
+                            SHA_KEY,
+                            &serde_json::Value::String(h.clone()),
+                            None,
+                        )
+                        .await;
+                }
+            }
+            Gate::Data => {
+                if let Some(w) = &data_watermark {
+                    if !w.is_empty() {
+                        let _ = memory
+                            .upsert(
+                                &slug,
+                                "last_run",
+                                WATERMARK_KEY,
+                                &serde_json::Value::String(w.clone()),
+                                None,
+                            )
+                            .await;
+                    }
+                }
+            }
+            Gate::Manual => {}
         }
         // Reset consecutive-failure counter on success.
         let _ = memory
-            .delete(&slug, "last_run", &format!("{}:consecutive_failures", kind.run_kind()))
+            .delete(&slug, "last_run", "scan:consecutive_failures")
             .await;
 
-        info!(
-            slug = %slug,
-            kind = kind.run_kind(),
-            findings = delta,
-            empty,
-            "codex run success"
-        );
+        info!(slug = %slug, findings = delta, empty, "codex run success");
     }
 
     /// Track consecutive failures. After 3 in a row we just log loudly — a
     /// proper meta-finding / Hub ping needs schema + Hub wiring (deferred).
-    async fn note_failure(&self, slug: &str, kind: RunKind, memory: &MemoryStore) {
-        let key = format!("{}:consecutive_failures", kind.run_kind());
+    async fn note_failure(&self, slug: &str, memory: &MemoryStore) {
+        let key = "scan:consecutive_failures";
         let prev = memory
-            .get(slug, Some("last_run"), Some(&key))
+            .get(slug, Some("last_run"), Some(key))
             .await
             .ok()
             .and_then(|v| v.into_iter().next())
@@ -427,12 +563,11 @@ impl SurveillanceService {
             .unwrap_or(0);
         let next = prev + 1;
         let _ = memory
-            .upsert(slug, "last_run", &key, &serde_json::json!(next), None)
+            .upsert(slug, "last_run", key, &serde_json::json!(next), None)
             .await;
         if next >= 3 {
             warn!(
                 slug = %slug,
-                kind = kind.run_kind(),
                 count = next,
                 "surveillance: 3+ consecutive failures — check codex auth/install"
             );

@@ -8,11 +8,8 @@ use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::memory::Memory;
-use crate::{MAX_OPEN_FINDINGS, RunKind};
-
-const PROMPT_CODE_REVIEW: &str = include_str!("prompts/code_review.md");
-const PROMPT_SUGGESTIONS: &str = include_str!("prompts/suggestions.md");
-const PROMPT_SECURITY: &str = include_str!("prompts/security.md");
+use crate::scandef::{Gate, ScanDef};
+use crate::MAX_OPEN_FINDINGS;
 
 /// Configuration for invoking the Codex CLI. Populated from env in main.rs.
 #[derive(Debug, Clone)]
@@ -73,41 +70,46 @@ impl CodexRunner {
         Self { cfg }
     }
 
-    /// Build the full prompt for a run from the embedded template + dynamic
-    /// context (diff, memory). `diff` is None for a full-codebase review.
-    /// `open_now` is the count of currently-open findings for this kind; it's
-    /// injected so Codex limits itself to the most important issues within the
-    /// remaining budget (`MAX_OPEN_FINDINGS - open_now`).
+    /// Build the full prompt for a run from the app's scan definition (its
+    /// agent-authored `prompt` template) + dynamic context (diff/data, memory).
+    /// `diff` is None for a full-codebase review or a data-gated scan.
+    /// `open_now` is the count of currently-open findings; it's injected so Codex
+    /// limits itself to the most important issues within the remaining budget.
     pub fn build_prompt(
         &self,
-        slug: &str,
+        scan: &ScanDef,
         stack: &str,
-        kind: RunKind,
         diff: Option<&str>,
         memory: &[Memory],
         open_now: i64,
     ) -> String {
-        let template = match kind {
-            RunKind::CodeReview => PROMPT_CODE_REVIEW,
-            RunKind::Suggestions => PROMPT_SUGGESTIONS,
-            RunKind::Security => PROMPT_SECURITY,
-        };
-        let categories_block = kind
-            .categories()
+        let categories_block = scan
+            .categories
             .iter()
             .map(|c| format!("- `{c}`"))
             .collect::<Vec<_>>()
             .join("\n");
-        let diff_block = match diff {
-            Some(d) if !d.trim().is_empty() => {
-                format!("Tu revois le DIFF suivant (modifications depuis la dernière review).\nConcentre-toi dessus, mais lis les fichiers complets si besoin pour le contexte :\n\n```diff\n{}\n```", truncate_chars(d, 80_000))
+        // The `{{DIFF}}` slot carries the data context for data-gated scans (the
+        // scan queries the DB itself via `pm_query`); for code-gated scans it's
+        // the git diff (or a full-review fallback). The scan-specific framing of
+        // a data scan lives in its own prompt body, not here.
+        let diff_block = if scan.gate == Gate::Data {
+            "Ce scan est piloté par les DONNÉES (pas de diff de code). Identifie toi-même \
+             le matériel à analyser en interrogeant la base avec `pm_query` (SELECT read-only) \
+             — le watermark de fraîcheur est en mémoire `last_run` (clé `scan_watermark`)."
+                .to_string()
+        } else {
+            match diff {
+                Some(d) if !d.trim().is_empty() => {
+                    format!("Tu revois le DIFF suivant (modifications depuis la dernière review).\nConcentre-toi dessus, mais lis les fichiers complets si besoin pour le contexte :\n\n```diff\n{}\n```", truncate_chars(d, 80_000))
+                }
+                _ => "Aucun diff fourni — fais une revue du code de l'app dans son répertoire courant.".to_string(),
             }
-            _ => "Aucun diff fourni — fais une revue du code de l'app dans son répertoire courant.".to_string(),
         };
         let memory_block = format_memory(memory);
         let remaining = (MAX_OPEN_FINDINGS - open_now).max(0);
-        template
-            .replace("{{SLUG}}", slug)
+        scan.prompt
+            .replace("{{SLUG}}", &scan.slug)
             .replace("{{STACK}}", stack)
             .replace("{{CATEGORIES}}", &categories_block)
             .replace("{{DIFF}}", &diff_block)

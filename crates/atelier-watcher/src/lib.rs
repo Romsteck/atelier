@@ -27,12 +27,14 @@ pub mod gitutil;
 pub mod memory;
 pub mod migration;
 pub mod runs;
+pub mod scandef;
 pub mod service;
 
 pub use codex::{CodexConfig, CodexRunner};
 pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding};
 pub use memory::{Memory, MemoryStore};
 pub use runs::{Run, RunsStore};
+pub use scandef::{AppScanStore, Gate, ScanDef, SCAN_KIND};
 pub use service::{AppMeta, SurveillanceConfig, SurveillanceService};
 
 /// Per-kind cap on OPEN findings. A new scan of a kind is skipped once the kind
@@ -67,88 +69,6 @@ pub struct TranscriptLine {
     pub line: String,
 }
 
-/// The three kinds of surveillance run. Note the naming asymmetry kept for
-/// backward-compat with the DB: a run is `code_review`/`suggestions`/`security`
-/// (plural for suggestions) while a finding is `code_review`/`suggestion`/`security`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunKind {
-    CodeReview,
-    Suggestions,
-    Security,
-}
-
-impl RunKind {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "code_review" => Some(Self::CodeReview),
-            "suggestions" => Some(Self::Suggestions),
-            "security" => Some(Self::Security),
-            _ => None,
-        }
-    }
-
-    /// Value stored in `surveillance_runs.kind`.
-    pub fn run_kind(&self) -> &'static str {
-        match self {
-            Self::CodeReview => "code_review",
-            Self::Suggestions => "suggestions",
-            Self::Security => "security",
-        }
-    }
-
-    /// Value stored in `findings.kind` (singular for suggestions).
-    pub fn finding_kind(&self) -> &'static str {
-        match self {
-            Self::CodeReview => "code_review",
-            Self::Suggestions => "suggestion",
-            Self::Security => "security",
-        }
-    }
-
-    /// Memory key tracking the last reviewed git SHA (diff-aware).
-    pub fn sha_memory_key(&self) -> &'static str {
-        match self {
-            Self::CodeReview => "code_review_sha",
-            Self::Suggestions => "suggestions_sha",
-            Self::Security => "security_sha",
-        }
-    }
-
-    /// Allowed finding categories for this kind. Codex is told to classify
-    /// each finding into one of these; the server coerces anything else to
-    /// `autres`. Keep in sync with the frontend `CATEGORIES` map.
-    pub fn categories(&self) -> &'static [&'static str] {
-        match self {
-            Self::CodeReview => &[
-                "bug",
-                "architecture",
-                "performance",
-                "composants",
-                "gestion_erreurs",
-                "autres",
-            ],
-            Self::Suggestions => &["performance", "ux", "autres"],
-            Self::Security => &["auth", "injection", "secrets", "exposition", "autres"],
-        }
-    }
-
-    /// Coerce an arbitrary category string to a valid one for this kind,
-    /// falling back to `autres`.
-    pub fn normalize_category(&self, raw: Option<&str>) -> String {
-        match raw {
-            Some(c) if self.categories().contains(&c) => c.to_string(),
-            _ => "autres".to_string(),
-        }
-    }
-
-    /// Whether a `findings.kind` string belongs to this run kind. Used to
-    /// resolve categories from a stored finding kind.
-    pub fn from_finding_kind(s: &str) -> Option<Self> {
-        match s {
-            "code_review" => Some(Self::CodeReview),
-            "suggestion" => Some(Self::Suggestions),
-            "security" => Some(Self::Security),
-            _ => None,
-        }
-    }
-}
+// The scan kind enum was removed: every app now has exactly ONE scan, defined as
+// DATA in the `app_scan` table (label/prompt/cadence/gate/categories), owned by
+// the project's agent. See `scandef::ScanDef` + `scandef::SCAN_KIND`.

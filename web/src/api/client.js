@@ -233,11 +233,14 @@ export const dismissFinding = (slug, id, reason) =>
   api.post(`/apps/${slug}/findings/${id}/dismiss`, { reason });
 export const resolveFinding = (slug, id, commit_sha) =>
   api.post(`/apps/${slug}/findings/${id}/resolve`, { commit_sha });
-export const runSurveillance = (slug, kind) =>
-  api.post(`/apps/${slug}/surveillance/run`, { kind });
+export const runSurveillance = (slug, trigger) =>
+  api.post(`/apps/${slug}/surveillance/run`, trigger ? { trigger } : {});
 export const cancelSurveillanceRun = (slug, runId) =>
   api.post(`/apps/${slug}/surveillance/runs/${runId}/cancel`);
 export const getSurveillanceTranscript = (slug, runId) =>
   api.get(`/apps/${slug}/surveillance/runs/${runId}/transcript`);
 export const listSurveillanceRuns = (slug, params = {}) =>
   api.get(`/apps/${slug}/surveillance/runs`, { params });
+// The app's single scan definition (label/prompt/cadence/gate/categories).
+export const getScan = (slug) =>
+  api.get(`/apps/${slug}/surveillance/scan`);
