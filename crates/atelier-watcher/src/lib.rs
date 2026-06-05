@@ -1,11 +1,14 @@
-/// Surveillance IA per-app (code review + suggestions + sécurité via Codex CLI).
+/// Surveillance IA per-app via Codex CLI. Chaque app a TROIS scans (discriminés
+/// par `kind`) : `security` et `code_review` (plateforme, fixes, prompts en code)
+/// + `business` (possédé par l'agent du projet, défini en DONNÉES dans `app_scan`,
+/// vide par défaut).
 ///
 /// Runs **manuels uniquement** (déclenchés depuis l'UI ou MCP) — pas de
 /// scheduler interne : un cron consommerait trop l'abonnement GPT+. Chaque run
-/// passe par les gates cap (`MAX_OPEN_FINDINGS`) + diff-aware, puis Codex. Le
-/// git_watcher auto-résout les findings via les commits `fix(surveillance:N)`.
-/// Inert tant que le binaire `codex` n'est pas installé — un run renvoie alors
-/// une erreur propre.
+/// passe par les gates cap (`MAX_OPEN_FINDINGS`, par (app,kind)) + diff-aware,
+/// puis Codex. Le git_watcher auto-résout les findings via les commits
+/// `fix(surveillance:N)`. Inert tant que le binaire `codex` n'est pas installé —
+/// un run renvoie alors une erreur propre.
 #[allow(unused_imports)]
 pub(crate) mod sqlx {
     pub use sqlx_core::Error;
@@ -34,7 +37,10 @@ pub use codex::{CodexConfig, CodexRunner};
 pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding};
 pub use memory::{Memory, MemoryStore};
 pub use runs::{Run, RunsStore};
-pub use scandef::{AppScanStore, Gate, ScanDef, SCAN_KIND};
+pub use scandef::{
+    AppScanStore, Gate, ScanDef, BIZ_KIND, CODE_REVIEW_KIND, SECURITY_KIND, is_valid_kind, sha_key,
+    watermark_key,
+};
 pub use service::{AppMeta, SurveillanceConfig, SurveillanceService};
 
 /// Per-kind cap on OPEN findings. A new scan of a kind is skipped once the kind
@@ -62,13 +68,14 @@ pub struct SurveillanceEvent {
 pub struct TranscriptLine {
     pub run_id: uuid::Uuid,
     pub slug: String,
-    /// run_kind: "code_review" | "suggestions" | "security"
+    /// run kind: "security" | "code_review" | "business"
     pub kind: String,
     /// Monotonic line index within the run (lets the UI order/dedup).
     pub seq: u64,
     pub line: String,
 }
 
-// The scan kind enum was removed: every app now has exactly ONE scan, defined as
-// DATA in the `app_scan` table (label/prompt/cadence/gate/categories), owned by
-// the project's agent. See `scandef::ScanDef` + `scandef::SCAN_KIND`.
+// No scan-kind enum: the three scans are modelled by `scandef::ScanDef` and
+// discriminated by its `kind` field. `security`/`code_review` come from the
+// hardcoded `ScanDef::security`/`ScanDef::code_review` constructors; `business`
+// is loaded from the `app_scan` table (agent-owned, blank by default).

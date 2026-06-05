@@ -192,6 +192,8 @@ async fn resolve_finding(
 
 #[derive(Debug, Deserialize, Default)]
 struct RunBody {
+    /// Which scan to run: `security` | `code_review` | `business`.
+    kind: Option<String>,
     /// `manual` (default) or `cron` (a scheduled timer).
     #[serde(default)]
     trigger: Option<String>,
@@ -237,6 +239,15 @@ async fn run_surveillance(
     if state.surveillance.findings().is_none() {
         return err503();
     }
+    let Some(kind) = body.kind.as_deref() else {
+        return err(StatusCode::BAD_REQUEST, "kind is required".to_string());
+    };
+    if !atelier_watcher::is_valid_kind(kind) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!("kind must be security|code_review|business (got '{kind}')"),
+        );
+    }
     let trigger = match body.trigger.as_deref() {
         None | Some("manual") => "manual",
         Some("cron") => "cron",
@@ -247,19 +258,25 @@ async fn run_surveillance(
             );
         }
     };
-    // For a data-gated scan, compute the freshness watermark by running its
-    // gate_sql (the REST layer has dataverse access; the watcher does not).
-    let data_watermark = match state.surveillance.scan_get(&slug).await {
-        Some(scan) if scan.gate == atelier_watcher::Gate::Data => match scan.gate_sql.as_deref() {
-            Some(sql) => data_watermark(&state, &slug, sql).await,
-            None => None,
-        },
-        _ => None,
+    // Only the data-gated business scan needs a freshness watermark; compute it by
+    // running its gate_sql (the REST layer has dataverse access; the watcher does
+    // not). security/code_review are git-diff-gated → no watermark.
+    let data_watermark = if kind == atelier_watcher::BIZ_KIND {
+        match state.surveillance.scan_get(&slug).await {
+            Some(scan) if scan.gate == atelier_watcher::Gate::Data => match scan.gate_sql.as_deref()
+            {
+                Some(sql) => data_watermark(&state, &slug, sql).await,
+                None => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
     };
     // Fire-and-forget: spawns Codex async, returns the run id immediately.
     match state
         .surveillance
-        .run_now(slug.clone(), trigger, data_watermark)
+        .run_now(slug.clone(), kind, trigger, data_watermark)
         .await
     {
         Ok(run_id) => (

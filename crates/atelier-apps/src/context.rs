@@ -1016,42 +1016,57 @@ fn render_initial_claude_md(app: &Application) -> String {
     )
 }
 
-/// Rule courte pour la surveillance IA : pointeurs MCP + convention de commit.
-/// Volontairement minimale (coût context permanent) — le détail du workflow
-/// vit dans les skills `surveillance-bugs` / `surveillance-improvements`.
+/// Rule pour la surveillance IA : le modèle 3 scans + le rituel de maintenance
+/// du scan Business + pointeurs MCP + convention de commit. Le détail du workflow
+/// vit dans la skill `surveillance`.
 fn render_surveillance_rule_md(app: &Application) -> String {
     format!(
         "# Surveillance IA — {slug}\n\
          \n\
-         Cette app possède **un seul scan**, que **TU** définis et fais évoluer \
-         (aucune validation humaine — tu en es responsable). Le scan tourne en \
-         lecture seule via Codex et écrit des findings catégorisées, visibles dans \
-         le tab **Surveillance** du Studio. **Vide par défaut** : tant que tu ne l'as \
-         pas défini, il est en veille (aucun run).\n\
+         Cette app a **trois scans** (tous tournent en lecture seule via Codex et \
+         écrivent des findings, visibles dans le tab **Surveillance** du Studio) :\n\
          \n\
-         ## Rituel à CHAQUE session\n\
+         - **Sécurité** et **Qualité** (bugs/qualité code/perf) — scans **plateforme \
+         FIXES**. Tu ne les configures PAS ; tu **tries** leurs findings (résous / \
+         dismiss). Tu peux les lancer depuis l'UI ou via `surveillance_run`.\n\
+         - **Business** — le **SEUL scan que TU possèdes** et fais évoluer (aucune \
+         validation humaine). Il porte sur les **données et le comportement métier \
+         réels** de l'app. **Vide par défaut** : tant que tu ne l'as pas défini, il \
+         est en veille (aucun run).\n\
          \n\
-         1. **`scan_get`** — relis la définition actuelle de ton scan.\n\
-         2. Au vu de l'évolution du projet depuis la dernière fois, mets-la à jour \
-         avec **`scan_set`** : `label` (nom affiché), `prompt` (les instructions du \
-         scan), `cadence` (manual|daily|weekly), `gate` (code|data|manual), `gate_sql` \
-         (un SELECT scalaire de fraîcheur si gate=data), `categories` (les axes de \
-         findings). Le `prompt` doit contenir les slots `{{{{SLUG}}}}`, \
-         `{{{{CATEGORIES}}}}`, `{{{{DIFF}}}}`, `{{{{MEMORY}}}}`, `{{{{OPEN_COUNT}}}}`, \
-         `{{{{REMAINING}}}}`, `{{{{MAX_OPEN}}}}`.\n\
+         ## Rituel à CHAQUE session (scan Business)\n\
+         \n\
+         1. **`scan_get`** — relis la définition actuelle de ton scan Business.\n\
+         2. Au vu de l'évolution du projet, mets-la à jour avec **`scan_set`** : \
+         `label`, `prompt`, `cadence` (manual|daily|weekly), `gate` (code|data|manual), \
+         `gate_sql` (un SELECT scalaire de fraîcheur **adapté au schéma de CETTE app** \
+         si gate=data), `categories` (tes axes). Le `prompt` doit contenir les slots \
+         `{{{{SLUG}}}}`, `{{{{CATEGORIES}}}}`, `{{{{DIFF}}}}`, `{{{{MEMORY}}}}`, \
+         `{{{{OPEN_COUNT}}}}`, `{{{{REMAINING}}}}`, `{{{{MAX_OPEN}}}}`. Conçois-le pour \
+         CETTE app — pas de template générique.\n\
          3. Maintiens le contexte support dans **`.claude/rules/`** (invariants \
          métier, pièges, schéma data) — ce que ton scan doit savoir pour être pertinent.\n\
          \n\
-         > Un bon scan répond à une question utile et RÉCURRENTE propre à ce projet. \
-         Le `prompt` doit demander à Codex d'émettre chaque finding via \
-         `findings_upsert(category=<une de tes categories>, severity, title, summary, \
-         plan, fingerprint)`, de fingerprinter par CAUSE (un scan récurrent met à jour \
-         au lieu de dupliquer), et de rester dans le budget `{{{{REMAINING}}}}`.\n\
+         > Un bon scan Business répond à une question utile et RÉCURRENTE propre à ce \
+         projet. Le `prompt` doit demander à Codex d'émettre chaque finding via \
+         `findings_upsert(kind=\"business\", category=<une de tes categories>, severity, \
+         title, summary, plan, fingerprint)`, de fingerprinter par CAUSE (mise à jour \
+         au lieu de duplication), et de rester dans le budget `{{{{REMAINING}}}}`.\n\
+         \n\
+         ## Forme d'une finding (les 3 scans)\n\
+         \n\
+         - `title` + `summary` = la **présentation** de l'issue (c'est tout ce qui \
+         s'affiche dans la liste). Garde le `summary` court.\n\
+         - `plan` = un **document de résolution complet** (annexe, ouverte à la \
+         demande) : `## Contexte` / `## Cause racine` / `## Fichiers impactés` / \
+         `## Étapes de correction` / `## Validation`. Pas 2-3 steps condensés.\n\
          \n\
          ## Tools MCP\n\
          \n\
-         - `scan_get`, `scan_set` — lire / définir ton scan.\n\
-         - `findings_list` (filtre severity/status), `findings_dismiss`, `findings_resolve`\n\
+         - `scan_get`, `scan_set` — lire / définir ton scan **Business** (les scans \
+         Sécurité/Qualité ne se règlent pas ici).\n\
+         - `surveillance_run(kind=security|code_review|business)` — lancer un scan.\n\
+         - `findings_list` (filtre kind/severity/status), `findings_dismiss`, `findings_resolve`\n\
          - `memory_get`, `memory_remember` (préférences/mémoire durables)\n\
          - `runs_list` (historique des runs), `pm_query` (SELECT read-only sur la base de l'app)\n\
          \n\
@@ -1076,10 +1091,11 @@ fn render_agents_md(app: &Application) -> String {
          \n\
          ## Rôle\n\
          \n\
-         Tu fais de la **revue de code** (recherche de bugs / régressions) et des \
-         **suggestions d'amélioration**. Tu ne modifies PAS le code toi-même : tu \
-         écris des findings via les tools MCP `mcp__atelier__*`. L'utilisateur les \
-         exécute ensuite dans Claude Code.\n\
+         Tu exécutes les scans de surveillance de cette app : **Sécurité** et \
+         **Qualité** (bugs/qualité/perf) — scans plateforme fixes — et le scan \
+         **Business** (données & comportement métier) défini par l'agent du projet. \
+         Tu ne modifies PAS le code toi-même : tu écris des findings via les tools \
+         MCP `mcp__atelier__*`. L'utilisateur les exécute ensuite dans Claude Code.\n\
          \n\
          ## Préférences projet (à respecter strictement)\n\
          \n\
@@ -1104,10 +1120,15 @@ fn render_agents_md(app: &Application) -> String {
          \n\
          ## Sortie\n\
          \n\
-         Pour chaque problème réel : `findings_upsert` avec tous les champs requis \
-         (kind, severity, title, summary, plan markdown, fingerprint stable). Le `plan` \
-         est ce que l'utilisateur exécutera — rends-le actionnable. Si tu cites un \
-         fichier ou une fonction, vérifie qu'il existe.\n\
+         Pour chaque problème réel : `findings_upsert` avec `kind` (security | \
+         code_review | business), `category`, `severity`, `title`, `fingerprint` stable, \
+         et :\n\
+         - `summary` = **présentation** courte (quoi/où/pourquoi) — c'est ce qui \
+         s'affiche dans la liste des issues.\n\
+         - `plan` = **document de résolution complet** en markdown (annexe) : \
+         `## Contexte` / `## Cause racine` / `## Fichiers impactés` / `## Étapes de \
+         correction` / `## Validation`. Un autre agent doit pouvoir l'exécuter sans \
+         relire toute l'app. Si tu cites un fichier ou une fonction, vérifie qu'il existe.\n\
          \n\
          ## Convention de commit (pour la résolution côté Claude)\n\
          \n\
@@ -1393,28 +1414,28 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
         )),
     ];
 
-    // ── Surveillance : un seul scan par app, possédé par l'agent. Une skill
-    // consolidée couvre à la fois la MAINTENANCE du scan (scan_get/scan_set) et
-    // le TRAITEMENT des findings qu'il produit. ──
+    // ── Surveillance : 3 scans (security/code_review fixes + business possédé
+    // par l'agent). Une skill consolidée couvre la MAINTENANCE du scan Business
+    // (scan_get/scan_set) et le TRAITEMENT des findings des 3 scans. ──
     skills.push(("surveillance", format!(
         "---\n\
          name: surveillance\n\
-         description: Gère le scan de surveillance unique de l'app {slug} — le DÉFINIR/le faire évoluer (scan_set) et TRAITER ses findings. Utilise-moi quand l'utilisateur dit \"surveillance\", \"définis/mets à jour le scan\", \"/scan\", \"traite les findings\", ou en début de session pour maintenir le scan.\n\
+         description: Surveillance de l'app {slug} — maintenir le scan BUSINESS (scan_set) et TRAITER les findings des 3 scans (Sécurité, Qualité, Business). Utilise-moi quand l'utilisateur dit \"surveillance\", \"définis/mets à jour le scan\", \"/scan\", \"traite les findings\", ou en début de session.\n\
          allowed-tools: \n\
          ---\n\
          \n\
          # Surveillance — `{slug}`\n\
          \n\
-         Cette app a **un seul scan**, que tu possèdes (aucune validation humaine). Vois `.claude/rules/surveillance.md`.\n\
+         Trois scans : **Sécurité** + **Qualité** (plateforme, fixes — tu ne les configures pas) et **Business** (tu le possèdes, aucune validation humaine). Vois `.claude/rules/surveillance.md`.\n\
          \n\
-         ## Maintenir le scan (début de session / quand le projet évolue)\n\
+         ## Maintenir le scan Business (début de session / quand le projet évolue)\n\
          1. `scan_get` — lis la définition actuelle (`blank=true` = pas encore défini).\n\
-         2. Décide ce que ce projet a besoin de surveiller de façon RÉCURRENTE (une question utile qu'un simple build ne couvre pas). Puis `scan_set` : `label`, `prompt` (avec les slots `{{{{SLUG}}}}`/`{{{{CATEGORIES}}}}`/`{{{{DIFF}}}}`/`{{{{MEMORY}}}}`/`{{{{OPEN_COUNT}}}}`/`{{{{REMAINING}}}}`/`{{{{MAX_OPEN}}}}`), `cadence`, `gate` (+ `gate_sql` si `data`), `categories`.\n\
+         2. Décide ce que ce projet a besoin de surveiller de façon RÉCURRENTE dans ses **données/comportement métier** (une question utile qu'un build ne couvre pas). Puis `scan_set` : `label`, `prompt` (slots `{{{{SLUG}}}}`/`{{{{CATEGORIES}}}}`/`{{{{DIFF}}}}`/`{{{{MEMORY}}}}`/`{{{{OPEN_COUNT}}}}`/`{{{{REMAINING}}}}`/`{{{{MAX_OPEN}}}}`, et `findings_upsert(kind=\"business\", …)`), `cadence`, `gate` (+ `gate_sql` adapté au schéma de l'app si `data`), `categories`. Conçois-le pour CETTE app.\n\
          3. Maintiens aussi le contexte support dans `.claude/rules/` (ce que le scan doit savoir).\n\
          \n\
-         ## Traiter les findings\n\
-         1. `findings_list` (`status=open`), trie par sévérité décroissante.\n\
-         2. Pour chaque finding : affiche titre+summary+plan ; demande confirmation ; implémente ; vérifie (build/typecheck) ; commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`. Faux positif → `findings_dismiss(id, reason)`.\n\
+         ## Traiter les findings (les 3 scans)\n\
+         1. `findings_list` (`status=open`, filtre `kind` au besoin), trie par sévérité décroissante.\n\
+         2. Pour chaque finding : la liste montre titre+summary ; ouvre le `plan` (document de résolution) ; demande confirmation ; implémente ; vérifie (build/typecheck) ; commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`. Faux positif → `findings_dismiss(id, reason)`.\n\
          3. Récap : N résolues, M dismiss, K ouvertes.\n\
          \n\
          **Ne lance JAMAIS `make deploy` toi-même** — l'utilisateur livre après revue des commits.\n",

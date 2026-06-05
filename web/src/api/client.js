@@ -225,7 +225,7 @@ export const getDocsDiagram = (appId, type, name) =>
 export const searchDocs = (params) => api.get('/docs/search', { params });
 export const getDocsCompleteness = (appId) => api.get(`/docs/${appId}/completeness`);
 
-// ========== Surveillance IA (per-app code-review + suggestions) ==========
+// ========== Surveillance IA (3 scans : security, code_review, business) ==========
 export const getFindings = (params = {}) => api.get('/findings', { params });
 export const getAppFindings = (slug, params = {}) =>
   api.get(`/apps/${slug}/findings`, { params });
@@ -233,14 +233,15 @@ export const dismissFinding = (slug, id, reason) =>
   api.post(`/apps/${slug}/findings/${id}/dismiss`, { reason });
 export const resolveFinding = (slug, id, commit_sha) =>
   api.post(`/apps/${slug}/findings/${id}/resolve`, { commit_sha });
-export const runSurveillance = (slug, trigger) =>
-  api.post(`/apps/${slug}/surveillance/run`, trigger ? { trigger } : {});
+// Run one of the app's three scans (kind: security | code_review | business).
+export const runSurveillance = (slug, kind, trigger) =>
+  api.post(`/apps/${slug}/surveillance/run`, { kind, ...(trigger ? { trigger } : {}) });
 export const cancelSurveillanceRun = (slug, runId) =>
   api.post(`/apps/${slug}/surveillance/runs/${runId}/cancel`);
 export const getSurveillanceTranscript = (slug, runId) =>
   api.get(`/apps/${slug}/surveillance/runs/${runId}/transcript`);
 export const listSurveillanceRuns = (slug, params = {}) =>
   api.get(`/apps/${slug}/surveillance/runs`, { params });
-// The app's single scan definition (label/prompt/cadence/gate/categories).
+// The app's BUSINESS scan definition (label/prompt/cadence/gate/categories).
 export const getScan = (slug) =>
   api.get(`/apps/${slug}/surveillance/scan`);

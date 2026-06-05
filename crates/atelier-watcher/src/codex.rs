@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::memory::Memory;
-use crate::scandef::{Gate, ScanDef};
+use crate::scandef::{Gate, ScanDef, watermark_key};
 use crate::MAX_OPEN_FINDINGS;
 
 /// Configuration for invoking the Codex CLI. Populated from env in main.rs.
@@ -94,10 +94,12 @@ impl CodexRunner {
         // the git diff (or a full-review fallback). The scan-specific framing of
         // a data scan lives in its own prompt body, not here.
         let diff_block = if scan.gate == Gate::Data {
-            "Ce scan est piloté par les DONNÉES (pas de diff de code). Identifie toi-même \
-             le matériel à analyser en interrogeant la base avec `pm_query` (SELECT read-only) \
-             — le watermark de fraîcheur est en mémoire `last_run` (clé `scan_watermark`)."
-                .to_string()
+            format!(
+                "Ce scan est piloté par les DONNÉES (pas de diff de code). Identifie toi-même \
+                 le matériel à analyser en interrogeant la base avec `pm_query` (SELECT read-only) \
+                 — le watermark de fraîcheur est en mémoire `last_run` (clé `{}`).",
+                watermark_key(&scan.kind)
+            )
         } else {
             match diff {
                 Some(d) if !d.trim().is_empty() => {

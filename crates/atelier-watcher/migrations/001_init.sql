@@ -7,19 +7,19 @@
 CREATE TABLE IF NOT EXISTS findings (
     id                BIGSERIAL    PRIMARY KEY,
     slug              TEXT         NOT NULL,
-    kind              TEXT         NOT NULL,             -- 'code_review' | 'suggestion'
+    kind              TEXT         NOT NULL,             -- 'security' | 'code_review' | 'business'
     severity          TEXT         NOT NULL,             -- 'critical' | 'high' | 'medium' | 'low'
     title             TEXT         NOT NULL,
-    summary           TEXT         NOT NULL,
+    summary           TEXT         NOT NULL,             -- présentation de l'issue (liste)
     evidence          JSONB,
-    plan              TEXT         NOT NULL,             -- markdown actionnable
+    plan              TEXT         NOT NULL,             -- document de résolution (annexe markdown)
     fingerprint       TEXT         NOT NULL,
-    category          TEXT         NOT NULL DEFAULT 'autres',  -- axe (cf. app_scan.categories)
+    category          TEXT         NOT NULL DEFAULT 'autres',  -- axe (par kind)
     status            TEXT         NOT NULL DEFAULT 'open',  -- open | dismissed | resolved
     first_seen        TIMESTAMPTZ  NOT NULL DEFAULT now(),
     last_seen         TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT findings_kind_chk     CHECK (kind = 'scan'),  -- un seul scan par app (slug discrimine)
+    CONSTRAINT findings_kind_chk     CHECK (kind IN ('security', 'code_review', 'business')),
     CONSTRAINT findings_severity_chk CHECK (severity IN ('critical', 'high', 'medium', 'low')),
     CONSTRAINT findings_status_chk   CHECK (status IN ('open', 'dismissed', 'resolved'))
 );
@@ -39,7 +39,7 @@ CREATE INDEX IF NOT EXISTS findings_app_kind_idx
 CREATE TABLE IF NOT EXISTS surveillance_runs (
     id                UUID         PRIMARY KEY,
     slug              TEXT         NOT NULL,
-    kind              TEXT         NOT NULL,             -- 'code_review' | 'suggestions'
+    kind              TEXT         NOT NULL,             -- 'security' | 'code_review' | 'business'
     trigger           TEXT         NOT NULL,             -- 'cron' | 'manual'
     started_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
     finished_at       TIMESTAMPTZ,
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS surveillance_runs (
     git_sha_before    TEXT,
     git_sha_reviewed  TEXT,
     error             TEXT,
-    CONSTRAINT runs_kind_chk    CHECK (kind = 'scan'),
+    CONSTRAINT runs_kind_chk    CHECK (kind IN ('security', 'code_review', 'business')),
     CONSTRAINT runs_trigger_chk CHECK (trigger IN ('cron', 'manual')),
     CONSTRAINT runs_status_chk  CHECK (status IN ('running', 'success', 'success_empty', 'skipped', 'failed'))
 );
@@ -97,10 +97,11 @@ CREATE INDEX IF NOT EXISTS memory_app_used_idx
 DROP TABLE IF EXISTS surveillance_config;
 
 -- ---------------------------------------------------------------------------
--- app_scan — UN SEUL scan par app, défini en données et possédé par l'agent du
--- projet (créé/maintenu via le tool MCP `scan_set`, sans validation humaine).
--- Remplace l'enum RunKind (code_review/security/suggestions) + l'ancien portail
--- `scan_type_registry`. Le scan est VIDE par défaut (prompt='') → en veille.
+-- app_scan — définition du scan `business` (le seul scan possédé par l'agent du
+-- projet ; créé/maintenu via le tool MCP `scan_set`, sans validation humaine).
+-- Les scans `security` et `code_review` sont des scans plateforme FIXES (prompt
+-- en code) et n'ont PAS de ligne ici. Le scan business est VIDE par défaut
+-- (prompt='') → en veille.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS app_scan (
     slug         TEXT         PRIMARY KEY,
@@ -121,22 +122,24 @@ CREATE TABLE IF NOT EXISTS app_scan (
 -- ---------------------------------------------------------------------------
 ALTER TABLE findings           ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'autres';
 
--- Backfill une ligne de scan VIDE pour chaque app déjà vue en surveillance
--- (le boot loop + AppCreate couvrent le reste).
+-- Backfill une ligne de scan business VIDE pour chaque app déjà vue en
+-- surveillance (le boot loop + AppCreate couvrent le reste).
 INSERT INTO app_scan(slug) SELECT DISTINCT slug FROM surveillance_runs ON CONFLICT DO NOTHING;
 INSERT INTO app_scan(slug) SELECT DISTINCT slug FROM findings          ON CONFLICT DO NOTHING;
 
--- Collapse de TOUS les kinds vers l'unique 'scan' (un seul scan par app).
--- Dédup sur (slug,fingerprint) en gardant la plus récente AVANT le remap (l'index
--- unique est (slug,kind,fingerprint) ; collapser le kind pourrait collisionner).
+-- Modèle hybride 3 scans : security + code_review (plateforme, fixes) + business
+-- (possédé par l'agent). La refonte précédente avait écrasé TOUS les kinds en
+-- 'scan' (= le scan agent) ; on le renomme 'business' et on rouvre le CHECK aux
+-- 3 kinds. Idempotent (drop CHECK → rename → re-add CHECK). Rename 1:1, pas de
+-- collapse → pas de dédup destructive cross-kind.
 ALTER TABLE findings           DROP CONSTRAINT IF EXISTS findings_kind_chk;
 ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_kind_chk;
-DELETE FROM findings a USING findings b
-  WHERE a.slug = b.slug AND a.fingerprint = b.fingerprint AND a.id < b.id;
-UPDATE findings          SET kind = 'scan' WHERE kind <> 'scan';
-UPDATE surveillance_runs SET kind = 'scan' WHERE kind <> 'scan';
-ALTER TABLE findings           ADD CONSTRAINT findings_kind_chk CHECK (kind = 'scan');
-ALTER TABLE surveillance_runs  ADD CONSTRAINT runs_kind_chk     CHECK (kind = 'scan');
+UPDATE findings          SET kind = 'business' WHERE kind = 'scan';
+UPDATE surveillance_runs SET kind = 'business' WHERE kind = 'scan';
+ALTER TABLE findings           ADD CONSTRAINT findings_kind_chk CHECK (kind IN ('security', 'code_review', 'business'));
+ALTER TABLE surveillance_runs  ADD CONSTRAINT runs_kind_chk     CHECK (kind IN ('security', 'code_review', 'business'));
+-- Purge des anciennes clés mémoire mono-kind devenues orphelines (gate fraîcheur).
+DELETE FROM agent_memory WHERE kind = 'last_run' AND key IN ('scan_sha', 'scan_watermark');
 
 -- Ajout du statut `cancelled` (kill d'un run in-progress depuis l'UI).
 ALTER TABLE surveillance_runs  DROP CONSTRAINT IF EXISTS runs_status_chk;

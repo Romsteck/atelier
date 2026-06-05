@@ -14,7 +14,7 @@ use crate::gitutil;
 use crate::memory::MemoryStore;
 use crate::migration::{self, DEFAULT_DB_NAME};
 use crate::runs::RunsStore;
-use crate::scandef::{AppScanStore, Gate, ScanDef, SCAN_KIND, SHA_KEY, WATERMARK_KEY};
+use crate::scandef::{AppScanStore, Gate, ScanDef, is_valid_kind, sha_key, watermark_key};
 use crate::sqlx::{Pool, Postgres};
 use crate::{MAX_OPEN_FINDINGS, SurveillanceEvent, TranscriptLine};
 
@@ -209,8 +209,9 @@ impl SurveillanceService {
         self.inner.memory.as_ref()
     }
 
-    /// Read an app's scan definition (the single per-app scan). `None` if the
-    /// app has no row yet (or in noop mode).
+    /// Read an app's BUSINESS scan definition (the agent-owned `app_scan` row).
+    /// `None` if the app has no row yet (or in noop mode). The `security` and
+    /// `code_review` scans are not stored here — see `ScanDef::fixed`.
     pub async fn scan_get(&self, slug: &str) -> Option<ScanDef> {
         self.inner.app_scan.as_ref()?.get(slug).await.ok().flatten()
     }
@@ -259,35 +260,47 @@ impl SurveillanceService {
             .map_err(|e| e.to_string())
     }
 
-    /// Start the app's scan run. Creates the `surveillance_runs` row, spawns a
+    /// Start a scan run for one of the app's three kinds (`security` /
+    /// `code_review` / `business`). Creates the `surveillance_runs` row, spawns a
     /// detached task that runs the gates + Codex, and returns the run id
     /// immediately (the work is async). `trigger` is "manual" or "cron".
     ///
-    /// `data_watermark` is the freshness signal for a data-gated scan: the caller
-    /// (which has dataverse access) runs the scan's `gate_sql` and passes the
-    /// resulting watermark, so `atelier-watcher` stays decoupled from the
-    /// dataverse. `None` for code-gated/manual scans.
+    /// `data_watermark` is the freshness signal for a data-gated scan (only the
+    /// `business` scan can be data-gated): the caller (which has dataverse access)
+    /// runs the scan's `gate_sql` and passes the resulting watermark, so
+    /// `atelier-watcher` stays decoupled from the dataverse. `None` otherwise.
     pub async fn run_now(
         &self,
         slug: String,
+        kind: &str,
         trigger: &str,
         data_watermark: Option<String>,
     ) -> Result<Uuid, String> {
+        if !is_valid_kind(kind) {
+            return Err(format!("invalid scan kind: {kind}"));
+        }
         let Some(runs) = self.inner.runs.as_ref() else {
             return Err("surveillance disabled (postgres unreachable)".into());
         };
         let run_id = runs
-            .start(&slug, SCAN_KIND, trigger, None)
+            .start(&slug, kind, trigger, None)
             .await
             .map_err(|e| format!("failed to create run: {e}"))?;
         let svc = self.clone();
+        let kind = kind.to_string();
         tokio::spawn(async move {
-            svc.execute(run_id, slug, data_watermark).await;
+            svc.execute(run_id, slug, kind, data_watermark).await;
         });
         Ok(run_id)
     }
 
-    async fn execute(&self, run_id: Uuid, slug: String, data_watermark: Option<String>) {
+    async fn execute(
+        &self,
+        run_id: Uuid,
+        slug: String,
+        kind: String,
+        data_watermark: Option<String>,
+    ) {
         // Register a cancel channel for the whole run lifetime so a stop request
         // can kill the Codex subprocess. The Sender is held in the registry
         // until the run ends, so the Receiver only fires on an explicit cancel.
@@ -299,7 +312,7 @@ impl SurveillanceService {
             .insert(run_id, cancel_tx);
 
         self.emit("run", &slug, "started");
-        self.execute_inner(run_id, &slug, data_watermark, cancel_rx)
+        self.execute_inner(run_id, &slug, &kind, data_watermark, cancel_rx)
             .await;
         self.inner.running.lock().unwrap().remove(&run_id);
         // Drop the buffered transcript — the run has settled (panel disappears).
@@ -313,6 +326,7 @@ impl SurveillanceService {
         &self,
         run_id: Uuid,
         slug: &str,
+        kind: &str,
         data_watermark: Option<String>,
         cancel_rx: oneshot::Receiver<()>,
     ) {
@@ -326,27 +340,31 @@ impl SurveillanceService {
             return;
         };
 
-        // Load the app's scan definition. A blank scan (no prompt) is "en veille":
-        // nothing to run.
-        let scan = match app_scan.get(&slug).await {
-            Ok(Some(s)) if !s.is_blank() => s,
-            Ok(_) => {
-                let _ = runs.finish_skipped(run_id, "blank (scan non défini)").await;
-                info!(slug = %slug, "run skipped (blank scan)");
-                return;
-            }
-            Err(e) => {
-                let _ = runs.finish_failed(run_id, &format!("scan load failed: {e}")).await;
-                warn!(slug = %slug, ?e, "scan load failed");
-                return;
-            }
+        // Resolve the scan definition by kind. `security`/`code_review` are fixed
+        // platform scans (constructors, never blank, run for every app). `business`
+        // is the agent-owned `app_scan` row; a blank one (no prompt) is "en veille".
+        let scan = match ScanDef::fixed(kind, &slug) {
+            Some(s) => s,
+            None => match app_scan.get(&slug).await {
+                Ok(Some(s)) if !s.is_blank() => s,
+                Ok(_) => {
+                    let _ = runs.finish_skipped(run_id, "blank (scan non défini)").await;
+                    info!(slug = %slug, kind, "run skipped (blank scan)");
+                    return;
+                }
+                Err(e) => {
+                    let _ = runs.finish_failed(run_id, &format!("scan load failed: {e}")).await;
+                    warn!(slug = %slug, kind, ?e, "scan load failed");
+                    return;
+                }
+            },
         };
 
-        // Gate 1 — cap: skip when this app already has MAX_OPEN_FINDINGS open
-        // findings (the UI disables the launch button at the same threshold;
-        // this is the server-side backstop). `open_now` is reused below to
-        // budget the prompt so Codex reports only the most important issues.
-        let open_now = match findings.count_open(&slug, SCAN_KIND).await {
+        // Gate 1 — cap: skip when this (app,kind) already has MAX_OPEN_FINDINGS
+        // open findings (the UI disables that kind's launch button at the same
+        // threshold; this is the server-side backstop). `open_now` is reused below
+        // to budget the prompt so Codex reports only the most important issues.
+        let open_now = match findings.count_open(&slug, kind).await {
             Ok(n) => n,
             Err(e) => {
                 warn!(slug = %slug, ?e, "open findings count failed — proceeding");
@@ -368,7 +386,7 @@ impl SurveillanceService {
         let diff: Option<String> = match scan.gate {
             Gate::Code => {
                 let last_sha = memory
-                    .get(&slug, Some("last_run"), Some(SHA_KEY))
+                    .get(&slug, Some("last_run"), Some(&sha_key(kind)))
                     .await
                     .ok()
                     .and_then(|v| v.into_iter().next())
@@ -404,7 +422,7 @@ impl SurveillanceService {
                     }
                     Some(w) => {
                         let last = memory
-                            .get(&slug, Some("last_run"), Some(WATERMARK_KEY))
+                            .get(&slug, Some("last_run"), Some(&watermark_key(kind)))
                             .await
                             .ok()
                             .and_then(|v| v.into_iter().next())
@@ -440,7 +458,7 @@ impl SurveillanceService {
         // Stream each stdout line to the live console (ephemeral; not persisted)
         // and append to the per-run buffer for mid-run tab re-opens.
         let inner = self.inner.clone();
-        let run_kind = SCAN_KIND.to_string();
+        let run_kind = kind.to_string();
         let slug_line = slug.clone();
         let mut seq: u64 = 0;
         let exec = self
@@ -476,7 +494,7 @@ impl SurveillanceService {
         }
         if let Some(err) = exec.spawn_error {
             let _ = runs.finish_failed(run_id, &err).await;
-            self.note_failure(&slug, memory).await;
+            self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, %err, "codex spawn failed");
             return;
         }
@@ -487,14 +505,14 @@ impl SurveillanceService {
                 exec.stderr.clone()
             };
             let _ = runs.finish_failed(run_id, &msg).await;
-            self.note_failure(&slug, memory).await;
+            self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, "codex run failed");
             return;
         }
 
         // Success — measure how many findings Codex touched during the run.
         let delta = findings
-            .count_touched_since(&slug, SCAN_KIND, measure_from)
+            .count_touched_since(&slug, kind, measure_from)
             .await
             .unwrap_or(0);
         let empty = delta == 0;
@@ -518,7 +536,7 @@ impl SurveillanceService {
                         .upsert(
                             &slug,
                             "last_run",
-                            SHA_KEY,
+                            &sha_key(kind),
                             &serde_json::Value::String(h.clone()),
                             None,
                         )
@@ -532,7 +550,7 @@ impl SurveillanceService {
                             .upsert(
                                 &slug,
                                 "last_run",
-                                WATERMARK_KEY,
+                                &watermark_key(kind),
                                 &serde_json::Value::String(w.clone()),
                                 None,
                             )
@@ -544,7 +562,7 @@ impl SurveillanceService {
         }
         // Reset consecutive-failure counter on success.
         let _ = memory
-            .delete(&slug, "last_run", "scan:consecutive_failures")
+            .delete(&slug, "last_run", &format!("{kind}:consecutive_failures"))
             .await;
 
         info!(slug = %slug, findings = delta, empty, "codex run success");
@@ -552,10 +570,10 @@ impl SurveillanceService {
 
     /// Track consecutive failures. After 3 in a row we just log loudly — a
     /// proper meta-finding / Hub ping needs schema + Hub wiring (deferred).
-    async fn note_failure(&self, slug: &str, memory: &MemoryStore) {
-        let key = "scan:consecutive_failures";
+    async fn note_failure(&self, slug: &str, kind: &str, memory: &MemoryStore) {
+        let key = format!("{kind}:consecutive_failures");
         let prev = memory
-            .get(slug, Some("last_run"), Some(key))
+            .get(slug, Some("last_run"), Some(&key))
             .await
             .ok()
             .and_then(|v| v.into_iter().next())
@@ -563,7 +581,7 @@ impl SurveillanceService {
             .unwrap_or(0);
         let next = prev + 1;
         let _ = memory
-            .upsert(slug, "last_run", key, &serde_json::json!(next), None)
+            .upsert(slug, "last_run", &key, &serde_json::json!(next), None)
             .await;
         if next >= 3 {
             warn!(
