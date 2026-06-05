@@ -19,8 +19,8 @@
 //!   - `src/.claude/rules/workflow.md`         — workflow dev
 //!   - `src/.claude/rules/docs.md`             — usage obligatoire de `docs.*`
 //!   - `src/.claude/rules/claude-md-upkeep.md` — règle de maintenance de CLAUDE.md
-//!   - `src/.claude/skills/app-build/{SKILL.md,build.sh}`
-//!   - `src/.claude/skills/{app-status,app-logs,app-db-info}/SKILL.md`
+//!   - `src/.claude/skills/0-build/{SKILL.md,build.sh}`
+//!   - `src/.claude/skills/{0-status,0-logs,0-db-info,0-surveillance}/SKILL.md`
 //!
 //! Fichiers workspace-root (pour le Studio global `studio.mynetwk.biz`,
 //! workspace = `/var/lib/atelier/apps/`) :
@@ -169,13 +169,13 @@ impl ContextGenerator {
         }
 
         // Step 6 — Skills.
-        let app_build_dir = src_skills_dir.join("app-build");
+        let app_build_dir = src_skills_dir.join("0-build");
         fs::create_dir_all(&app_build_dir)?;
         apply_rules_dir_perms(&app_build_dir);
         log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
         log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
 
-        let app_deploy_dir = src_skills_dir.join("app-deploy");
+        let app_deploy_dir = src_skills_dir.join("0-deploy");
         fs::create_dir_all(&app_deploy_dir)?;
         apply_rules_dir_perms(&app_deploy_dir);
         log_write(&app.slug, &app_deploy_dir.join("SKILL.md"), &render_app_deploy_skill(app))?;
@@ -488,7 +488,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - **No GraphQL, no raw SQL.** See `.claude/rules/db.md`.\n\
          \n\
          ## Build\n\
-         Pour builder cette app, utilise la skill **app-build** (lazy-loaded). Elle appelle l'endpoint HTTP bloquant via Bash.\n\
+         Pour builder cette app, utilise la skill **0-build** (lazy-loaded). Elle appelle l'endpoint HTTP bloquant via Bash.\n\
          \n\
 ",
         name = app.name,
@@ -728,18 +728,18 @@ __BUILD_COMMAND__
 ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
 emit "{\"status\":\"finished\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"message\":\"build OK (local)\"}"
 echo "=== Build OK ($ELAPSED_MS ms) ==="
-echo "Pour livrer en prod : bash .claude/skills/app-deploy/deploy.sh"
+echo "Pour livrer en prod : bash .claude/skills/0-deploy/deploy.sh"
 "#;
     template
         .replace("__SLUG__", &app.slug)
         .replace("__BUILD_COMMAND__", build_command)
 }
 
-/// Skill `app-deploy` : pousse les artefacts pre-buildés vers Medion + restart.
+/// Skill `0-deploy` : pousse les artefacts pre-buildés vers Medion + restart.
 fn render_app_deploy_script(app: &Application) -> String {
     let template = r#"#!/usr/bin/env bash
 # Deploy de l'app `__SLUG__` : envoie les artefacts pre-buildés vers Medion + restart.
-# Pré-requis : avoir lancé `bash .claude/skills/app-build/build.sh` au préalable.
+# Pré-requis : avoir lancé `bash .claude/skills/0-build/build.sh` au préalable.
 # Géré par Atelier — ne pas éditer.
 set -euo pipefail
 API_BASE="${API_BASE:-http://10.0.0.254:4100}"
@@ -755,30 +755,30 @@ curl -sS --max-time "$TIMEOUT_SECS" -X POST \
 fn render_app_deploy_skill(app: &Application) -> String {
     format!(
         "---\n\
-         name: app-deploy\n\
+         name: 0-deploy\n\
          description: Livre les artefacts pre-buildés de l'app `{slug}` vers Medion (rsync + restart). Utilise cette skill QUAND l'utilisateur demande de déployer/livrer/ship cette app — APRÈS un build local réussi.\n\
-         allowed-tools: Bash(bash .claude/skills/app-deploy/deploy.sh*)\n\
+         allowed-tools: Bash(bash .claude/skills/0-deploy/deploy.sh*)\n\
          ---\n\
          \n\
          # Deploy de l'app `{slug}`\n\
          \n\
-         Cette skill **livre** les artefacts (déjà compilés localement par `app-build`) vers Medion (10.0.0.254), puis redémarre le process supervisé. Pas de compile ici.\n\
+         Cette skill **livre** les artefacts (déjà compilés localement par `0-build`) vers Medion (10.0.0.254), puis redémarre le process supervisé. Pas de compile ici.\n\
          \n\
          ## Pré-requis\n\
          \n\
-         - L'agent DOIT avoir lancé `bash .claude/skills/app-build/build.sh` avec succès dans cette session ou une précédente.\n\
+         - L'agent DOIT avoir lancé `bash .claude/skills/0-build/build.sh` avec succès dans cette session ou une précédente.\n\
          - Les artefacts (`build_artefact` de l'app) doivent exister sous `src/`.\n\
          \n\
          ## Commande\n\
          \n\
          ```bash\n\
-         bash .claude/skills/app-deploy/deploy.sh\n\
+         bash .claude/skills/0-deploy/deploy.sh\n\
          ```\n\
          \n\
          Timeout optionnel en secondes (défaut 900) :\n\
          \n\
          ```bash\n\
-         bash .claude/skills/app-deploy/deploy.sh 1200\n\
+         bash .claude/skills/0-deploy/deploy.sh 1200\n\
          ```\n\
          \n\
          ## Retour\n\
@@ -787,8 +787,8 @@ fn render_app_deploy_skill(app: &Application) -> String {
          \n\
          ## Workflow type\n\
          \n\
-         1. `bash .claude/skills/app-build/build.sh`  (build local sur Medion, voir output cargo)\n\
-         2. `bash .claude/skills/app-deploy/deploy.sh`  (livre + restart sur Medion)\n\
+         1. `bash .claude/skills/0-build/build.sh`  (build local sur Medion, voir output cargo)\n\
+         2. `bash .claude/skills/0-deploy/deploy.sh`  (livre + restart sur Medion)\n\
          3. Vérifier dans le panel Studio que l'app est `running`.\n\
          \n\
          ## Erreur HTTP 409 — BUILD_BUSY\n\
@@ -837,9 +837,9 @@ fn render_app_build_skill(app: &Application) -> String {
 
     format!(
         "---\n\
-         name: app-build\n\
+         name: 0-build\n\
          description: Build local de l'application {slug} ({stack}) sur Medion (toolchain locale, output cargo/pnpm visible en live). Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app.\n\
-         allowed-tools: Bash(bash .claude/skills/app-build/build.sh*)\n\
+         allowed-tools: Bash(bash .claude/skills/0-build/build.sh*)\n\
          ---\n\
          \n\
          # Build de l'app `{slug}` (local sur Medion)\n\
@@ -850,16 +850,16 @@ fn render_app_build_skill(app: &Application) -> String {
          **Important** : ce build NE LIVRE PAS l'artefact à Medion. Pour livrer + restart en prod, enchaîne ensuite avec :\n\
          \n\
          ```bash\n\
-         bash .claude/skills/app-deploy/deploy.sh\n\
+         bash .claude/skills/0-deploy/deploy.sh\n\
          ```\n\
          \n\
          ## Commande\n\
          \n\
          ```bash\n\
-         bash .claude/skills/app-build/build.sh\n\
+         bash .claude/skills/0-build/build.sh\n\
          ```\n\
          \n\
-         Tu peux itérer sans deploy : edit → build → re-edit → re-build. Tant que tu n'as pas fait `app-deploy`, le runtime Medion ne change pas (c'est volontaire).\n\
+         Tu peux itérer sans deploy : edit → build → re-edit → re-build. Tant que tu n'as pas fait `0-deploy`, le runtime Medion ne change pas (c'est volontaire).\n\
          \n\
          ## Retour\n\
          \n\
@@ -867,9 +867,9 @@ fn render_app_build_skill(app: &Application) -> String {
          \n\
          ## Workflow type\n\
          \n\
-         1. `bash .claude/skills/app-build/build.sh`  (compile local, voir l'output)\n\
+         1. `bash .claude/skills/0-build/build.sh`  (compile local, voir l'output)\n\
          2. Itérer si besoin (fix erreurs, re-build)\n\
-         3. `bash .claude/skills/app-deploy/deploy.sh`  (livre + restart prod)\n\
+         3. `bash .claude/skills/0-deploy/deploy.sh`  (livre + restart prod)\n\
          \n\
          ## Interdits\n\
          \n\
@@ -1018,7 +1018,7 @@ fn render_initial_claude_md(app: &Application) -> String {
 
 /// Rule pour la surveillance IA : le modèle 3 scans + le rituel de maintenance
 /// du scan Business + pointeurs MCP + convention de commit. Le détail du workflow
-/// vit dans la skill `surveillance`.
+/// vit dans la skill `0-surveillance`.
 fn render_surveillance_rule_md(app: &Application) -> String {
     format!(
         "# Surveillance IA — {slug}\n\
@@ -1169,7 +1169,7 @@ fn render_claude_md_upkeep_md() -> String {
      - Tools MCP disponibles → [`mcp-tools.md`](mcp-tools.md)\n\
      - Workflow (tests, lint, deploy, interdits) → [`workflow.md`](workflow.md)\n\
      - Documentation partagée (`docs.*`) → [`docs.md`](docs.md)\n\
-     - Build → skill `app-build`\n\
+     - Build → skill `0-build`\n\
      \n\
      ## Style\n\
      \n\
@@ -1381,14 +1381,14 @@ fn log_write(slug: &str, path: &Path, content: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Skills additionnelles (read-only) en plus de `app-build`. Chaque entrée est
+/// Skills additionnelles (read-only) en plus de `0-build`. Chaque entrée est
 /// (nom_skill, contenu_complet_avec_frontmatter). Le nom devient le dossier
 /// `src/.claude/skills/<nom>/SKILL.md`.
 fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
     let mut skills = vec![
-        ("app-status", format!(
+        ("0-status", format!(
             "---\n\
-             name: app-status\n\
+             name: 0-status\n\
              description: Affiche l'état courant du process de l'app {slug} (state, PID, port, uptime, restart count). Utilise-moi quand l'utilisateur demande le statut, l'état, si l'app tourne, son PID ou son uptime.\n\
              allowed-tools: \n\
              ---\n\
@@ -1399,9 +1399,9 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
              state, PID, port, uptime, restart count.\n",
             slug = app.slug,
         )),
-        ("app-logs", format!(
+        ("0-logs", format!(
             "---\n\
-             name: app-logs\n\
+             name: 0-logs\n\
              description: Récupère et analyse les logs récents de l'app {slug}. Utilise-moi quand l'utilisateur demande les logs, des erreurs récentes, pourquoi l'app crash, ou un diagnostic runtime.\n\
              allowed-tools: \n\
              ---\n\
@@ -1417,9 +1417,9 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
     // ── Surveillance : 3 scans (security/code_review fixes + business possédé
     // par l'agent). Une skill consolidée couvre la MAINTENANCE du scan Business
     // (scan_get/scan_set) et le TRAITEMENT des findings des 3 scans. ──
-    skills.push(("surveillance", format!(
+    skills.push(("0-surveillance", format!(
         "---\n\
-         name: surveillance\n\
+         name: 0-surveillance\n\
          description: Surveillance de l'app {slug} — maintenir le scan BUSINESS (scan_set) et TRAITER les findings des 3 scans (Sécurité, Qualité, Business). Utilise-moi quand l'utilisateur dit \"surveillance\", \"définis/mets à jour le scan\", \"/scan\", \"traite les findings\", ou en début de session.\n\
          allowed-tools: \n\
          ---\n\
@@ -1443,9 +1443,9 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
     )));
 
     if app.has_db {
-        skills.push(("app-db-info", format!(
+        skills.push(("0-db-info", format!(
             "---\n\
-             name: app-db-info\n\
+             name: 0-db-info\n\
              description: Donne un résumé de la base postgres-dataverse de l'app {slug} (tables, colonnes, row counts). Utilise-moi quand l'utilisateur demande ce qu'il y a en base, le schéma, ou un aperçu des données.\n\
              allowed-tools: \n\
              ---\n\
@@ -1480,10 +1480,15 @@ const OBSOLETE_SLASH_COMMANDS: &[&str] = &[
 /// Noms de skills auxiliaires potentiellement obsolètes à nettoyer si la stack
 /// de l'app change.
 const ALL_EXTRA_SKILL_NAMES: &[&str] = &[
+    // Anciens noms (modèles précédents) à supprimer à la régénération. Les noms
+    // courants sont préfixés `0-` (voir render_extra_skills + app-build/deploy).
+    "app-build",
+    "app-deploy",
     "app-status",
     "app-logs",
     "app-db-info",
     "flow-build",
+    "surveillance",
     "surveillance-bugs",
     "surveillance-improvements",
     "surveillance-security",
@@ -1737,11 +1742,11 @@ mod tests {
         assert!(!initial_md.contains("Vite+Rust"),
                 "skeleton CLAUDE.md ne doit pas dupliquer app-info.md");
 
-        // Skill app-build + script.
+        // Skill 0-build + script.
         let skill_content = render_app_build_skill(&trader);
-        assert!(skill_content.contains("name: app-build"));
-        assert!(skill_content.contains("allowed-tools: Bash(bash .claude/skills/app-build/build.sh"));
-        assert!(skill_content.contains("bash .claude/skills/app-build/build.sh"));
+        assert!(skill_content.contains("name: 0-build"));
+        assert!(skill_content.contains("allowed-tools: Bash(bash .claude/skills/0-build/build.sh"));
+        assert!(skill_content.contains("bash .claude/skills/0-build/build.sh"));
         let script = render_app_build_script(&trader);
         assert!(script.contains("/api/apps/trader/build"));
         assert!(script.starts_with("#!/usr/bin/env bash"));
