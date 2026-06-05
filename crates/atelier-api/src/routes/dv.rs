@@ -648,7 +648,15 @@ async fn insert_row(
             tracing::error!(slug = %slug, table = %table, ?other, "dv_insert unexpected outcome");
             db_error_resp("dv_insert_unexpected", format!("{:?}", other))
         }
-        Err(e) => db_error_resp("dv_insert", e),
+        Err(e) => {
+            // Log the failing SQL shape (no user data — only column names,
+            // `$N` placeholders and casts) + param count so a wire-protocol
+            // failure (e.g. 08P01) is attributable to a slug/table/builder.
+            error!(slug = %slug, table = %table,
+                   params = mutation.params.len(), sql = %mutation.sql,
+                   "dv_insert mutation failed");
+            db_error_resp("dv_insert", e)
+        }
     }
 }
 
@@ -755,7 +763,12 @@ async fn update_row(
             error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => db_error_resp("dv_update", e),
+        Err(e) => {
+            error!(slug = %slug, table = %table,
+                   params = mutation.params.len(), sql = %mutation.sql,
+                   "dv_update mutation failed");
+            db_error_resp("dv_update", e)
+        }
     }
 }
 
@@ -834,7 +847,12 @@ async fn soft_delete_row(
             error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => db_error_resp("dv_soft_delete", e),
+        Err(e) => {
+            error!(slug = %slug, table = %table,
+                   params = mutation.params.len(), sql = %mutation.sql,
+                   "dv_soft_delete mutation failed");
+            db_error_resp("dv_soft_delete", e)
+        }
     }
 }
 
@@ -913,7 +931,12 @@ async fn restore_row(
             error_resp(StatusCode::PRECONDITION_FAILED, "precondition_failed")
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => db_error_resp("dv_restore", e),
+        Err(e) => {
+            error!(slug = %slug, table = %table,
+                   params = mutation.params.len(), sql = %mutation.sql,
+                   "dv_restore mutation failed");
+            db_error_resp("dv_restore", e)
+        }
     }
 }
 

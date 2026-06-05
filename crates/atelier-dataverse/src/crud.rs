@@ -62,22 +62,33 @@ fn column_field_type(table: &TableDefinition, name: &str) -> FieldType {
 /// `DateTime<Utc>` / `NaiveDate` / `Uuid` in `dv_io`). For `Json`, we
 /// keep `Text` and add a `::jsonb` SQL cast since there is no dedicated
 /// `QueryParam::Json` variant.
-/// If `value` is JSON null on a column whose Postgres type isn't directly
-/// reachable by sqlx's default `Option::<i64>::None` binding, return a
-/// SQL literal like `"NULL::jsonb"` to be inlined in place of a parameter.
-/// Returns `None` for non-null values or for columns where a plain bound
-/// NULL works (`text`, `bigint`, `boolean`, etc.).
+/// For a JSON-null payload value, return the SQL `NULL` literal to inline in
+/// place of a bind parameter (typed cast for columns Postgres can't reach from
+/// an untyped NULL). Returns `None` for non-null values.
+///
+/// Why we inline NULL for *every* column type (not just jsonb/timestamptz/…):
+/// the bind layer encodes [`QueryParam::Null`] as `Option::<i64>::None`, i.e. a
+/// `bigint` NULL. On a sometimes-null column (e.g. a nullable `text` symbol),
+/// the first NULL bind poisons sqlx's *cached prepared statement* — its
+/// parameter type for that position is fixed as `bigint` — so a later non-null
+/// `text` bind at the same position is read by Postgres with the wrong binary
+/// `recv` and fails with `08P01` (insufficient data) / `22P03` (incorrect
+/// binary format). Inlining NULL keeps a sometimes-null position from ever
+/// being a bound bigint-NULL, and makes the null vs non-null shapes compile to
+/// distinct SQL (hence distinct cached statements). A bare untyped `NULL` is
+/// unambiguous in `INSERT … VALUES` / `UPDATE SET col = …` because the target
+/// column resolves its type.
 fn typed_null_literal(value: &Value, field_type: FieldType) -> Option<&'static str> {
     if !matches!(value, Value::Null) {
         return None;
     }
-    match field_type {
-        FieldType::Json => Some("NULL::jsonb"),
-        FieldType::DateTime => Some("NULL::timestamptz"),
-        FieldType::Date => Some("NULL::date"),
-        FieldType::Uuid => Some("NULL::uuid"),
-        _ => None,
-    }
+    Some(match field_type {
+        FieldType::Json => "NULL::jsonb",
+        FieldType::DateTime => "NULL::timestamptz",
+        FieldType::Date => "NULL::date",
+        FieldType::Uuid => "NULL::uuid",
+        _ => "NULL",
+    })
 }
 
 /// Bind a non-null payload value with a `QueryParam` variant matching the
@@ -190,6 +201,7 @@ pub fn build_insert(
             .join(", "),
     );
 
+    check_param_count(&sql, params.len(), &table.name)?;
     Ok(CompiledMutation {
         sql,
         params,
@@ -264,6 +276,7 @@ pub fn build_update(
             .join(", "),
     );
 
+    check_param_count(&sql, params.len(), &table.name)?;
     Ok(CompiledMutation {
         sql,
         params,
@@ -309,6 +322,7 @@ pub fn build_soft_delete(
             .collect::<Vec<_>>()
             .join(", "),
     );
+    check_param_count(&sql, params.len(), &table.name)?;
     Ok(CompiledMutation {
         sql,
         params,
@@ -352,6 +366,7 @@ pub fn build_restore(
             .collect::<Vec<_>>()
             .join(", "),
     );
+    check_param_count(&sql, params.len(), &table.name)?;
     Ok(CompiledMutation {
         sql,
         params,
@@ -468,6 +483,46 @@ fn actor_uuid_sql(
         }
         None => "NULL::uuid".into(),
     }
+}
+
+/// Defense-in-depth invariant for every compiled mutation: the distinct `$N`
+/// placeholders in the SQL must be exactly `1..=params.len()`.
+///
+/// Why this exists: a placeholder with no bound parameter (or a bound param with
+/// no placeholder) makes Postgres reject the Bind message with an opaque
+/// `08P01` "insufficient data left in message" — impossible to attribute. We
+/// fail loudly here instead, naming the table, before any DB round-trip. The
+/// builders are aligned by construction; this guards against future drift (and
+/// is asserted directly by `param_count_invariant_holds`).
+fn check_param_count(sql: &str, params_len: usize, table: &str) -> Result<()> {
+    let mut indices = std::collections::BTreeSet::new();
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // `$N` only ever appears as a bind placeholder in our builders — values
+        // are bound, never inlined — so a naive scan is safe (no string literals
+        // carry user `$N`).
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let mut j = i + 1;
+            let mut n = 0usize;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                n = n * 10 + (bytes[j] - b'0') as usize;
+                j += 1;
+            }
+            indices.insert(n);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    let expected: std::collections::BTreeSet<usize> = (1..=params_len).collect();
+    if indices != expected {
+        return Err(DataverseError::internal(format!(
+            "placeholder/param count mismatch on table '{}': sql placeholders={:?}, params.len()={}",
+            table, indices, params_len
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -735,6 +790,64 @@ mod tests {
     }
 
     #[test]
+    fn check_param_count_rejects_mismatch() {
+        // More params than placeholders → actionable, table-named error.
+        let err = check_param_count("INSERT INTO t (a,b) VALUES ($1,$2)", 3, "t").unwrap_err();
+        assert!(format!("{err}").contains("count mismatch"), "got: {err}");
+        assert!(format!("{err}").contains("'t'"), "error must name the table: {err}");
+        // A gap in the indices ($1,$3 with len 2) is also a mismatch.
+        assert!(check_param_count("VALUES ($1, $3)", 2, "t").is_err());
+        // Cast suffixes and multi-digit indices parse correctly.
+        assert!(check_param_count("VALUES ($1::jsonb, $2::numeric)", 2, "t").is_ok());
+        let many = (1..=12).map(|n| format!("${n}")).collect::<Vec<_>>().join(",");
+        assert!(check_param_count(&format!("VALUES ({many})"), 12, "t").is_ok());
+    }
+
+    #[test]
+    fn param_count_invariant_holds() {
+        // Every mutation builder, across all identity kinds, typed columns and
+        // inlined typed-nulls, must keep `$N` placeholders == params.len().
+        // The builders now enforce this internally (`check_param_count`), so an
+        // `.unwrap()` already proves it; we re-check explicitly for clarity and
+        // to cover the System identity (NULL::uuid inlined) + typed-null paths
+        // that drop params without dropping correctness.
+        let identities = [
+            Identity::system(),
+            Identity::user(Uuid::new_v4(), "alice"),
+            Identity::app(Uuid::new_v4(), "trader"),
+        ];
+        for ident in &identities {
+            let mut full = BTreeMap::new();
+            full.insert("happened_at".into(), json!("2026-05-06T14:30:00Z"));
+            full.insert("when_day".into(), json!("2026-05-06"));
+            full.insert("ref_id".into(), json!("00000000-0000-0000-0000-000000000001"));
+            full.insert("payload".into(), json!({"k": [1, 2]}));
+            full.insert("label".into(), json!("hello"));
+            let m = build_insert(&table_typed(), &full, ident).unwrap();
+            check_param_count(&m.sql, m.params.len(), "events").unwrap();
+
+            // Typed-nulls (inlined as NULL::… literals, no bound param) mixed
+            // with a present value — the trap that would desync the counts.
+            let mut nulls = BTreeMap::new();
+            nulls.insert("happened_at".into(), json!(null));
+            nulls.insert("payload".into(), json!(null));
+            nulls.insert("label".into(), json!("present"));
+            let mn = build_insert(&table_typed(), &nulls, ident).unwrap();
+            check_param_count(&mn.sql, mn.params.len(), "events").unwrap();
+
+            // Update / soft-delete / restore (If-Match WHERE id+version).
+            let mut upd = BTreeMap::new();
+            upd.insert("label".into(), json!("renamed"));
+            let mu = build_update(&table_typed(), &json!(7), 1, &upd, ident).unwrap();
+            check_param_count(&mu.sql, mu.params.len(), "events").unwrap();
+            let md = build_soft_delete(&table_typed(), &json!(7), 1, ident).unwrap();
+            check_param_count(&md.sql, md.params.len(), "events").unwrap();
+            let mr = build_restore(&table_typed(), &json!(7), 1, ident).unwrap();
+            check_param_count(&mr.sql, mr.params.len(), "events").unwrap();
+        }
+    }
+
+    #[test]
     fn insert_typed_null_uses_inline_literal() {
         let mut p = BTreeMap::new();
         p.insert("payload".into(), json!(null));
@@ -745,5 +858,41 @@ mod tests {
         assert!(m.sql.contains("NULL::timestamptz"), "got: {}", m.sql);
         // Only the non-null `label` + 4 audit columns make it into params (5 total).
         assert_eq!(m.params.len(), 5, "got {:?}", m.params);
+    }
+
+    #[test]
+    fn null_on_plain_column_is_inlined_not_bound() {
+        // Regression for the `scan_history_events` 08P01/22P03 flood: a NULL on a
+        // plain (text/number/bool) column must be inlined as a bare `NULL`
+        // literal, NOT bound as `QueryParam::Null` (which the bind layer encodes
+        // as a `bigint` NULL and which poisons the cached prepared statement's
+        // param type for that position — see `typed_null_literal`).
+        let mut p = BTreeMap::new();
+        p.insert("name".into(), json!(null)); // `name` is a Text column
+        let m = build_insert(&table_orders(), &p, &id()).unwrap();
+        assert!(
+            m.sql.contains("\"name\""),
+            "name column present in INSERT: {}",
+            m.sql
+        );
+        assert!(
+            !m.sql.contains("NULL::"),
+            "a text NULL needs no cast, just bare NULL: {}",
+            m.sql
+        );
+        assert!(
+            !m.params.iter().any(|p| matches!(p, QueryParam::Null)),
+            "text NULL must be inlined, never bound as a bigint NULL: {:?}",
+            m.params
+        );
+        // The null vs non-null shapes must compile to DIFFERENT SQL, so they map
+        // to distinct cached prepared statements (no cross-position poisoning).
+        let mut p2 = BTreeMap::new();
+        p2.insert("name".into(), json!("widget"));
+        let m2 = build_insert(&table_orders(), &p2, &id()).unwrap();
+        assert_ne!(
+            m.sql, m2.sql,
+            "null and non-null inserts must produce distinct SQL"
+        );
     }
 }

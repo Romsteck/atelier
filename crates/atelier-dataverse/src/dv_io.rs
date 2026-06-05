@@ -331,7 +331,15 @@ pub async fn run_mutation(
     let row_opt = sqlx_core::query::query_with(AssertSqlSafe(mutation_sql), args)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| DataverseError::internal(format!("mutation: {}", e)))?;
+        // Surface the Postgres SQLSTATE (e.g. `08P01` protocol violation vs
+        // `42804` type mismatch) so wire-level failures are diagnosable from logs.
+        .map_err(|e| {
+            let code = e
+                .as_database_error()
+                .and_then(|d| d.code())
+                .unwrap_or_default();
+            DataverseError::internal(format!("mutation [{code}]: {e}"))
+        })?;
 
     let row = match row_opt {
         Some(r) => r,
