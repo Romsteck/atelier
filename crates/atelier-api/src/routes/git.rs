@@ -10,7 +10,7 @@
 //! (POST/DELETE), `/repos/{slug}/mirror/sync` (POST), `/repos/sync-all` (POST).
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -30,10 +30,20 @@ pub fn router() -> Router<ApiState> {
         .route("/repos/{slug}/commits/{sha}", get(get_commit_detail))
         .route("/repos/{slug}/activity", get(get_activity))
         .route("/repos/{slug}/branches", get(get_branches))
-        // Smart HTTP (clone / fetch / push)
+        // Smart HTTP (clone / fetch / push).
+        // Les routes pack transportent le packfile dans le corps de requête : sans
+        // override, l'extracteur `Bytes` plafonne à 2 Mo (défaut axum) → tout push
+        // > 2 Mo est rejeté en 413 avant même d'atteindre le handler. On lève la
+        // limite uniquement sur ces deux routes ; le reste de l'API garde le défaut.
         .route("/repos/{slug_git}/info/refs", get(git_info_refs))
-        .route("/repos/{slug_git}/git-upload-pack", post(git_upload_pack))
-        .route("/repos/{slug_git}/git-receive-pack", post(git_receive_pack))
+        .route(
+            "/repos/{slug_git}/git-upload-pack",
+            post(git_upload_pack).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/repos/{slug_git}/git-receive-pack",
+            post(git_receive_pack).layer(DefaultBodyLimit::disable()),
+        )
         // SSH key
         .route("/ssh-key", get(get_ssh_key).post(generate_ssh_key))
         // Config (token + org + mirrors index)

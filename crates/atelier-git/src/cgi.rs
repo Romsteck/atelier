@@ -37,30 +37,56 @@ pub async fn git_cgi(
 
     let mut child = cmd.spawn().context("Failed to spawn git http-backend")?;
 
-    // Write body to stdin if present
-    if !body.is_empty() {
-        if let Some(mut stdin) = child.stdin.take() {
+    // Feed the request body to stdin **while** draining stdout/stderr concurrently.
+    // git-http-backend (receive-pack) emits sideband/status on stdout while it is
+    // still consuming the packfile on stdin. Writing the whole body before reading
+    // stdout deadlocks large pushes: the child's stdout pipe buffer fills (~64 KiB),
+    // the child blocks, stops reading stdin, and we either hang or get EPIPE once it
+    // exits — even though the ref update succeeded. So write and read at once.
+    let mut stdin_slot = child.stdin.take();
+    let write_body = async {
+        if let Some(mut stdin) = stdin_slot.take() {
             use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(body)
-                .await
-                .context("Failed to write body to git http-backend stdin")?;
-            drop(stdin);
+            // A broken pipe is not fatal here: the child may finish reading the pack
+            // (CONTENT_LENGTH bytes) and close stdin before we flush the tail. Its
+            // exit status + stdout are authoritative, so we swallow the write error.
+            let _ = stdin.write_all(body).await;
+            let _ = stdin.shutdown().await; // EOF
         }
+    };
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("git http-backend stdout missing")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("git http-backend stderr missing")?;
+    let mut out_buf = Vec::new();
+    let mut err_buf = Vec::new();
+    {
+        use tokio::io::AsyncReadExt;
+        let (_, out_res, _err_res) = tokio::join!(
+            write_body,
+            stdout.read_to_end(&mut out_buf),
+            stderr.read_to_end(&mut err_buf),
+        );
+        out_res.context("Failed to read git http-backend stdout")?;
     }
 
-    let output = child
-        .wait_with_output()
+    let status = child
+        .wait()
         .await
         .context("Failed to wait for git http-backend")?;
 
-    if !output.status.success() && output.stdout.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() && out_buf.is_empty() {
+        let stderr = String::from_utf8_lossy(&err_buf);
         error!(stderr = %stderr, "git http-backend failed");
         bail!("git http-backend failed: {stderr}");
     }
 
-    parse_cgi_response(&output.stdout)
+    parse_cgi_response(&out_buf)
 }
 
 /// Parse a CGI response (headers + body separated by empty line).
