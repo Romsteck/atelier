@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { useStudio } from '../context/StudioContext';
 import { statusDot } from '../pages/Studio';
 import { useEffect } from 'react';
+import InstallButton from './InstallButton';
 
 const navGroups = [
   {
@@ -192,6 +193,9 @@ function Sidebar({ onClose, collapsed }) {
             </button>
           </div>
         )}
+        <div className="mt-2">
+          <InstallButton collapsed={collapsed} />
+        </div>
         <p className={`text-xs text-gray-500 mt-2 ${railText}`}>Atelier · v0.1.0</p>
       </div>
     </aside>

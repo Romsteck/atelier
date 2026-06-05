@@ -1,9 +1,13 @@
-const CACHE_NAME = 'atelier-v1';
+const CACHE_NAME = 'atelier-v2';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/favicon.svg',
   '/icon-192x192.svg',
-  '/icon-512x512.svg'
+  '/icon-512x512.svg',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/icon-maskable-512.png',
+  '/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', (event) => {
