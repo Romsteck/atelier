@@ -7,7 +7,7 @@ export default function TaskBell() {
   return (
     <button
       onClick={() => setIsOpen(!isOpen)}
-      className="relative p-2 text-gray-400 hover:text-white transition-colors"
+      className="relative p-2 text-gray-400 hover:text-gray-50 transition-colors"
       title="Activité"
     >
       <Bell className="w-5 h-5" />

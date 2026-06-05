@@ -21,7 +21,7 @@ export function DeleteConfirmModal({ count, onConfirm, onClose }) {
           <h3 className="text-sm font-semibold text-red-400 flex items-center gap-2">
             <Trash2 className="w-4 h-4" /> Supprimer
           </h3>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer">
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-50 rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -31,7 +31,7 @@ export function DeleteConfirmModal({ count, onConfirm, onClose }) {
           </p>
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-white">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-gray-50">
             Annuler
           </button>
           <button onClick={handleDelete} disabled={deleting} className="px-4 py-1.5 text-xs text-white bg-red-500 rounded-sm border-none cursor-pointer hover:bg-red-600 disabled:opacity-50 flex items-center gap-1">

@@ -342,7 +342,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
             {selectedTable ? (
               <>
                 <Database className="w-4 h-4 text-blue-400" />
-                <span className="text-sm font-medium text-white">
+                <span className="text-sm font-medium text-gray-50">
                   {selectedAppSlug && <span className="text-gray-500">{selectedAppSlug}.</span>}
                   {selectedTable}
                 </span>
@@ -369,7 +369,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
                 value={searchQuery}
                 onChange={e => handleSearchChange(e.target.value)}
                 placeholder="Rechercher..."
-                className="bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-gray-600 w-40 outline-hidden"
+                className="bg-gray-900 text-gray-50 text-xs rounded-sm px-2 py-1 border border-gray-600 w-40 outline-hidden"
               />
               <button
                 onClick={() => setShowAddRow(true)}
@@ -387,10 +387,10 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               )}
-              <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
+              <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
                 <Download className="w-3.5 h-3.5" />
               </button>
-              <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Actualiser">
+              <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Actualiser">
                 <RefreshCw className="w-3.5 h-3.5" />
               </button>
             </div>

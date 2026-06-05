@@ -136,7 +136,7 @@ export function DataGrid({
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => onSort(col)}
-                      className="flex items-center gap-1 border-none bg-transparent text-gray-400 hover:text-white cursor-pointer text-xs font-semibold"
+                      className="flex items-center gap-1 border-none bg-transparent text-gray-400 hover:text-gray-50 cursor-pointer text-xs font-semibold"
                     >
                       {col}
                       {isSorted && (sortDesc ? <ArrowDown className="w-3 h-3 text-blue-400" /> : <ArrowUp className="w-3 h-3 text-blue-400" />)}
@@ -197,7 +197,7 @@ export function DataGrid({
                             if (e.key === 'Escape') onCancelEdit();
                           }}
                           onBlur={onCommitEdit}
-                          className="w-full bg-gray-900 text-white text-xs rounded-sm px-2 py-1 border border-blue-500 outline-hidden"
+                          className="w-full bg-gray-900 text-gray-50 text-xs rounded-sm px-2 py-1 border border-blue-500 outline-hidden"
                           autoFocus
                         />
                       </td>

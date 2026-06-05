@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
 import { StudioProvider } from './context/StudioContext';
@@ -25,6 +26,7 @@ function DocsRedirect() {
 
 function App() {
   return (
+    <ThemeProvider>
     <AuthProvider>
       <TaskProvider>
         <StudioProvider>
@@ -58,6 +60,7 @@ function App() {
         </StudioProvider>
       </TaskProvider>
     </AuthProvider>
+    </ThemeProvider>
   );
 }
 

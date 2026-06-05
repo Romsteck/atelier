@@ -37,7 +37,7 @@ export default function DocsEntryView({ entry, onPickLink }) {
           )}
         </div>
         {fm?.title && (
-          <h2 className="text-2xl font-bold text-white">{fm.title}</h2>
+          <h2 className="text-2xl font-bold text-gray-50">{fm.title}</h2>
         )}
         {fm?.summary && (
           <p className="text-gray-400 mt-1">{fm.summary}</p>

@@ -69,7 +69,7 @@ export default function SchemaPage() {
                   className={`w-full text-left px-3 py-2 text-sm border-none cursor-pointer flex items-center gap-2 ${
                     selectedApp === app.slug
                       ? 'bg-blue-500/10 text-blue-400'
-                      : 'bg-transparent text-gray-400 hover:bg-gray-700/30 hover:text-white'
+                      : 'bg-transparent text-gray-400 hover:bg-gray-700/30 hover:text-gray-50'
                   }`}
                   title={isPg ? 'Backend: postgres + GraphQL' : 'Backend: SQLite legacy'}
                 >

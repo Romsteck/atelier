@@ -136,7 +136,7 @@ export default function PreviewTab({ slug, status, onControl }) {
           {starting ? (
             <>
               <Loader2 className="w-8 h-8 mx-auto mb-3 animate-spin text-blue-400" />
-              <h3 className="text-base font-semibold text-white mb-1">Démarrage…</h3>
+              <h3 className="text-base font-semibold text-gray-50 mb-1">Démarrage…</h3>
               <p className="text-sm text-gray-400">L'aperçu se chargera dès que l'app sera prête.</p>
             </>
           ) : (
@@ -144,7 +144,7 @@ export default function PreviewTab({ slug, status, onControl }) {
               <div className="flex items-center justify-center w-12 h-12 mx-auto mb-3 rounded-full bg-yellow-500/15 text-yellow-400">
                 <Power className="w-6 h-6" />
               </div>
-              <h3 className="text-base font-semibold text-white mb-1">Application arrêtée</h3>
+              <h3 className="text-base font-semibold text-gray-50 mb-1">Application arrêtée</h3>
               <p className="text-sm text-gray-400 mb-4">
                 Démarre l'application pour afficher l'aperçu de{' '}
                 <span className="font-mono text-gray-300">/apps/{slug}/</span>.
@@ -202,7 +202,7 @@ export default function PreviewTab({ slug, status, onControl }) {
               spellCheck={false}
               placeholder="/"
               title={external ? 'Page externe — édition désactivée' : undefined}
-              className="flex-1 min-w-0 bg-transparent px-1 py-1 text-xs font-mono text-white outline-hidden disabled:text-gray-500"
+              className="flex-1 min-w-0 bg-transparent px-1 py-1 text-xs font-mono text-gray-50 outline-hidden disabled:text-gray-500"
             />
             {loading && <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />}
           </div>
@@ -245,7 +245,7 @@ export default function PreviewTab({ slug, status, onControl }) {
             src={base}
             onLoad={handleLoad}
             title={`Preview - ${slug}`}
-            className="w-full h-full border-0 bg-white"
+            className="w-full h-full border-0 bg-gray-900"
             allow="clipboard-read; clipboard-write; fullscreen"
           />
         </div>

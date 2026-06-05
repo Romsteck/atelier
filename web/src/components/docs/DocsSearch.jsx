@@ -137,7 +137,7 @@ export default function DocsSearch({ appId, onPick }) {
             >
               <div className="flex items-center gap-2 mb-1">
                 <EntryTypeBadge type={hit.doc_type} />
-                <span className="text-sm font-medium text-white truncate">
+                <span className="text-sm font-medium text-gray-50 truncate">
                   {hit.title || hit.name}
                 </span>
                 <span className="text-xs text-gray-500 ml-auto">{hit.name}</span>

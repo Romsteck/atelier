@@ -269,7 +269,7 @@ function Git() {
                   </div>
                   <button
                     onClick={handleCopyKey}
-                    className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors self-start"
+                    className="p-2 text-gray-400 hover:text-gray-50 hover:bg-gray-700 transition-colors self-start"
                     title="Copier"
                   >
                     <Copy className="w-4 h-4" />
@@ -369,7 +369,7 @@ function Git() {
                     onClick={() => handleSelectRepo(repo.slug)}
                     className={`w-full flex items-center gap-3 px-4 py-2.5 text-left border-l-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 border-b border-b-gray-700/30 ${
                       isSelected
-                        ? 'border-l-blue-400 bg-gray-900 text-white'
+                        ? 'border-l-blue-400 bg-gray-900 text-gray-50'
                         : 'border-l-transparent text-gray-300 hover:bg-gray-700/30 hover:text-gray-200'
                     }`}
                   >
@@ -415,7 +415,7 @@ function Git() {
               <div className="px-4 sm:px-6 py-4 border-b border-gray-700 bg-gray-800/30">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                    <h2 className="text-lg font-semibold text-gray-50 flex items-center gap-2">
                       {selectedRepo}
                       {orgInput && (
                         <a

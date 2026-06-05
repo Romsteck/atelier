@@ -1,35 +1,46 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Loader2 } from 'lucide-react';
+import { useTheme } from '../../context/ThemeContext';
 
 // Lazy-load mermaid only when this component mounts (saves ~600KB on the initial bundle).
 let mermaidPromise = null;
 function loadMermaid() {
   if (!mermaidPromise) {
-    mermaidPromise = import('mermaid').then((mod) => {
-      const mermaid = mod.default || mod;
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: 'dark',
-        securityLevel: 'strict',
-        flowchart: { htmlLabels: true, curve: 'basis' },
-        themeVariables: {
-          primaryColor: '#1f2937',
-          primaryTextColor: '#f3f4f6',
-          primaryBorderColor: '#3b82f6',
-          lineColor: '#9ca3af',
-          fontSize: '14px',
-        },
-      });
-      return mermaid;
-    });
+    mermaidPromise = import('mermaid').then((mod) => mod.default || mod);
   }
   return mermaidPromise;
 }
+
+// Mermaid s'initialise globalement : on (ré)initialise selon le thème courant
+// avant chaque rendu (peu coûteux) pour que les diagrammes suivent le switch.
+const THEME_CONFIG = {
+  dark: {
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1f2937',
+      primaryTextColor: '#f3f4f6',
+      primaryBorderColor: '#3b82f6',
+      lineColor: '#9ca3af',
+      fontSize: '14px',
+    },
+  },
+  light: {
+    theme: 'default',
+    themeVariables: {
+      primaryColor: '#e5e7eb',
+      primaryTextColor: '#111827',
+      primaryBorderColor: '#2563eb',
+      lineColor: '#4b5563',
+      fontSize: '14px',
+    },
+  },
+};
 
 let uniqueId = 0;
 
 export default function MermaidDiagram({ code, className = '' }) {
   const containerRef = useRef(null);
+  const { theme } = useTheme();
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -45,6 +56,12 @@ export default function MermaidDiagram({ code, className = '' }) {
     loadMermaid()
       .then((mermaid) => {
         if (cancelled) return null;
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          flowchart: { htmlLabels: true, curve: 'basis' },
+          ...(THEME_CONFIG[theme] || THEME_CONFIG.dark),
+        });
         return mermaid.render(id, code);
       })
       .then((result) => {
@@ -66,7 +83,7 @@ export default function MermaidDiagram({ code, className = '' }) {
     return () => {
       cancelled = true;
     };
-  }, [code]);
+  }, [code, theme]);
 
   if (!code || !code.trim()) return null;
 

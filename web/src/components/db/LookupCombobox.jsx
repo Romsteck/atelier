@@ -50,7 +50,7 @@ export function LookupCombobox({ appSlug, relation, value, onChange, required })
   return (
     <div ref={ref} className="relative">
       <div
-        className="flex items-center w-full bg-gray-900 text-white text-sm rounded-sm px-3 py-1.5 border border-gray-600 cursor-pointer"
+        className="flex items-center w-full bg-gray-900 text-gray-50 text-sm rounded-sm px-3 py-1.5 border border-gray-600 cursor-pointer"
         onClick={() => setOpen(!open)}
       >
         <span className={`flex-1 truncate ${!value && value !== 0 ? 'text-gray-500' : ''}`}>
@@ -69,7 +69,7 @@ export function LookupCombobox({ appSlug, relation, value, onChange, required })
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Rechercher..."
-            className="px-2 py-1 text-xs bg-gray-900 text-white border-b border-gray-700 outline-hidden rounded-t"
+            className="px-2 py-1 text-xs bg-gray-900 text-gray-50 border-b border-gray-700 outline-hidden rounded-t"
             autoFocus
           />
           <div className="overflow-y-auto flex-1">

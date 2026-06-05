@@ -20,7 +20,7 @@ export function Pagination({ currentPage, pageSize, totalCount, onPageChange, on
           <select
             value={pageSize}
             onChange={e => onPageSizeChange(Number(e.target.value))}
-            className="bg-gray-700 text-white text-xs rounded-sm px-1.5 py-0.5 border border-gray-600 cursor-pointer"
+            className="bg-gray-700 text-gray-50 text-xs rounded-sm px-1.5 py-0.5 border border-gray-600 cursor-pointer"
           >
             {PAGE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
@@ -29,7 +29,7 @@ export function Pagination({ currentPage, pageSize, totalCount, onPageChange, on
           <button
             onClick={() => onPageChange(currentPage - 1)}
             disabled={currentPage === 0}
-            className="p-1 rounded-sm text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed border-none bg-transparent cursor-pointer"
+            className="p-1 rounded-sm text-gray-400 hover:text-gray-50 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed border-none bg-transparent cursor-pointer"
           >
             <ChevronLeft className="w-3.5 h-3.5" />
           </button>
@@ -39,7 +39,7 @@ export function Pagination({ currentPage, pageSize, totalCount, onPageChange, on
           <button
             onClick={() => onPageChange(currentPage + 1)}
             disabled={currentPage >= totalPages - 1}
-            className="p-1 rounded-sm text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed border-none bg-transparent cursor-pointer"
+            className="p-1 rounded-sm text-gray-400 hover:text-gray-50 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed border-none bg-transparent cursor-pointer"
           >
             <ChevronRight className="w-3.5 h-3.5" />
           </button>

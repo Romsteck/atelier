@@ -155,7 +155,7 @@ export default function TaskDetail() {
       {/* Header */}
       <button
         onClick={() => navigate('/tasks')}
-        className="flex items-center gap-1 text-sm text-gray-400 hover:text-white mb-4 transition-colors"
+        className="flex items-center gap-1 text-sm text-gray-400 hover:text-gray-50 mb-4 transition-colors"
       >
         <ArrowLeft className="w-4 h-4" />
         Retour
@@ -167,7 +167,7 @@ export default function TaskDetail() {
             <TaskIcon className={`w-6 h-6 ${cfg.color} ${cfg.spin ? 'animate-spin' : ''}`} />
           </div>
           <div className="flex-1">
-            <h1 className="text-lg font-bold text-white">{task.title}</h1>
+            <h1 className="text-lg font-bold text-gray-50">{task.title}</h1>
             <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-gray-400">
               <span className="bg-gray-700 px-2 py-0.5 rounded-sm">
                 {TYPE_LABELS[task.task_type] || task.task_type}

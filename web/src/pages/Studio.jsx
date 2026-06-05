@@ -122,7 +122,7 @@ function LogsTab({ slug }) {
           </button>
         </div>
         <input type="text" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtrer..."
-          className="flex-1 max-w-[300px] px-3 py-1 rounded-sm text-sm outline-hidden bg-gray-900 text-white border border-gray-700" />
+          className="flex-1 max-w-[300px] px-3 py-1 rounded-sm text-sm outline-hidden bg-gray-900 text-gray-50 border border-gray-700" />
         <Link
           to={`/logs?app_slug=${encodeURIComponent(slug)}`}
           className="text-xs text-amber-400 hover:text-amber-300 inline-flex items-center gap-1"
@@ -136,7 +136,7 @@ function LogsTab({ slug }) {
         {filtered.map((e, i) => {
           const time = (e.timestamp||'').includes('T') ? e.timestamp.split('T')[1]?.replace('Z','').substring(0,12) : e.timestamp;
           return (
-            <div key={i} className="flex gap-3 py-0.5 hover:bg-white/2">
+            <div key={i} className="flex gap-3 py-0.5 hover:bg-gray-400/10">
               <span className="shrink-0 w-24 text-gray-500">{time}</span>
               <span className={`shrink-0 w-12 text-right ${levelCls(e.level)}`}>{(e.level||'').toUpperCase()}</span>
               <span className="text-gray-300">{e.message}</span>
@@ -187,8 +187,8 @@ function EnvTab({ slug }) {
   return (
     <div className="p-6 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-white">Variables d'environnement</h3>
-        <button onClick={() => setShowValues(!showValues)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
+        <h3 className="text-sm font-medium text-gray-50">Variables d'environnement</h3>
+        <button onClick={() => setShowValues(!showValues)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-50">
           {showValues ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
           {showValues ? 'Masquer' : 'Afficher'}
         </button>
@@ -197,7 +197,7 @@ function EnvTab({ slug }) {
         value={showValues ? envText : envText.split('\n').map(l => { const [k] = l.split('='); return k ? `${k}=***` : l; }).join('\n')}
         onChange={e => { if (showValues) setEnvText(e.target.value); }}
         readOnly={!showValues}
-        className="w-full h-64 p-3 rounded-sm text-sm font-mono bg-gray-900 text-white border border-gray-700 outline-hidden resize-y"
+        className="w-full h-64 p-3 rounded-sm text-sm font-mono bg-gray-900 text-gray-50 border border-gray-700 outline-hidden resize-y"
         placeholder="KEY=value"
       />
       <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
@@ -237,7 +237,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
       ].map(({ label, value, set, mono }) => (
         <div key={label}>
           <label className="block text-xs text-gray-400 mb-1">{label}</label>
-          <input type="text" value={value} onChange={e => set(e.target.value)} className={`w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-sm outline-hidden focus:border-blue-500 ${mono ? 'font-mono' : ''}`} />
+          <input type="text" value={value} onChange={e => set(e.target.value)} className={`w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden focus:border-blue-500 ${mono ? 'font-mono' : ''}`} />
         </div>
       ))}
       <div>
@@ -286,14 +286,14 @@ function CreateAppModal({ onClose, onCreated }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div className="w-full max-w-md bg-gray-800 border border-gray-700 rounded-lg shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold text-white">Nouvelle application</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white"><X className="w-5 h-5" /></button>
+          <h2 className="text-lg font-semibold text-gray-50">Nouvelle application</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-50"><X className="w-5 h-5" /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-5 space-y-4">
           {error && <div className="bg-red-500/10 border border-red-500/30 rounded-sm px-3 py-2 text-sm text-red-400">{error}</div>}
-          <div><label className="block text-xs text-gray-400 mb-1">Nom</label><input type="text" value={name} onChange={e => { setName(e.target.value); if (!slugManual) setSlug(slugify(e.target.value)); }} autoFocus className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-sm outline-hidden" /></div>
-          <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white font-mono rounded-sm outline-hidden" /></div>
-          <div><label className="block text-xs text-gray-400 mb-1">Stack</label><select value={stack} onChange={e => setStack(e.target.value)} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded-sm outline-hidden">{STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></div>
+          <div><label className="block text-xs text-gray-400 mb-1">Nom</label><input type="text" value={name} onChange={e => { setName(e.target.value); if (!slugManual) setSlug(slugify(e.target.value)); }} autoFocus className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden" /></div>
+          <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 font-mono rounded-sm outline-hidden" /></div>
+          <div><label className="block text-xs text-gray-400 mb-1">Stack</label><select value={stack} onChange={e => setStack(e.target.value)} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden">{STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></div>
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-700">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 bg-gray-700 rounded-sm">Annuler</button>
             <button type="submit" disabled={submitting} className="px-4 py-2 text-sm text-white bg-blue-500 rounded-sm disabled:opacity-50 flex items-center gap-2">{submitting && <Loader2 className="w-4 h-4 animate-spin" />}Creer</button>
@@ -344,7 +344,7 @@ function AppsGallery({ apps, onOpen, onAdd, onControl }) {
                 <td className="py-2 pl-3 pr-2">
                   <span className={`block w-[9px] h-[9px] rounded-full ${statusDot(state)}`} title={state || 'unknown'} />
                 </td>
-                <td className="py-2 px-2 font-medium text-gray-200 group-hover:text-white">
+                <td className="py-2 px-2 font-medium text-gray-200 group-hover:text-gray-50">
                   <span className="inline-flex items-center gap-1.5">
                     {app.name}
                     {app.has_db && <Database className="w-3 h-3 text-gray-500" title="Base de données" />}
@@ -624,7 +624,7 @@ export default function Studio() {
               const Icon = tab.icon;
               return (
                 <button key={tab.id} onClick={() => handleSelectTab(tab.id)}
-                  className={`relative h-full px-5 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 ${active ? 'text-white font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
+                  className={`relative h-full px-5 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 ${active ? 'text-gray-50 font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
                   <Icon className="w-4 h-4" />
                   {tab.label}
                   {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}
@@ -670,7 +670,7 @@ export default function Studio() {
                   const Icon = tab.icon;
                   return (
                     <button key={tab.id} onClick={() => handleSelectRightTab(tab.id)}
-                      className={`relative h-full px-4 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 shrink-0 ${active ? 'text-white font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
+                      className={`relative h-full px-4 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 shrink-0 ${active ? 'text-gray-50 font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
                       <Icon className="w-4 h-4" />
                       {tab.label}
                       {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}

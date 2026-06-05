@@ -26,7 +26,7 @@ const navGroups = [
 const linkClass = ({ isActive }) =>
   `flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm ${
     isActive
-      ? 'border-l-3 border-amber-400 bg-gray-700/50 text-white'
+      ? 'border-l-3 border-amber-400 bg-gray-700/50 text-gray-50'
       : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
   }`;
 
@@ -75,7 +75,7 @@ function Sidebar({ onClose, collapsed }) {
         {onClose && (
           <button
             onClick={onClose}
-            className="lg:hidden p-1 text-gray-400 hover:text-white"
+            className="lg:hidden p-1 text-gray-400 hover:text-gray-50"
           >
             <X className="w-5 h-5" />
           </button>
@@ -130,7 +130,7 @@ function Sidebar({ onClose, collapsed }) {
                                 onClick={() => handleSelectApp(app.slug)}
                                 className={`group flex items-center gap-2.5 pl-11 pr-3 py-1.5 text-[13px] cursor-pointer border-l-3 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${
                                   sel
-                                    ? 'border-amber-400 bg-gray-700/50 text-white'
+                                    ? 'border-amber-400 bg-gray-700/50 text-gray-50'
                                     : 'border-transparent text-gray-400 hover:bg-gray-700/30'
                                 }`}
                               >

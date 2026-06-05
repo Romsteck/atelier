@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
-import { Menu, Code2, ExternalLink, Play, Square, RefreshCw, Loader2, Check, AlertCircle, X } from "lucide-react";
+import { Menu, Code2, ExternalLink, Play, Square, RefreshCw, Loader2, Check, AlertCircle, X, Sun, Moon } from "lucide-react";
+import { useTheme } from "../context/ThemeContext";
 import TaskBell from "./tasks/TaskBell";
 import TaskDropdown from "./tasks/TaskDropdown";
 import Studio, { CODESERVER_BASE, statusDot } from "../pages/Studio";
@@ -105,7 +106,7 @@ function StudioHeaderInfo() {
         <Code2 className="w-4 h-4 text-blue-400" />
         <span className={`w-2 h-2 rounded-full ${statusDot(state)}`} />
         <BuildBadge build={buildState} onDismiss={() => setBuildState(null)} />
-        <span className="text-[13px] font-medium text-white truncate max-w-[140px]">{currentApp.name}</span>
+        <span className="text-[13px] font-medium text-gray-50 truncate max-w-[140px]">{currentApp.name}</span>
         <span className="px-1.5 py-0.5 rounded-sm text-[10px] bg-gray-700 text-gray-400">{currentApp.stack}</span>
       </div>
       <a
@@ -136,7 +137,7 @@ function StudioHeaderInfo() {
             href={`${CODESERVER_BASE}/?folder=/var/lib/atelier/apps/${selectedSlug}/src`}
             target="_blank"
             rel="noopener noreferrer"
-            className="p-1 text-gray-400 hover:text-white rounded-sm hover:bg-gray-700 shrink-0"
+            className="p-1 text-gray-400 hover:text-gray-50 rounded-sm hover:bg-gray-700 shrink-0"
             title={tooltip}
           >
             <ExternalLink className="w-3.5 h-3.5" />
@@ -186,6 +187,21 @@ function StudioHeaderInfo() {
   );
 }
 
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme();
+  const isDark = theme === 'dark';
+  return (
+    <button
+      onClick={toggleTheme}
+      className="p-1.5 text-gray-400 hover:text-gray-100 hover:bg-gray-700 rounded-sm transition-colors"
+      aria-label={isDark ? 'Passer en thème clair' : 'Passer en thème sombre'}
+      title={isDark ? 'Thème clair' : 'Thème sombre'}
+    >
+      {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+    </button>
+  );
+}
+
 function LayoutInner({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
@@ -219,7 +235,7 @@ function LayoutInner({ children }) {
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="lg:hidden p-1 text-gray-400 hover:text-white shrink-0"
+              className="lg:hidden p-1 text-gray-400 hover:text-gray-50 shrink-0"
             >
               <Menu className="w-6 h-6" />
             </button>
@@ -230,9 +246,12 @@ function LayoutInner({ children }) {
               <div ref={registerSlot} className="flex-1 flex items-center min-w-0" />
             )}
           </div>
-          <div className="relative shrink-0">
-            <TaskBell />
-            <TaskDropdown />
+          <div className="flex items-center gap-1 shrink-0">
+            <ThemeToggle />
+            <div className="relative">
+              <TaskBell />
+              <TaskDropdown />
+            </div>
           </div>
         </div>
         <main className="flex-1 overflow-hidden relative">
