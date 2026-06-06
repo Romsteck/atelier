@@ -252,3 +252,31 @@ export const listSurveillanceRuns = (slug, params = {}) =>
 // The app's BUSINESS scan definition (label/prompt/cadence/gate/categories).
 export const getScan = (slug) =>
   api.get(`/apps/${slug}/surveillance/scan`);
+
+// ========== Agent (Claude Agent SDK chat — Phase 1) ==========
+// Lance un run : renvoie { run_id }. Le flux arrive ensuite par WebSocket
+// (type "agent:event", filtré par run_id côté UI). body: { prompt, effort?, ... }.
+export const startAgentQuery = (slug, body) =>
+  api.post(`/apps/${slug}/agent/query`, body);
+export const cancelAgentRun = (slug, runId) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/cancel`);
+// Répond à une question interactive (AskUserQuestion). body: { request_id, answers?, response?, cancelled? }
+export const answerAgentRun = (slug, runId, body) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/answer`, body);
+// Version SDK installée vs dernière (npm) + bouton MAJ (501 en Phase 1).
+export const getSdkVersion = () => api.get('/agent/sdk/version');
+export const updateSdk = (version) => api.post('/agent/sdk/update', version ? { version } : {});
+
+// ========== Source (explorateur fichiers + git du working tree — Studio) ==========
+// Lit l'arbre de travail réel `…/{slug}/src` (≠ /git/repos qui sert les bare repos).
+export const getSourceTree = (slug, path = '') =>
+  api.get(`/apps/${slug}/source/tree`, { params: { path } });
+export const getSourceFile = (slug, path) =>
+  api.get(`/apps/${slug}/source/file`, { params: { path } });
+export const getSourceGitStatus = (slug) => api.get(`/apps/${slug}/source/git/status`);
+export const getSourceGitDiff = (slug, path) =>
+  api.get(`/apps/${slug}/source/git/diff`, { params: { path } });
+export const getSourceGitLog = (slug, limit = 50) =>
+  api.get(`/apps/${slug}/source/git/log`, { params: { limit } });
+export const getSourceGitShow = (slug, sha) =>
+  api.get(`/apps/${slug}/source/git/show`, { params: { sha } });

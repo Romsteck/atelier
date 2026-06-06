@@ -33,6 +33,9 @@ pub struct EventBus {
     pub app_build: broadcast::Sender<AppBuildEvent>,
     /// Per-app todos change events (todos manager → websocket for Studio right-panel)
     pub app_todos: broadcast::Sender<AppTodosEvent>,
+    /// Agent SDK run events (Node runner NDJSON → websocket for live chat stream).
+    /// Buffer larger than the others: token deltas can burst.
+    pub agent: broadcast::Sender<AgentEvent>,
 }
 
 impl EventBus {
@@ -53,6 +56,7 @@ impl EventBus {
             app_state: broadcast::channel(64).0,
             app_build: broadcast::channel(128).0,
             app_todos: broadcast::channel(64).0,
+            agent: broadcast::channel(2048).0,
         }
     }
 }
@@ -302,6 +306,21 @@ pub struct AppBuildEvent {
 pub struct AppTodosEvent {
     pub slug: String,
     pub todos: Vec<serde_json::Value>,
+}
+
+/// Live event from an agent run (the Node runner's NDJSON, normalized + tagged).
+/// `run_id` lets the frontend filter to the active conversation; `seq` orders
+/// events within a run. `kind` mirrors the runner's `t` field plus backend
+/// lifecycle markers (`started` / `done`). `data` carries the payload as-is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEvent {
+    pub run_id: String,
+    pub slug: String,
+    pub seq: u64,
+    /// "started" | "system" | "assistant_delta" | "thinking_delta" |
+    /// "tool_use" | "tool_result" | "result" | "error" | "done"
+    pub kind: String,
+    pub data: serde_json::Value,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod apps;
 pub mod apps_db;
 pub mod apps_proxy;
@@ -9,6 +10,7 @@ pub mod health;
 pub mod hooks;
 pub mod logs;
 pub mod mcp;
+pub mod source;
 pub mod surveillance;
 pub mod tasks;
 pub mod ws;

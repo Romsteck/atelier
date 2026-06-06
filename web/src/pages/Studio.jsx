@@ -8,10 +8,11 @@ import PreviewTab from '../components/PreviewTab';
 import SplitDivider from '../components/SplitDivider';
 import DocsTab from '../components/docs/DocsTab';
 import SurveillanceTab from '../components/SurveillanceTab';
+import AgentWorkspace from '../components/AgentWorkspace';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X,
-  Eye, EyeOff, ShieldAlert, Monitor, Columns2,
+  Eye, EyeOff, ShieldAlert, Monitor, Columns2, Bot,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
@@ -431,6 +432,10 @@ export default function Studio() {
   });
   const [dragging, setDragging] = useState(false);
   const [isNarrow, setIsNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < 900);
+  // Switch éditeur ⇄ agent : l'agent REMPLACE l'iframe code-server dans le même
+  // emplacement ("code slot"). En split, l'agent occupe le pane gauche → le
+  // preview/browser reste visible à droite. 'editor' | 'agent'.
+  const [codeView, setCodeView] = useState(() => localStorage.getItem('studio:codeView') || 'editor');
 
   // ── Fetch apps list ──
   const fetchApps = useCallback(async () => {
@@ -459,6 +464,7 @@ export default function Studio() {
   useEffect(() => { localStorage.setItem('studio:layoutMode', layoutMode); }, [layoutMode]);
   useEffect(() => { localStorage.setItem('studio:rightTab', rightTab); }, [rightTab]);
   useEffect(() => { localStorage.setItem('studio:splitRatio', String(leftPct)); }, [leftPct]);
+  useEffect(() => { localStorage.setItem('studio:codeView', codeView); }, [codeView]);
 
   // ── Détection écran étroit (désactive le split) ──
   useEffect(() => {
@@ -537,6 +543,20 @@ export default function Studio() {
 
   function handleSelectRightTab(tab) { setRightTab(tab); }
 
+  // Bascule éditeur ⇄ agent dans le "code slot". En mode tabs, l'agent vit sur
+  // l'onglet Code → on s'y place pour le rendre visible. Le code-server reste
+  // monté (caché) pour un retour instantané.
+  function toggleAgent() {
+    setCodeView(prev => {
+      const next = prev === 'agent' ? 'editor' : 'agent';
+      if (next === 'agent') {
+        if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
+        if (selectedSlug) setOpenedCode(p => p.has(selectedSlug) ? p : new Set(p).add(selectedSlug));
+      }
+      return next;
+    });
+  }
+
   const handleControl = useCallback(async (slugOrAction, actionOpt) => {
     const slug = actionOpt ? slugOrAction : selectedSlug;
     const action = actionOpt || slugOrAction;
@@ -596,6 +616,11 @@ export default function Studio() {
           <Icon className="w-5 h-5" />
         </button>
       ))}
+      <span className="w-px h-5 bg-gray-700 mx-0.5" />
+      <button onClick={toggleAgent} title={codeView === 'agent' ? 'Revenir à code-server' : 'Remplacer code-server par l’agent'}
+        className={`p-2 rounded-sm transition-colors ${codeView === 'agent' ? 'bg-gray-700 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
+        <Bot className="w-5 h-5" />
+      </button>
     </div>
   );
 
@@ -635,20 +660,35 @@ export default function Studio() {
           </div>
         )}
 
-        {/* Content */}
-        <div className="flex-1 overflow-hidden relative" ref={contentRef}>
-          {/* (A) Pool keep-alive code-server — jamais remonté ; géométrie variable selon le mode */}
+        {/* Zone de contenu — l'agent vit DANS le "code slot" (cf. (A')), pas en colonne séparée */}
+        <div className="flex-1 min-w-0 overflow-hidden relative" ref={contentRef}>
+          {/* (A) Pool keep-alive code-server — jamais remonté ; masqué (mais gardé
+               monté) quand le slot affiche l'agent (codeView==='agent') → retour instantané. */}
           {[...openedCode].map(slug => {
             const isSel = selectedSlug === slug;
-            const codeVisible = isSel && (
+            const slotActive = isSel && (
               (effectiveMode === 'tabs' && activeTab === 'code') || effectiveMode === 'split'
             );
+            const codeVisible = slotActive && codeView === 'editor';
             const vis = { visibility: codeVisible ? 'visible' : 'hidden', zIndex: codeVisible ? 1 : 0, pointerEvents: codeVisible ? 'auto' : 'none' };
             const style = effectiveMode === 'split' && isSel
               ? { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${leftPct}%`, ...vis }
               : { position: 'absolute', inset: 0, ...vis };
             return <div key={slug} style={style}><CodeTab slug={slug} /></div>;
           })}
+
+          {/* (A') Agent dans le "code slot" — REMPLACE l'iframe code-server quand le
+               switch (Bot) est sur agent. Plein écran (tabs + onglet Code) ou pane
+               gauche (split) → le preview/browser reste visible à droite. */}
+          {selectedSlug && codeView === 'agent' &&
+            ((effectiveMode === 'tabs' && activeTab === 'code') || effectiveMode === 'split') && (
+              <div
+                style={effectiveMode === 'split'
+                  ? { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${leftPct}%`, zIndex: 1 }
+                  : { position: 'absolute', inset: 0, zIndex: 1 }}>
+                <AgentWorkspace key={selectedSlug} slug={selectedSlug} />
+              </div>
+            )}
 
           {/* (B) Gallery (aucune app sélectionnée) */}
           {!selectedSlug && (
