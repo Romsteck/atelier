@@ -10,6 +10,7 @@ members = [
     "crates/atelier-api",
     "crates/atelier-logging",
     "crates/atelier-watcher",
+    "crates/atelier-backup",
     "crates/atelier-apps",
     "crates/atelier-common",
     "crates/atelier-ipc",
@@ -87,6 +88,7 @@ sqlx-postgres = { version = "0.9.0", default-features = false, features = ["chro
 atelier-api     = { path = "crates/atelier-api" }
 atelier-logging = { path = "crates/atelier-logging" }
 atelier-watcher = { path = "crates/atelier-watcher" }
+atelier-backup  = { path = "crates/atelier-backup" }
 
 [profile.release]
 lto = "thin"

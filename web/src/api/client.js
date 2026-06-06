@@ -174,11 +174,18 @@ export const getUpdateHistory = (limit = 50) => api.get('/updates/history', { pa
 export const getUpdateCount = () => api.get('/updates/count');
 export const upgradeAllHosts = () => api.post('/updates/upgrade-hosts', {}, { timeout: 1800000 });
 
-// ========== Backup ==========
+// ========== Backup (restic + rclone → Samba) ==========
 export const getBackupStatus = () => api.get('/backup/status');
-export const getBackupRepos = () => api.get('/backup/repos');
-export const getBackupJobs = () => api.get('/backup/jobs');
-export const triggerBackup = () => api.post('/backup/trigger');
+export const getBackupTarget = () => api.get('/backup/target');
+export const setBackupTarget = (body) => api.put('/backup/target', body);
+export const testBackupTarget = () => api.post('/backup/target/test');
+export const discoverShares = (body) => api.post('/backup/discover', body);
+export const revealResticPassword = () => api.get('/backup/repo/password');
+export const runBackup = () => api.post('/backup/run');
+export const cancelBackup = (id) => api.post(`/backup/run/${id}/cancel`);
+export const getBackupRuns = (limit = 50, offset = 0) =>
+  api.get('/backup/runs', { params: { limit, offset } });
+export const getBackupRunDetail = (id) => api.get(`/backup/runs/${id}`);
 
 // ========== Apps ==========
 export const listApps = () => api.get('/apps');

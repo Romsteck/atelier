@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 atelier-api = { workspace = true }
 atelier-logging = { workspace = true }
 atelier-watcher = { workspace = true }
+atelier-backup  = { workspace = true }
 atelier-common    = { workspace = true }
 atelier-docs      = { workspace = true }
 atelier-git       = { workspace = true }

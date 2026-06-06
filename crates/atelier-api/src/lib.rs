@@ -70,6 +70,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/logs", routes::logs::router())
         .nest("/findings", routes::surveillance::global_router())
         .nest("/apps", routes::surveillance::app_router())
+        .nest("/backup", routes::backup::router())
         .merge(routes::ws::router())
         .fallback(api_404)
 }

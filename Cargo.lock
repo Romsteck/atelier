@@ -89,6 +89,7 @@ dependencies = [
  "anyhow",
  "atelier-api",
  "atelier-apps",
+ "atelier-backup",
  "atelier-common",
  "atelier-dataverse",
  "atelier-docs",
@@ -110,6 +111,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atelier-apps",
+ "atelier-backup",
  "atelier-common",
  "atelier-dataverse",
  "atelier-docs",
@@ -147,6 +149,22 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-backup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sqlx-core",
+ "sqlx-postgres",
  "tokio",
  "tracing",
  "uuid",

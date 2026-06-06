@@ -27,6 +27,7 @@ atelier-dataverse = { workspace = true }
 atelier-apps      = { workspace = true }
 atelier-logging = { workspace = true }
 atelier-watcher = { workspace = true }
+atelier-backup  = { workspace = true }
 sqlx-core    = { workspace = true }
 sqlx-postgres = { workspace = true }
 reqwest      = { workspace = true }

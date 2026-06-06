@@ -35,9 +35,25 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut app_build_rx = state.events.app_build.subscribe();
     let mut surveillance_rx = state.surveillance.subscribe();
     let mut transcript_rx = state.surveillance.subscribe_transcript();
+    let mut backup_rx = state.backup.subscribe();
 
     loop {
         tokio::select! {
+            result = backup_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "backup:live", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "backup:live", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
             result = surveillance_rx.recv() => {
                 match result {
                     Ok(event) => {

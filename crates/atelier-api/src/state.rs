@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use atelier_backup::BackupService;
 use atelier_logging::LogIngestService;
 use atelier_watcher::SurveillanceService;
 use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
@@ -52,6 +53,10 @@ pub struct ApiState {
     /// this service is in noop mode (Postgres unreachable at boot).
     pub surveillance: SurveillanceService,
 
+    /// Service de sauvegarde (restic+rclone vers Samba). Endpoints sous
+    /// `/api/backup/*` ; renvoie 503 en mode noop (Postgres injoignable au boot).
+    pub backup: BackupService,
+
     /// Slugs whose `/apps/{slug}` path prefix must be PRESERVED (no-strip) when
     /// proxying to the app — required by Next.js apps whose `basePath`/`assetPrefix`
     /// expect the prefix on every request. SPA (Vite) / Axum apps want the prefix
@@ -78,6 +83,7 @@ impl ApiState {
         context_generator: Arc<ContextGenerator>,
         logs: LogIngestService,
         surveillance: SurveillanceService,
+        backup: BackupService,
     ) -> Self {
         Self {
             docs_dir,
@@ -96,6 +102,7 @@ impl ApiState {
             build_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             logs,
             surveillance,
+            backup,
             preserve_prefix_slugs: parse_preserve_prefix_slugs(),
         }
     }

@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use atelier_api::state::ApiState;
 use atelier_logging::{LogIngestConfig, LogIngestService, LoggingLayer};
+use atelier_backup::{BackupService, BackupServiceConfig, SourcePaths};
 use atelier_watcher::{SurveillanceConfig, SurveillanceService};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
@@ -66,6 +67,22 @@ async fn main() -> Result<()> {
         "atelier starting"
     );
 
+    // Chemins capturés par la sauvegarde (résolus avant que git_repos_dir ne soit
+    // déplacé dans le GitService). git_dir = parent de .../git/repos.
+    let backup_sources = SourcePaths {
+        git_dir: git_repos_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| git_repos_dir.clone()),
+        env_file: PathBuf::from(
+            std::env::var("ATELIER_BACKUP_ENV_FILE").unwrap_or_else(|_| "/opt/atelier/.env".to_string()),
+        ),
+        data_dir: apps_data_dir.clone(),
+        dv_secrets: apps_state_dir.join("dataverse-secrets.json"),
+        apps_runtime_root: apps_runtime_root.clone(),
+        docs_dir: docs_dir.clone(),
+    };
+
     let git = Arc::new(atelier_git::GitService::with_repos_dir(git_repos_dir));
     let dv = init_dv(&apps_state_dir).await;
     // Shared control-plane Postgres pool (atelier_meta). Backs the task store +
@@ -125,6 +142,10 @@ async fn main() -> Result<()> {
     // si pas de DSN.
     let surveillance = init_surveillance(&app_registry, &apps_src_root).await;
 
+    // Sauvegarde restic+rclone vers Samba. Noop si pas de DSN ; runs manuels
+    // (scheduler présent mais désactivé tant que schedule_enabled=false).
+    let backup = init_backup(backup_sources).await;
+
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
@@ -141,6 +162,7 @@ async fn main() -> Result<()> {
         context_generator,
         logs,
         surveillance,
+        backup,
     );
     info!(
         slugs = ?state.preserve_prefix_slugs,
@@ -241,6 +263,34 @@ async fn init_surveillance(
             timeout: Duration::from_secs(timeout_secs),
         },
         max_concurrent,
+    })
+    .await
+}
+
+/// Bootstrap du service de sauvegarde. Réutilise `ATELIER_DV_ADMIN_URL` pour
+/// CREATE DATABASE `atelier_meta` (si besoin) + migrations. Les binaires sont
+/// configurables (defaults restic/rclone/pg_dumpall). Noop si DSN absent.
+///
+///   - `ATELIER_RESTIC_BIN`      (default "restic")
+///   - `ATELIER_RCLONE_BIN`      (default "rclone")
+///   - `ATELIER_PG_DUMPALL_BIN`  (default "pg_dumpall")
+///   - `ATELIER_BACKUP_PG_USER`  (default "postgres")
+async fn init_backup(sources: SourcePaths) -> BackupService {
+    let admin_dsn = std::env::var("ATELIER_DV_ADMIN_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if admin_dsn.is_none() {
+        warn!("ATELIER_DV_ADMIN_URL absent — backup in noop mode");
+    }
+    BackupService::start(BackupServiceConfig {
+        admin_dsn,
+        db_name: None,
+        sources,
+        restic_bin: std::env::var("ATELIER_RESTIC_BIN").unwrap_or_else(|_| "restic".to_string()),
+        rclone_bin: std::env::var("ATELIER_RCLONE_BIN").unwrap_or_else(|_| "rclone".to_string()),
+        pg_dumpall_bin: std::env::var("ATELIER_PG_DUMPALL_BIN")
+            .unwrap_or_else(|_| "pg_dumpall".to_string()),
+        pg_run_user: std::env::var("ATELIER_BACKUP_PG_USER").unwrap_or_else(|_| "postgres".to_string()),
     })
     .await
 }
