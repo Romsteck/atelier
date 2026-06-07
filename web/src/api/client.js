@@ -253,16 +253,33 @@ export const listSurveillanceRuns = (slug, params = {}) =>
 export const getScan = (slug) =>
   api.get(`/apps/${slug}/surveillance/scan`);
 
-// ========== Agent (Claude Agent SDK chat — Phase 1) ==========
-// Lance un run : renvoie { run_id }. Le flux arrive ensuite par WebSocket
-// (type "agent:event", filtré par run_id côté UI). body: { prompt, effort?, ... }.
+// ========== Agent (Claude Agent SDK chat — session streaming) ==========
+// Démarre une SESSION (1er tour) : renvoie { run_id }. Le flux arrive ensuite par
+// WebSocket (type "agent:event", filtré par run_id côté UI). body: { prompt, effort?, ... }.
 export const startAgentQuery = (slug, body) =>
   api.post(`/apps/${slug}/agent/query`, body);
+// Tour utilisateur suivant dans la MÊME session (mémoire conservée). body: { text }.
+export const sendAgentMessage = (slug, runId, body) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/message`, body);
 export const cancelAgentRun = (slug, runId) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/cancel`);
-// Répond à une question interactive (AskUserQuestion). body: { request_id, answers?, response?, cancelled? }
+// Répond à une question interactive (AskUserQuestion) = tour suivant. body: { request_id, answers?, response?, cancelled? }
 export const answerAgentRun = (slug, runId, body) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/answer`, body);
+// Reprend une conversation FERMÉE (session sur disque) : nouveau process, même
+// session_id, mémoire complète. = startAgentQuery avec body.resume = session_id.
+export const resumeAgentQuery = (slug, sid, body) =>
+  api.post(`/apps/${slug}/agent/query`, { ...body, resume: sid });
+// Conversations = sessions SDK persistées. La clé stable est le session_id.
+export const listConversations = (slug) =>
+  api.get(`/apps/${slug}/agent/conversations`);
+// Snapshot d'une conversation : { items, live, run_id }. items = transcript normalisé.
+export const getConversation = (slug, sid) =>
+  api.get(`/apps/${slug}/agent/conversations/${sid}`);
+export const renameConversation = (slug, sid, title) =>
+  api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
+export const deleteConversation = (slug, sid) =>
+  api.delete(`/apps/${slug}/agent/conversations/${sid}`);
 // Version SDK installée vs dernière (npm) + bouton MAJ (501 en Phase 1).
 export const getSdkVersion = () => api.get('/agent/sdk/version');
 export const updateSdk = (version) => api.post('/agent/sdk/update', version ? { version } : {});

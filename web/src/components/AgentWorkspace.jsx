@@ -1,17 +1,21 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { FolderTree, GitBranch } from 'lucide-react';
-import AgentPanel from './AgentPanel';
+import { FolderTree, GitBranch, MessagesSquare } from 'lucide-react';
 import FilesTab from './FilesTab';
 import GitTab from './GitTab';
+import ConversationsSplit from './agent/ConversationsSplit';
+import ConversationsHistoryPanel from './agent/ConversationsHistoryPanel';
+import { AgentConversationsProvider } from '../context/AgentConversationsContext';
 
 // « Notre code-server » en disposition VS Code :
-//   [barre d'activité] [sidebar repliable/redimensionnable : Explorateur ou Git] [chat au centre]
-// Le chat (AgentPanel) reste TOUJOURS monté au centre (conversation + WebSocket
-// préservés) ; la sidebar montre l'explorateur OU le contrôle de source (working
-// tree local), togglés depuis la barre d'activité.
+//   [barre d'activité] [sidebar repliable : Explorateur / Git / Conversations] [split au centre]
+// Le centre rend plusieurs conversations côte à côte (ConversationsSplit). La sidebar
+// montre l'explorateur, le contrôle de source (working tree local) OU l'historique des
+// conversations, togglés depuis la barre d'activité. Tout l'état des conversations vit
+// dans AgentConversationsProvider (un seul WebSocket), monté une fois par slug.
 const PANELS = [
   { id: 'files', label: 'Explorateur', Icon: FolderTree },
   { id: 'git', label: 'Contrôle de source (local)', Icon: GitBranch },
+  { id: 'history', label: 'Conversations', Icon: MessagesSquare },
 ];
 
 export default function AgentWorkspace({ slug }) {
@@ -52,50 +56,57 @@ export default function AgentWorkspace({ slug }) {
   }, [dragging]);
 
   return (
-    <div ref={rootRef} className="flex h-full min-h-0 bg-gray-900 relative">
-      {/* Barre d'activité */}
-      <div className="w-11 shrink-0 border-r border-gray-800 flex flex-col items-center py-2 gap-1">
-        {PANELS.map(({ id, label, Icon }) => (
-          <button key={id} onClick={() => toggle(id)} title={label}
-            className={`relative w-9 h-9 flex items-center justify-center rounded-md transition-colors ${
-              panel === id ? 'text-blue-400 bg-gray-700/60' : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800'
-            }`}>
-            {panel === id && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-blue-400" />}
-            <Icon className="w-5 h-5" />
-          </button>
-        ))}
-      </div>
-
-      {/* Sidebar — panneaux montés gardés montés (état préservé), un seul visible */}
-      {panel && (
-        <div className="shrink-0 min-h-0 border-r border-gray-800" style={{ width }}>
-          {opened.has('files') && (
-            <div className={panel === 'files' ? 'h-full' : 'hidden'}>
-              <FilesTab slug={slug} active={panel === 'files'} />
-            </div>
-          )}
-          {opened.has('git') && (
-            <div className={panel === 'git' ? 'h-full' : 'hidden'}>
-              <GitTab slug={slug} active={panel === 'git'} />
-            </div>
-          )}
+    <AgentConversationsProvider slug={slug}>
+      <div ref={rootRef} className="flex h-full min-h-0 bg-gray-900 relative">
+        {/* Barre d'activité */}
+        <div className="w-11 shrink-0 border-r border-gray-800 flex flex-col items-center py-2 gap-1">
+          {PANELS.map(({ id, label, Icon }) => (
+            <button key={id} onClick={() => toggle(id)} title={label}
+              className={`relative w-9 h-9 flex items-center justify-center rounded-md transition-colors ${
+                panel === id ? 'text-blue-400 bg-gray-700/60' : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800'
+              }`}>
+              {panel === id && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-blue-400" />}
+              <Icon className="w-5 h-5" />
+            </button>
+          ))}
         </div>
-      )}
 
-      {/* Poignée de redimensionnement */}
-      {panel && (
-        <div
-          onPointerDown={(e) => { e.preventDefault(); setDragging(true); }}
-          title="Redimensionner"
-          className="w-1 shrink-0 cursor-col-resize bg-gray-800 hover:bg-blue-500/60" />
-      )}
+        {/* Sidebar — panneaux montés gardés montés (état préservé), un seul visible */}
+        {panel && (
+          <div className="shrink-0 min-h-0 border-r border-gray-800" style={{ width }}>
+            {opened.has('files') && (
+              <div className={panel === 'files' ? 'h-full' : 'hidden'}>
+                <FilesTab slug={slug} active={panel === 'files'} />
+              </div>
+            )}
+            {opened.has('git') && (
+              <div className={panel === 'git' ? 'h-full' : 'hidden'}>
+                <GitTab slug={slug} active={panel === 'git'} />
+              </div>
+            )}
+            {opened.has('history') && (
+              <div className={panel === 'history' ? 'h-full' : 'hidden'}>
+                <ConversationsHistoryPanel active={panel === 'history'} />
+              </div>
+            )}
+          </div>
+        )}
 
-      {/* Chat — toujours au centre, jamais démonté */}
-      <div className="flex-1 min-w-0 h-full">
-        <AgentPanel slug={slug} />
+        {/* Poignée de redimensionnement */}
+        {panel && (
+          <div
+            onPointerDown={(e) => { e.preventDefault(); setDragging(true); }}
+            title="Redimensionner"
+            className="w-1 shrink-0 cursor-col-resize bg-gray-800 hover:bg-blue-500/60" />
+        )}
+
+        {/* Conversations — split à panneaux égaux (défaut), repli onglets si étroit */}
+        <div className="flex-1 min-w-0 h-full">
+          <ConversationsSplit />
+        </div>
+
+        {dragging && <div className="fixed inset-0 z-50 cursor-col-resize" />}
       </div>
-
-      {dragging && <div className="fixed inset-0 z-50 cursor-col-resize" />}
-    </div>
+    </AgentConversationsProvider>
   );
 }

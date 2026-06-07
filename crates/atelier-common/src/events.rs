@@ -309,16 +309,25 @@ pub struct AppTodosEvent {
 }
 
 /// Live event from an agent run (the Node runner's NDJSON, normalized + tagged).
-/// `run_id` lets the frontend filter to the active conversation; `seq` orders
-/// events within a run. `kind` mirrors the runner's `t` field plus backend
-/// lifecycle markers (`started` / `done`). `data` carries the payload as-is.
+/// `run_id` identifies the live process; `session_id` (once the SDK reports it via
+/// the runner's first `system` line) is the STABLE conversation key the frontend
+/// routes by — a conversation keeps its `session_id` across resumes while `run_id`
+/// changes per process. `seq` orders events across the whole session. `kind`
+/// mirrors the runner's `t` field plus backend lifecycle markers (`started`/`done`).
+/// `data` carries the payload as-is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEvent {
     pub run_id: String,
+    /// SDK session id — `None` on the early `started` event (before the runner's
+    /// first `system` line), `Some` thereafter. Frontend routes by `session_id`
+    /// and falls back to `run_id` for that early window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub slug: String,
     pub seq: u64,
     /// "started" | "system" | "assistant_delta" | "thinking_delta" |
-    /// "tool_use" | "tool_result" | "result" | "error" | "done"
+    /// "tool_use" | "tool_result" | "question" | "result" | "turn_done" |
+    /// "error" | "done"
     pub kind: String,
     pub data: serde_json::Value,
 }

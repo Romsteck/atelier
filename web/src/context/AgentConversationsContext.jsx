@@ -1,0 +1,356 @@
+import { createContext, useContext, useReducer, useRef, useEffect, useState, useCallback } from 'react';
+import useWebSocket from '../hooks/useWebSocket';
+import { appendEvent } from '../lib/agentEvents';
+import {
+  startAgentQuery,
+  resumeAgentQuery,
+  sendAgentMessage,
+  cancelAgentRun,
+  answerAgentRun,
+  listConversations,
+  getConversation,
+  renameConversation,
+  deleteConversation,
+} from '../api/client';
+
+// Provider multi-conversations du mode agent. UNE source d'état + UN seul WebSocket
+// (routé par session_id, repli run_id) pour tous les panneaux. Une conversation =
+// une session SDK (clé stable `sid`), persistée sur disque par le SDK ; le provider
+// n'orchestre que l'ouverture/fermeture, l'envoi de tours et le rebranchement live.
+const Ctx = createContext(null);
+export const useAgentConversations = () => useContext(Ctx);
+
+let _kc = 0;
+const newKey = () => `c${Date.now().toString(36)}_${_kc++}`;
+const openSidsKey = (slug) => `agent:openSids:${slug}`;
+
+function loadOpenSids(slug) {
+  try {
+    const v = JSON.parse(localStorage.getItem(openSidsKey(slug)));
+    return Array.isArray(v) ? v.filter((s) => typeof s === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+// Réponse AskUserQuestion d'une conversation FERMÉE → tour en clair (miroir de
+// `answerToTurn` côté runner) injecté via resume.
+function formatAnswer(payload) {
+  if (payload.cancelled) {
+    return "J'ai choisi de ne pas répondre à ta question. Continue avec ton meilleur jugement.";
+  }
+  const lines = Object.entries(payload.answers || {}).map(([q, a]) => `- ${q} → ${a}`);
+  let t = lines.length ? `Voici mes réponses à tes questions :\n${lines.join('\n')}` : 'Voici ma réponse.';
+  if (payload.response && payload.response.trim()) t += `\n\n${payload.response.trim()}`;
+  return t;
+}
+
+const emptyConvo = (key, sid) => ({
+  key,
+  sid: sid || null,
+  title: null,
+  items: [],
+  running: false,
+  runId: null,
+  answered: new Set(),
+  live: false,
+  loading: false,
+  error: null,
+  activeModel: null,
+});
+
+function reducer(state, a) {
+  switch (a.type) {
+    case 'RESTORE': {
+      const convos = {};
+      const order = [];
+      for (const sid of a.sids) {
+        const c = emptyConvo(sid, sid);
+        c.loading = true;
+        convos[sid] = c;
+        order.push(sid);
+      }
+      return { order, convos };
+    }
+    case 'NEW_PANEL': {
+      return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: emptyConvo(a.key, null) } };
+    }
+    case 'OPEN_PANEL': {
+      if (state.convos[a.key]) return state;
+      const c = emptyConvo(a.key, a.sid);
+      c.loading = true;
+      return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c } };
+    }
+    case 'CLOSE_PANEL': {
+      if (!state.convos[a.key]) return state;
+      const convos = { ...state.convos };
+      delete convos[a.key];
+      return { order: state.order.filter((k) => k !== a.key), convos };
+    }
+    case 'SNAPSHOT_OK': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      const items = a.items || [];
+      const answered = new Set(items.filter((it) => it.type === 'question' && it.answered).map((it) => it.request_id));
+      return {
+        ...state,
+        convos: {
+          ...state.convos,
+          [a.key]: { ...c, items, live: a.live, runId: a.runId || null, answered, running: false, loading: false, error: null },
+        },
+      };
+    }
+    case 'SNAPSHOT_ERR': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, loading: false, error: a.error } } };
+    }
+    case 'OPTIMISTIC_USER': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return {
+        ...state,
+        convos: { ...state.convos, [a.key]: { ...c, items: [...c.items, { type: 'user', text: a.text }], running: true, error: null } },
+      };
+    }
+    case 'SET_RUN': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, runId: a.runId } } };
+    }
+    case 'SET_STOPPED': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, running: false } } };
+    }
+    case 'SET_ANSWERED': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      const answered = new Set(c.answered);
+      answered.add(a.request_id);
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, answered, running: true } } };
+    }
+    case 'SET_ERROR': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, error: a.error, running: false } } };
+    }
+    case 'SET_TITLE': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, title: a.title } } };
+    }
+    case 'WS': {
+      const ev = a.ev;
+      const key = state.order.find((k) => {
+        const c = state.convos[k];
+        return c && ((c.runId && c.runId === ev.run_id) || (c.sid && ev.session_id && c.sid === ev.session_id));
+      });
+      if (!key) return state;
+      const c = state.convos[key];
+      let nc = c;
+      switch (ev.kind) {
+        case 'started':
+          nc = { ...c, running: true };
+          break;
+        case 'turn_done':
+          nc = { ...c, running: false };
+          break;
+        case 'done':
+          nc = { ...c, running: false, live: false, runId: null };
+          break;
+        case 'result':
+          nc = { ...c, items: appendEvent(c.items, ev), running: false };
+          break;
+        case 'system':
+          nc = { ...c, live: true };
+          if (ev.session_id && !c.sid) nc.sid = ev.session_id;
+          if (ev.data?.model) nc.activeModel = ev.data.model;
+          break;
+        case 'question':
+          nc = {
+            ...c,
+            items: [...c.items, { type: 'question', request_id: ev.data?.request_id, questions: ev.data?.questions || [] }],
+          };
+          break;
+        default:
+          nc = { ...c, items: appendEvent(c.items, ev) };
+      }
+      return { ...state, convos: { ...state.convos, [key]: nc } };
+    }
+    default:
+      return state;
+  }
+}
+
+export function AgentConversationsProvider({ slug, children }) {
+  const [state, dispatch] = useReducer(reducer, { order: [], convos: {} });
+  const [allConvos, setAllConvos] = useState([]);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  // UN seul WebSocket pour tout le workspace ; le reducer route par session_id/run_id.
+  useWebSocket({ 'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); } });
+
+  // Restauration au montage (par slug) : recharge les conversations ouvertes.
+  useEffect(() => {
+    const sids = loadOpenSids(slug);
+    if (!sids.length) return;
+    dispatch({ type: 'RESTORE', sids });
+    for (const sid of sids) {
+      getConversation(slug, sid)
+        .then((r) =>
+          dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null }),
+        )
+        .catch((e) => {
+          if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
+          else dispatch({ type: 'SNAPSHOT_ERR', key: sid, error: e.message });
+        });
+    }
+  }, [slug]);
+
+  // Persiste l'ensemble des sids ouverts — uniquement quand il change (pas à chaque delta).
+  const openSidsStr = state.order.map((k) => state.convos[k]?.sid).filter(Boolean).join(',');
+  useEffect(() => {
+    localStorage.setItem(openSidsKey(slug), JSON.stringify(openSidsStr ? openSidsStr.split(',') : []));
+  }, [openSidsStr, slug]);
+
+  const refreshAll = useCallback(() => {
+    listConversations(slug)
+      .then((r) => setAllConvos(r.data?.conversations || []))
+      .catch(() => {});
+  }, [slug]);
+
+  const newConversation = useCallback(() => {
+    dispatch({ type: 'NEW_PANEL', key: newKey() });
+  }, []);
+
+  const openConversation = useCallback(
+    (sid) => {
+      const st = stateRef.current;
+      if (st.order.some((k) => st.convos[k]?.sid === sid)) return; // déjà ouverte
+      const key = sid;
+      dispatch({ type: 'OPEN_PANEL', key, sid });
+      getConversation(slug, sid)
+        .then((r) =>
+          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null }),
+        )
+        .catch((e) => dispatch({ type: 'SNAPSHOT_ERR', key, error: e.message }));
+    },
+    [slug],
+  );
+
+  const closeConversation = useCallback((key) => {
+    // Ferme le panneau SANS couper le run : la conversation continue côté serveur si
+    // elle est vivante, et reste sur disque sinon. Ré-ouvrable depuis l'historique.
+    dispatch({ type: 'CLOSE_PANEL', key });
+  }, []);
+
+  const sendMessage = useCallback(
+    async (key, text, settings = {}) => {
+      const c = stateRef.current.convos[key];
+      if (!c) return;
+      const t = (text || '').trim();
+      if (!t || c.running) return;
+      dispatch({ type: 'OPTIMISTIC_USER', key, text: t });
+      try {
+        let runId = c.runId;
+        if (c.runId) {
+          await sendAgentMessage(slug, c.runId, { text: t }); // tour suivant, session vivante
+        } else if (c.sid) {
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings }); // reprise
+          runId = r.data?.run_id;
+        } else {
+          const r = await startAgentQuery(slug, { prompt: t, ...settings }); // session neuve
+          runId = r.data?.run_id;
+        }
+        if (runId && runId !== c.runId) dispatch({ type: 'SET_RUN', key, runId });
+      } catch (e) {
+        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+      }
+    },
+    [slug],
+  );
+
+  const answer = useCallback(
+    async (key, request_id, payload) => {
+      const c = stateRef.current.convos[key];
+      if (!c) return;
+      dispatch({ type: 'SET_ANSWERED', key, request_id });
+      try {
+        if (c.runId) {
+          await answerAgentRun(slug, c.runId, { request_id, ...payload });
+        } else if (c.sid) {
+          // Conversation fermée : la réponse relance la session via resume.
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: formatAnswer(payload) });
+          if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
+        }
+      } catch (e) {
+        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+      }
+    },
+    [slug],
+  );
+
+  const cancel = useCallback(
+    async (key) => {
+      const c = stateRef.current.convos[key];
+      if (!c?.runId) return;
+      dispatch({ type: 'SET_STOPPED', key });
+      try {
+        await cancelAgentRun(slug, c.runId);
+      } catch {
+        /* déjà terminé */
+      }
+    },
+    [slug],
+  );
+
+  const renameBySid = useCallback(
+    async (sid, title) => {
+      const st = stateRef.current;
+      const key = st.order.find((k) => st.convos[k]?.sid === sid);
+      if (key) dispatch({ type: 'SET_TITLE', key, title });
+      setAllConvos((prev) => prev.map((x) => (x.sessionId === sid ? { ...x, customTitle: title, summary: title } : x)));
+      try {
+        await renameConversation(slug, sid, title);
+      } catch {
+        /* ignore */
+      }
+    },
+    [slug],
+  );
+
+  const removeBySid = useCallback(
+    async (sid) => {
+      const st = stateRef.current;
+      const key = st.order.find((k) => st.convos[k]?.sid === sid);
+      if (key) dispatch({ type: 'CLOSE_PANEL', key });
+      setAllConvos((prev) => prev.filter((x) => x.sessionId !== sid));
+      try {
+        await deleteConversation(slug, sid);
+      } catch {
+        /* ignore */
+      }
+    },
+    [slug],
+  );
+
+  const value = {
+    slug,
+    order: state.order,
+    convos: state.convos,
+    allConvos,
+    refreshAll,
+    newConversation,
+    openConversation,
+    closeConversation,
+    sendMessage,
+    answer,
+    cancel,
+    renameBySid,
+    removeBySid,
+  };
+
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}

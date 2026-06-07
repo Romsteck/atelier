@@ -20,7 +20,13 @@ SyslogIdentifier=atelier
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/run /var/lib/atelier /opt/atelier/data /tmp
+# /var/lib/hr-studio : home de l'utilisateur hr-studio, où l'agent runner (lancé en
+# hr-studio via sudo) fait persister les sessions du Claude Agent SDK
+# (CLAUDE_CONFIG_DIR=/var/lib/hr-studio/.claude). ProtectSystem=strict rend tout le FS
+# read-only hors ReadWritePaths, et le namespace mount est hérité par les descendants
+# (sudo→node→claude) : sans cette entrée, la CLI échoue SILENCIEUSEMENT à écrire le
+# transcript (EROFS) → pas de reprise/historique de conversation. Cf. multi-conversations.
+ReadWritePaths=/run /var/lib/atelier /var/lib/hr-studio /opt/atelier/data /tmp
 ProtectHome=false
 
 [Install]
