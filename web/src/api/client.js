@@ -263,9 +263,22 @@ export const sendAgentMessage = (slug, runId, body) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/message`, body);
 export const cancelAgentRun = (slug, runId) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/cancel`);
-// Répond à une question interactive (AskUserQuestion) = tour suivant. body: { request_id, answers?, response?, cancelled? }
+// Interrompt le TOUR courant (Stop) sans fermer la session : abort côté SDK, la
+// conversation reste vivante pour le tour suivant. (≠ cancel qui termine la session.)
+export const interruptAgentRun = (slug, runId) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/interrupt`);
+// Répond à une question interactive (AskUserQuestion). body: { request_id, answers?, response?, cancelled? }
 export const answerAgentRun = (slug, runId, body) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/answer`, body);
+// Décision sur un plan proposé (ExitPlanMode). body: { request_id, approved, feedback? }
+export const planDecisionAgentRun = (slug, runId, body) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/plan_decision`, body);
+// Change le mode EN COURS de session (setPermissionMode). body: { mode: 'plan'|'bypass' }
+export const setAgentMode = (slug, runId, mode) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/set_mode`, { mode });
+// Change le modèle EN COURS de session (setModel). model null → défaut abonnement.
+export const setAgentModel = (slug, runId, model) =>
+  api.post(`/apps/${slug}/agent/runs/${runId}/set_model`, { model });
 // Reprend une conversation FERMÉE (session sur disque) : nouveau process, même
 // session_id, mémoire complète. = startAgentQuery avec body.resume = session_id.
 export const resumeAgentQuery = (slug, sid, body) =>

@@ -42,6 +42,9 @@ struct RunState {
     cancel_tx: Option<oneshot::Sender<()>>,
     input_tx: mpsc::UnboundedSender<String>,
     items: Vec<Value>,
+    /// Mode courant côté UI ('plan' | 'bypass'). Mis à jour par les events `permission_mode`
+    /// (approbation de plan, /set_mode) → exposé dans le snapshot pour survivre au reload.
+    mode: String,
 }
 
 static RUNS: LazyLock<Mutex<HashMap<String, RunState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -85,6 +88,11 @@ fn fold_item(items: &mut Vec<Value>, kind: &str, data: &Value) {
             "request_id": data.get("request_id").cloned(),
             "questions": data.get("questions").cloned().unwrap_or_else(|| json!([])),
         })),
+        "plan_review" => items.push(json!({
+            "type": "plan_review",
+            "request_id": data.get("request_id").cloned(),
+            "plan": data.get("plan").and_then(|x| x.as_str()).unwrap_or(""),
+        })),
         "error" => items.push(json!({ "type": "error", "message": data.get("message").and_then(|x| x.as_str()).unwrap_or("erreur") })),
         _ => {}
     }
@@ -93,6 +101,13 @@ fn fold_item(items: &mut Vec<Value>, kind: &str, data: &Value) {
 /// Replie l'event dans le buffer du run (si encore présent au registre).
 fn fold_into_run(run_id: &str, kind: &str, data: &Value) {
     if let Some(r) = RUNS.lock().unwrap().get_mut(run_id) {
+        // `permission_mode` n'est pas un item de transcript : il met à jour le mode courant
+        // (exposé dans le snapshot pour survivre au reload), pas le fil.
+        if kind == "permission_mode" {
+            if let Some(m) = data.get("mode").and_then(|x| x.as_str()) {
+                r.mode = m.to_string();
+            }
+        }
         fold_item(&mut r.items, kind, data);
     }
 }
@@ -107,7 +122,11 @@ pub fn app_router() -> Router<ApiState> {
         .route("/{slug}/agent/query", post(query))
         .route("/{slug}/agent/runs/{run_id}/message", post(message))
         .route("/{slug}/agent/runs/{run_id}/cancel", post(cancel))
+        .route("/{slug}/agent/runs/{run_id}/interrupt", post(interrupt))
         .route("/{slug}/agent/runs/{run_id}/answer", post(answer))
+        .route("/{slug}/agent/runs/{run_id}/plan_decision", post(plan_decision))
+        .route("/{slug}/agent/runs/{run_id}/set_mode", post(set_mode))
+        .route("/{slug}/agent/runs/{run_id}/set_model", post(set_model))
         // Conversations = sessions SDK persistées (CLAUDE_CONFIG_DIR), exposées via
         // le runner en mode introspection. La clé est le `session_id` SDK.
         .route("/{slug}/agent/conversations", get(list_conversations))
@@ -278,13 +297,17 @@ async fn query(
     }
     items.push(user_item(&body.prompt));
 
+    // Mode initial côté UI ('plan' | 'bypass'), dérivé du permissionMode SDK demandé.
+    let permission_mode = body.permission_mode.clone().unwrap_or_else(|| "plan".into());
+    let ui_mode = if permission_mode == "bypassPermissions" { "bypass" } else { "plan" };
+
     // L'init est consommé par runner.js (clés camelCase). Le token MCP passe ICI,
     // par stdin (pipe) — que ni Atelier ni sudo ne journalisent. (Le passer en
     // env via sudo --preserve-env le ferait apparaître en clair dans journald.)
     let init = json!({
         "prompt": body.prompt,
         "effort": body.effort, // None → null → runner omet (Haiku ne supporte pas effort)
-        "permissionMode": body.permission_mode.unwrap_or_else(|| "plan".into()),
+        "permissionMode": permission_mode,
         "allowedTools": allowed_tools,
         "cwd": cwd.to_string_lossy(),
         "mcpEndpoint": format!("{}?project={}", mcp_endpoint_base(), slug),
@@ -297,7 +320,14 @@ async fn query(
     let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
     RUNS.lock().unwrap().insert(
         run_id.clone(),
-        RunState { slug: slug.clone(), session_id: None, cancel_tx: Some(cancel_tx), input_tx, items },
+        RunState {
+            slug: slug.clone(),
+            session_id: None,
+            cancel_tx: Some(cancel_tx),
+            input_tx,
+            items,
+            mode: ui_mode.to_string(),
+        },
     );
 
     info!(run_id = %run_id, "agent run started");
@@ -331,6 +361,24 @@ async fn cancel(
         (StatusCode::OK, Json(json!({"cancelled": true}))).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "run inconnu ou déjà terminé")
+    }
+}
+
+/// `POST /runs/{run_id}/interrupt` — interrompt le TOUR courant (bouton Stop) sans fermer
+/// la session : le runner appelle `query.interrupt()` (abort du tour ; la session survit
+/// et accepte le tour suivant). À distinguer de `cancel` (EOF → fin de session).
+#[instrument(skip(state), fields(slug = %slug, run_id = %run_id))]
+async fn interrupt(
+    State(state): State<ApiState>,
+    Path((slug, run_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let _ = (&state, &slug);
+    let line = json!({ "type": "interrupt" }).to_string();
+    if send_input(&run_id, line) {
+        info!(run_id = %run_id, "agent turn interrupt requested");
+        (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "run inconnu ou terminé")
     }
 }
 
@@ -393,18 +441,128 @@ async fn answer(
     })
     .to_string();
     if send_input(&run_id, line) {
-        // Marque la question correspondante comme répondue dans le buffer (reload).
+        // Marque la question comme répondue + stocke le texte de la réponse dans le buffer
+        // (pour un reload pendant que la session vit : la réponse vraie est livrée hors-bande).
+        let answer_text = if body.cancelled {
+            "(non répondu)".to_string()
+        } else {
+            let mut parts: Vec<String> =
+                body.answers.iter().map(|(q, a)| format!("- {q} → {a}")).collect();
+            if let Some(resp) = body.response.as_ref().filter(|s| !s.trim().is_empty()) {
+                parts.push(resp.trim().to_string());
+            }
+            parts.join("\n")
+        };
         if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
             for it in r.items.iter_mut().rev() {
                 if it.get("type").and_then(|x| x.as_str()) == Some("question")
                     && it.get("request_id").and_then(|x| x.as_str()) == Some(body.request_id.as_str())
                 {
                     it["answered"] = json!(true);
+                    it["answer"] = json!(answer_text);
                     break;
                 }
             }
         }
         info!(run_id = %run_id, "agent question answered");
+        (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "run inconnu ou terminé")
+    }
+}
+
+/// Décision sur un plan proposé (ExitPlanMode). Sérialise `{type:"plan_decision",...}` que
+/// le runner relaie à `canUseTool` : `approved=true` → le SDK enchaîne sur l'implémentation
+/// (session basculée en édition) ; sinon le modèle ré-affine le plan en lecture seule.
+#[derive(Deserialize)]
+struct PlanDecisionBody {
+    request_id: String,
+    #[serde(default)]
+    approved: bool,
+    #[serde(default)]
+    feedback: Option<String>,
+}
+
+#[instrument(skip(state, body), fields(slug = %slug, run_id = %run_id, approved = body.approved))]
+async fn plan_decision(
+    State(state): State<ApiState>,
+    Path((slug, run_id)): Path<(String, String)>,
+    Json(body): Json<PlanDecisionBody>,
+) -> impl IntoResponse {
+    let _ = (&state, &slug);
+    let line = json!({
+        "type": "plan_decision",
+        "request_id": body.request_id,
+        "approved": body.approved,
+        "feedback": body.feedback,
+    })
+    .to_string();
+    if send_input(&run_id, line) {
+        // Marque le plan_review décidé dans le buffer (reload).
+        if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+            for it in r.items.iter_mut().rev() {
+                if it.get("type").and_then(|x| x.as_str()) == Some("plan_review")
+                    && it.get("request_id").and_then(|x| x.as_str()) == Some(body.request_id.as_str())
+                {
+                    it["decided"] = json!(true);
+                    it["approved"] = json!(body.approved);
+                    break;
+                }
+            }
+        }
+        info!(run_id = %run_id, "agent plan decision sent");
+        (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "run inconnu ou terminé")
+    }
+}
+
+/// Change le mode EN COURS de session (setPermissionMode côté SDK) : 'plan' (lecture seule)
+/// ↔ 'bypass' (édition). Évite d'avoir à couper/relancer pour passer en implémentation.
+#[derive(Deserialize)]
+struct SetModeBody {
+    mode: String,
+}
+
+#[instrument(skip(state, body), fields(slug = %slug, run_id = %run_id, mode = %body.mode))]
+async fn set_mode(
+    State(state): State<ApiState>,
+    Path((slug, run_id)): Path<(String, String)>,
+    Json(body): Json<SetModeBody>,
+) -> impl IntoResponse {
+    let _ = (&state, &slug);
+    if body.mode != "plan" && body.mode != "bypass" {
+        return err(StatusCode::BAD_REQUEST, "mode invalide (plan|bypass)");
+    }
+    let line = json!({ "type": "set_mode", "mode": body.mode }).to_string();
+    if send_input(&run_id, line) {
+        if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+            r.mode = body.mode.clone();
+        }
+        info!(run_id = %run_id, "agent mode changed");
+        (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "run inconnu ou terminé")
+    }
+}
+
+/// Change le modèle EN COURS de session (setModel côté SDK). `model` null → défaut abonnement.
+#[derive(Deserialize)]
+struct SetModelBody {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[instrument(skip(state, body), fields(slug = %slug, run_id = %run_id))]
+async fn set_model(
+    State(state): State<ApiState>,
+    Path((slug, run_id)): Path<(String, String)>,
+    Json(body): Json<SetModelBody>,
+) -> impl IntoResponse {
+    let _ = (&state, &slug);
+    let line = json!({ "type": "set_model", "model": body.model }).to_string();
+    if send_input(&run_id, line) {
+        info!(run_id = %run_id, "agent model changed");
         (StatusCode::OK, Json(json!({"ok": true}))).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "run inconnu ou terminé")
@@ -524,8 +682,9 @@ async fn get_conversation(
     // Session vivante → fil servi depuis le buffer mémoire (pas encore sur disque).
     let rid = SID_RUN.lock().unwrap().get(&sid).cloned();
     if let Some(rid) = rid {
-        if let Some(items) = RUNS.lock().unwrap().get(&rid).map(|r| r.items.clone()) {
-            return Json(json!({ "items": items, "live": true, "run_id": rid })).into_response();
+        let snap = RUNS.lock().unwrap().get(&rid).map(|r| (r.items.clone(), r.mode.clone()));
+        if let Some((items, mode)) = snap {
+            return Json(json!({ "items": items, "live": true, "run_id": rid, "mode": mode })).into_response();
         }
     }
     // Sinon → transcript persisté sur disque.

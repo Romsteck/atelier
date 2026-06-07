@@ -5,8 +5,11 @@ import {
   startAgentQuery,
   resumeAgentQuery,
   sendAgentMessage,
-  cancelAgentRun,
+  interruptAgentRun,
   answerAgentRun,
+  planDecisionAgentRun,
+  setAgentMode,
+  setAgentModel,
   listConversations,
   getConversation,
   renameConversation,
@@ -53,10 +56,12 @@ const emptyConvo = (key, sid) => ({
   running: false,
   runId: null,
   answered: new Set(),
+  decided: new Set(),
   live: false,
   loading: false,
   error: null,
   activeModel: null,
+  activeMode: null, // mode courant ('plan'|'bypass') reflété par le backend (approbation/set_mode)
 });
 
 function reducer(state, a) {
@@ -92,11 +97,12 @@ function reducer(state, a) {
       if (!c) return state;
       const items = a.items || [];
       const answered = new Set(items.filter((it) => it.type === 'question' && it.answered).map((it) => it.request_id));
+      const decided = new Set(items.filter((it) => it.type === 'plan_review' && it.decided).map((it) => it.request_id));
       return {
         ...state,
         convos: {
           ...state.convos,
-          [a.key]: { ...c, items, live: a.live, runId: a.runId || null, answered, running: false, loading: false, error: null },
+          [a.key]: { ...c, items, live: a.live, runId: a.runId || null, answered, decided, activeMode: a.mode || c.activeMode, running: false, loading: false, error: null },
         },
       };
     }
@@ -130,6 +136,17 @@ function reducer(state, a) {
       answered.add(a.request_id);
       return { ...state, convos: { ...state.convos, [a.key]: { ...c, answered, running: true } } };
     }
+    case 'SET_PLAN_DECIDED': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      const decided = new Set(c.decided);
+      decided.add(a.request_id);
+      // approuver/renvoyer relance le tour → running ; on note l'issue sur l'item.
+      const items = c.items.map((it) =>
+        it.type === 'plan_review' && it.request_id === a.request_id ? { ...it, decided: true, approved: a.approved } : it,
+      );
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, decided, items, running: true } } };
+    }
     case 'SET_ERROR': {
       const c = state.convos[a.key];
       if (!c) return state;
@@ -148,7 +165,7 @@ function reducer(state, a) {
       });
       if (!key) return state;
       const c = state.convos[key];
-      let nc = c;
+      let nc; // chaque branche (default inclus) réassigne
       switch (ev.kind) {
         case 'started':
           nc = { ...c, running: true };
@@ -167,10 +184,22 @@ function reducer(state, a) {
           if (ev.session_id && !c.sid) nc.sid = ev.session_id;
           if (ev.data?.model) nc.activeModel = ev.data.model;
           break;
+        case 'permission_mode':
+          nc = { ...c, activeMode: ev.data?.mode || c.activeMode };
+          break;
+        case 'model':
+          nc = { ...c, activeModel: ev.data?.model || c.activeModel };
+          break;
         case 'question':
           nc = {
             ...c,
             items: [...c.items, { type: 'question', request_id: ev.data?.request_id, questions: ev.data?.questions || [] }],
+          };
+          break;
+        case 'plan_review':
+          nc = {
+            ...c,
+            items: [...c.items, { type: 'plan_review', request_id: ev.data?.request_id, plan: ev.data?.plan || '' }],
           };
           break;
         default:
@@ -200,7 +229,7 @@ export function AgentConversationsProvider({ slug, children }) {
     for (const sid of sids) {
       getConversation(slug, sid)
         .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null }),
+          dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode }),
         )
         .catch((e) => {
           if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
@@ -233,7 +262,7 @@ export function AgentConversationsProvider({ slug, children }) {
       dispatch({ type: 'OPEN_PANEL', key, sid });
       getConversation(slug, sid)
         .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null }),
+          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode }),
         )
         .catch((e) => dispatch({ type: 'SNAPSHOT_ERR', key, error: e.message }));
     },
@@ -292,15 +321,61 @@ export function AgentConversationsProvider({ slug, children }) {
     [slug],
   );
 
+  // Stop = interrompt le TOUR courant (abort SDK), la session reste vivante pour la suite.
+  // La fermeture/suppression de session passe par deleteConversation (EOF côté serveur).
   const cancel = useCallback(
     async (key) => {
       const c = stateRef.current.convos[key];
       if (!c?.runId) return;
       dispatch({ type: 'SET_STOPPED', key });
       try {
-        await cancelAgentRun(slug, c.runId);
+        await interruptAgentRun(slug, c.runId);
       } catch {
         /* déjà terminé */
+      }
+    },
+    [slug],
+  );
+
+  // Décision sur un plan (ExitPlanMode) : approuver = implémenter, sinon renvoyer en révision.
+  const decidePlan = useCallback(
+    async (key, request_id, approved, feedback) => {
+      const c = stateRef.current.convos[key];
+      if (!c?.runId) return;
+      dispatch({ type: 'SET_PLAN_DECIDED', key, request_id, approved });
+      try {
+        await planDecisionAgentRun(slug, c.runId, { request_id, approved, feedback });
+      } catch (e) {
+        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+      }
+    },
+    [slug],
+  );
+
+  // Changement de mode/modèle EN COURS de session (sinon c'est un choix local pour la
+  // prochaine session, géré côté panneau). `mode` = 'plan'|'bypass' ; `model` = id SDK|null.
+  const changeMode = useCallback(
+    async (key, mode) => {
+      const c = stateRef.current.convos[key];
+      if (!c?.runId) return;
+      dispatch({ type: 'WS', ev: { run_id: c.runId, kind: 'permission_mode', data: { mode } } }); // optimiste
+      try {
+        await setAgentMode(slug, c.runId, mode);
+      } catch (e) {
+        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+      }
+    },
+    [slug],
+  );
+
+  const changeModel = useCallback(
+    async (key, model) => {
+      const c = stateRef.current.convos[key];
+      if (!c?.runId) return;
+      try {
+        await setAgentModel(slug, c.runId, model);
+      } catch (e) {
+        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
       }
     },
     [slug],
@@ -348,6 +423,9 @@ export function AgentConversationsProvider({ slug, children }) {
     sendMessage,
     answer,
     cancel,
+    decidePlan,
+    changeMode,
+    changeModel,
     renameBySid,
     removeBySid,
   };

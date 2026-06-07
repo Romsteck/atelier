@@ -5,9 +5,12 @@
 // le garder ouvert maintient la session vivante sur plusieurs tours (mémoire
 // native) ; en sortir (EOF / {type:'end'}) la termine. Le flux SDK est réémis en
 // NDJSON sur stdout (1 objet/ligne) que côté Atelier (Rust) parse et publie sur
-// l'EventBus. AskUserQuestion est détecté via le flux `tool_use` (le hook natif
-// `onUserDialog` ne se déclenche jamais en headless) : on émet une `question`, et
-// la réponse de l'UI revient comme TOUR UTILISATEUR suivant dans la même session.
+// l'EventBus. Les dialogues interactifs (AskUserQuestion, ExitPlanMode) sont interceptés
+// dans `canUseTool` (le hook `onUserDialog` ne se déclenche pas pour eux en headless,
+// vérifié SDK 0.3.167) : on émet `question`/`plan_review`, on SUSPEND le tour sur une
+// promesse, et la décision de l'UI (`answer`/`plan_decision` sur stdin) la résout — la
+// réponse est livrée AU MODÈLE dans le même tour (pas d'auto-annulation). Stop = `interrupt`
+// (abort du tour, session vivante) ≠ `end`/EOF (fin de session).
 // Aucune logique métier, aucune auth en dur, aucun secret en argv : le runner tourne
 // en hr-studio et lit l'OAuth abonnement via HOME/CLAUDE_CONFIG_DIR.
 import {
@@ -53,11 +56,43 @@ if (!existsSync(join(configDir, '.credentials.json'))) {
 const inputQ = []; // SDKUserMessage[] en attente d'être yield par inputGen()
 let qResolve = null; // resolver qui réveille le générateur quand un tour arrive
 let inputClosed = false; // EOF / {type:'end'} vu → le générateur sortira (fin de session)
-let qHandle = null; // référence à la query() pour interrupt() (cf. AskUserQuestion)
+let qHandle = null; // référence à la query() pour interrupt() / setPermissionMode()
 let turnActive = false; // un tour est en cours (≠ session idle) — interrupt n'est SÛR que là
 let onInit;
 const initPromise = new Promise((r) => { onInit = r; });
 let gotInit = false;
+
+// Dialogues BLOQUANTS interceptés dans canUseTool : AskUserQuestion et ExitPlanMode.
+// Au lieu de laisser le SDK auto-annuler la question (headless), on suspend le tour sur
+// une promesse jusqu'à ce que l'UI réponde (`answer` / `plan_decision` sur stdin). C'est
+// la SEULE façon fiable de bloquer : `onUserDialog` ne se déclenche pas pour ces outils
+// en headless (vérifié SDK 0.3.167), mais `canUseTool` SI, et son await bloque le tour.
+const pendingDialogs = new Map(); // request_id → resolve(payload)
+const maskedToolUseIds = new Set(); // tool_use dont le tool_result est livré hors-bande → masqué
+let dialogSeq = 0;
+// Suspend le tour jusqu'à la réponse UI. Un abort du tour (interrupt) débloque via le signal.
+function waitDialog(requestId, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve({ aborted: true }); return; }
+    pendingDialogs.set(requestId, resolve);
+    signal?.addEventListener('abort', () => {
+      if (pendingDialogs.delete(requestId)) resolve({ aborted: true });
+    }, { once: true });
+  });
+}
+// Réponse AskUserQuestion → texte livré au modèle COMME résultat de l'outil (via deny+message,
+// seul canal de canUseTool pour transmettre du texte ; vérifié : le modèle l'exploite tel quel).
+function formatAnswerForModel(ans) {
+  if (!ans || ans.aborted || ans.cancelled) return "L'utilisateur n'a pas répondu à la question. Continue avec ton meilleur jugement.";
+  const lines = Object.entries(ans.answers || {}).map(([q, a]) => `- ${q} → ${a}`);
+  let t = lines.length ? `Réponses de l'utilisateur :\n${lines.join('\n')}` : "Réponse de l'utilisateur.";
+  if (ans.response && ans.response.trim()) t += `\n\n${ans.response.trim()}`;
+  return t;
+}
+// Vrai si c'est l'écriture du fichier de plan interne (~/.claude/plans/*.md) du mode plan natif.
+function isPlanFileWrite(name, input) {
+  return (name === 'Write' || name === 'Edit') && typeof input?.file_path === 'string' && input.file_path.includes('/.claude/plans/');
+}
 
 function userMsg(text) {
   return { type: 'user', message: { role: 'user', content: String(text) }, parent_tool_use_id: null };
@@ -78,6 +113,11 @@ function pushTurn(m) {
 }
 function closeInput() {
   inputClosed = true;
+  // Débloque tout dialogue en attente (sinon le canUseTool resterait suspendu jusqu'au
+  // SIGKILL du reaper) : on les résout en "non répondu" pour que le tour s'achève et que
+  // la session se termine proprement (flush du transcript sur disque).
+  for (const resolve of pendingDialogs.values()) resolve({ aborted: true });
+  pendingDialogs.clear();
   if (qResolve) { const r = qResolve; qResolve = null; r(); }
 }
 
@@ -90,10 +130,38 @@ rl.on('line', (line) => {
   if (!gotInit) { gotInit = true; onInit(msg); return; }
   switch (msg.type) {
     case 'user_message': if (typeof msg.text === 'string') pushTurn(userMsg(msg.text)); break;
-    case 'answer': pushTurn(answerToTurn(msg)); break;
+    // Réponse AskUserQuestion : débloque le tour suspendu dans canUseTool. Fallback (pas de
+    // dialogue en attente) = session reprise depuis l'historique → on l'injecte en tour clair.
+    case 'answer': {
+      const resolve = pendingDialogs.get(msg.request_id);
+      if (resolve) { pendingDialogs.delete(msg.request_id); resolve({ answers: msg.answers, response: msg.response, cancelled: msg.cancelled }); }
+      else pushTurn(answerToTurn(msg));
+      break;
+    }
+    // Décision sur un plan (ExitPlanMode) : approuver = implémenter, sinon renvoyer en révision.
+    case 'plan_decision': {
+      const resolve = pendingDialogs.get(msg.request_id);
+      if (resolve) { pendingDialogs.delete(msg.request_id); resolve({ approved: !!msg.approved, feedback: msg.feedback }); }
+      break;
+    }
     // interrupt UNIQUEMENT si un tour tourne : sur une session idle, interrupt() casse
     // le flush de fin propre. Idle → on ignore (l'arrêt se fait par EOF stdin côté Atelier).
     case 'interrupt': if (turnActive && qHandle) qHandle.interrupt().catch(() => {}); break;
+    // Changement de mode/modèle EN COURS de session (setPermissionMode/setModel — possibles
+    // en streaming-input ; l'effort, lui, est figé au démarrage, pas d'API live). On émet en
+    // retour pour que l'UI reflète l'état réel.
+    case 'set_mode':
+      if (qHandle && (msg.mode === 'plan' || msg.mode === 'bypass')) {
+        qHandle.setPermissionMode(msg.mode === 'bypass' ? 'acceptEdits' : 'plan').catch(() => {});
+        emit({ t: 'permission_mode', mode: msg.mode });
+      }
+      break;
+    case 'set_model':
+      if (qHandle) {
+        qHandle.setModel(msg.model || undefined).catch(() => {});
+        emit({ t: 'model', model: msg.model || null });
+      }
+      break;
     case 'end': closeInput(); break;
     default: diag(`type de message stdin inconnu: ${msg.type}`);
   }
@@ -113,8 +181,8 @@ const {
   prompt,
   effort, // optionnel : Haiku 4.5 ne supporte PAS le param effort → on l'omet alors
   cwd,
-  allowedTools,
-  permissionMode = 'default',
+  permissionMode = 'plan', // défaut SÛR : lecture seule si non précisé
+  // (allowedTools n'est plus consommé : canUseTool + permissionMode gouvernent les permissions)
   resume,
   model,
   mcpEndpoint,
@@ -145,35 +213,53 @@ if (mcpEndpoint && token) {
   diag('mcpEndpoint fourni mais token MCP absent — serveur MCP non câblé.');
 }
 
-// Deux modes de permission seulement (décision produit) :
-//   - 'plan' (défaut, SÛR) : le modèle explore + planifie en LECTURE SEULE. On
-//     refuse toute écriture/exécution via `canUseTool` (deny-by-default sur une
-//     allowlist de lecture) + `disallowedTools` qui retire édition/Bash du contexte.
-//   - 'bypassPermissions' : pleine capacité (édition fichiers, MCP, Bash). L'agent
-//     tourne en hr-studio et écrit réellement dans le `src/` de l'app — les
-//     mutations se relisent via l'onglet Git du Studio.
-// WHY settingSources:[] : en headless le SDK n'auto-refuse PAS hors allowedTools,
-// et le `.claude/settings.json` généré par Atelier auto-approuve `mcp__studio__*`
-// (dont `exec` EN ROOT). On ignore donc tout settings disque et on tranche nous-mêmes.
-// AskUserQuestion est un PRÉREQUIS du mode plan (clarifier avant de proposer) → autorisé.
-const PLAN_READ = ['Read', 'Glob', 'Grep', 'NotebookRead', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion', 'WebSearch', 'WebFetch'];
-const WRITE_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'];
-const BASH_TOOLS = ['Bash', 'BashOutput', 'KillShell'];
+// Deux modes produit, mappés sur le SDK + un canUseTool UNIQUE qui est le host complet :
+//   - 'plan' (défaut, SÛR) : permissionMode SDK 'plan'. Le SDK applique nativement la
+//     LECTURE SEULE (vérifié : il refuse Write/Bash sur de vrais fichiers, n'autorise que
+//     le fichier de plan). Plus de `disallowedTools` — c'était lui qui retirait Write et
+//     cassait l'écriture du plan + faisait dérailler le modèle.
+//   - 'bypass' : permissionMode SDK 'acceptEdits' (PAS 'bypassPermissions') — les éditions
+//     s'exécutent ET canUseTool reste consulté, donc les questions bloquent aussi dans ce mode.
+// canUseTool intercepte les 2 dialogues que le headless n'achemine pas au host autrement :
+//   - AskUserQuestion : on émet une `question`, on SUSPEND le tour, et on livre la réponse
+//     au modèle via deny+message (le SDK reprend le tour avec — pas d'auto-annulation).
+//   - ExitPlanMode : on émet un `plan_review`, on SUSPEND ; approuver = on bascule la session
+//     en 'acceptEdits' (setPermissionMode) et on `allow` (le SDK enchaîne sur l'implémentation).
+// WHY settingSources:[] : le `.claude/settings.json` généré par Atelier auto-approuve
+// `mcp__studio__*` (dont `exec` EN ROOT). On ignore tout settings disque et on tranche ici.
+const isPlan = permissionMode !== 'bypassPermissions';
 
-const allowedSet = new Set([...(allowedTools || []), ...PLAN_READ]);
-function isAllowed(toolName) {
-  if (allowedSet.has(toolName)) return true;
-  for (const a of allowedSet) {
-    if (a.endsWith('*') && toolName.startsWith(a.slice(0, -1))) return true;
+async function canUseTool(toolName, input, opts) {
+  if (toolName === 'AskUserQuestion') {
+    const requestId = opts?.toolUseID || `ask-${++dialogSeq}`;
+    maskedToolUseIds.add(requestId);
+    emit({ t: 'question', request_id: requestId, questions: input?.questions || [] });
+    const ans = await waitDialog(requestId, opts?.signal);
+    return { behavior: 'deny', message: formatAnswerForModel(ans) };
   }
-  return false;
+  if (toolName === 'ExitPlanMode') {
+    const requestId = opts?.toolUseID || `plan-${++dialogSeq}`;
+    maskedToolUseIds.add(requestId);
+    emit({ t: 'plan_review', request_id: requestId, plan: input?.plan || '' });
+    const dec = await waitDialog(requestId, opts?.signal);
+    if (dec?.approved) {
+      // Approbation = on quitte la lecture seule pour que l'implémentation écrive vraiment,
+      // DANS LA MÊME SESSION (mémoire du plan conservée). Vérifié : le switch persiste sur
+      // les tours suivants. On notifie l'UI pour qu'elle reflète le passage Plan → Bypass.
+      await qHandle?.setPermissionMode('acceptEdits').catch(() => {});
+      emit({ t: 'permission_mode', mode: 'bypass' });
+      return { behavior: 'allow', updatedInput: input };
+    }
+    const why = dec?.feedback?.trim();
+    return {
+      behavior: 'deny',
+      message: why
+        ? `L'utilisateur n'approuve pas encore le plan. Retour : ${why}\nAffine le plan (toujours en lecture seule) puis re-propose.`
+        : "L'utilisateur n'a pas approuvé le plan. Continue de l'affiner en lecture seule, puis re-propose.",
+    };
+  }
+  return { behavior: 'allow', updatedInput: input };
 }
-
-const bypass = permissionMode === 'bypassPermissions';
-
-// AskUserQuestion n'est PAS géré via `onUserDialog` : le CLI headless ne délègue
-// jamais le dialogue 'ask' au host (auto-annulé). On le détecte via le flux
-// `tool_use` (cf. boucle de sortie) et la réponse revient comme tour suivant.
 
 const options = {
   // effort : 'low'|'medium'|'high'|'xhigh'|'max' — optionnel (xhigh/max = Opus ; Haiku : aucun).
@@ -181,23 +267,11 @@ const options = {
   // display:'summarized' obligatoire : sinon les blocs thinking remontent vides sur Opus 4.8/4.7.
   thinking: { type: 'adaptive', display: 'summarized' },
   includePartialMessages: true,
-  permissionMode: bypass ? 'bypassPermissions' : 'plan',
+  permissionMode: isPlan ? 'plan' : 'acceptEdits',
   settingSources: [],
-  ...(bypass
-    ? {} // pleine puissance : ni canUseTool ni disallowedTools
-    : {
-        disallowedTools: [...WRITE_TOOLS, ...BASH_TOOLS],
-        canUseTool: async (toolName, input) =>
-          isAllowed(toolName)
-            ? { behavior: 'allow', updatedInput: input }
-            : {
-                behavior: 'deny',
-                message: `Mode Plan (lecture seule) : outil '${toolName}' non autorisé. Bascule en Bypass pour exécuter.`,
-              },
-      }),
+  canUseTool, // host unique : intercepte AskUserQuestion (2 modes) + ExitPlanMode (plan)
   // Omettre model → le CLI résout le défaut de l'abonnement = claude-opus-4-8[1m] (contexte 1M).
   ...(model ? { model } : {}),
-  ...(allowedTools ? { allowedTools } : {}),
   ...(cwd ? { cwd } : {}),
   ...(resume ? { resume } : {}),
   ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
@@ -219,7 +293,9 @@ function toolResultText(content) {
 // existe un item postérieur (sinon = question finale en attente, à re-proposer).
 function messagesToItems(msgs) {
   const items = [];
-  const askIds = new Set(); // ids des tool_use AskUserQuestion → masquer leur tool_result
+  const askIds = new Set(); // tool_use AskUserQuestion → leur tool_result porte la réponse
+  const planIds = new Set(); // tool_use ExitPlanMode → leur tool_result porte la décision
+  const planFileIds = new Set(); // tool_use Write ~/.claude/plans/*.md → masqué (plomberie)
   for (const m of msgs || []) {
     const message = m?.message;
     if (m?.type === 'assistant') {
@@ -230,6 +306,11 @@ function messagesToItems(msgs) {
           if (b.name === 'AskUserQuestion') {
             askIds.add(b.id);
             items.push({ type: 'question', request_id: b.id, questions: b.input?.questions || [] });
+          } else if (b.name === 'ExitPlanMode') {
+            planIds.add(b.id);
+            items.push({ type: 'plan_review', request_id: b.id, plan: b.input?.plan || '' });
+          } else if (isPlanFileWrite(b.name, b.input)) {
+            planFileIds.add(b.id); // masqué (le plan est surfacé via plan_review)
           } else {
             items.push({ type: 'tool_use', name: b.name, input: b.input });
           }
@@ -243,16 +324,30 @@ function messagesToItems(msgs) {
         for (const b of content) {
           if (b.type === 'text' && b.text) items.push({ type: 'user', text: b.text });
           else if (b.type === 'tool_result') {
-            if (askIds.has(b.tool_use_id)) continue; // auto-annulation AskUserQuestion masquée
-            items.push({ type: 'tool_result', text: toolResultText(b.content).slice(0, 4000), isError: !!b.is_error });
+            const txt = toolResultText(b.content);
+            // Le tool_result d'AskUserQuestion porte la réponse (deny+message) → on l'accroche
+            // à la question au lieu de l'afficher comme résultat brut.
+            if (askIds.has(b.tool_use_id)) {
+              const q = items.findLast?.((it) => it.type === 'question' && it.request_id === b.tool_use_id)
+                || [...items].reverse().find((it) => it.type === 'question' && it.request_id === b.tool_use_id);
+              if (q) { q.answered = true; q.answer = txt; }
+              continue;
+            }
+            // ExitPlanMode : allow → "User has approved your plan" (is_error=false) ; deny → refusé.
+            if (planIds.has(b.tool_use_id)) {
+              const p = items.findLast?.((it) => it.type === 'plan_review' && it.request_id === b.tool_use_id)
+                || [...items].reverse().find((it) => it.type === 'plan_review' && it.request_id === b.tool_use_id);
+              if (p) { p.decided = true; p.approved = !b.is_error; }
+              continue;
+            }
+            if (planFileIds.has(b.tool_use_id)) continue; // résultat du Write de plomberie
+            items.push({ type: 'tool_result', text: txt.slice(0, 4000), isError: !!b.is_error });
           }
         }
       }
     }
     // type 'system' : ignoré (non rendu dans le fil)
   }
-  // Une question est "répondue" dès qu'un item la suit (le tour de réponse en clair).
-  items.forEach((it, i) => { if (it.type === 'question') it.answered = i < items.length - 1; });
   return items;
 }
 
@@ -311,7 +406,6 @@ async function* inputGen() {
 pushTurn(userMsg(prompt));
 
 let sessionEmitted = false; // `system` (session_id/model) n'est émis qu'une fois
-const cancelledToolUseIds = new Set(); // tool_use AskUserQuestion → tool_result d'annulation à masquer
 try {
   qHandle = query({ prompt: inputGen(), options });
   for await (const msg of qHandle) {
@@ -336,14 +430,15 @@ try {
         // Le texte est déjà streamé via les deltas ; ici on ne remonte que les tool_use.
         for (const block of msg.message?.content || []) {
           if (block.type !== 'tool_use') continue;
-          if (block.name === 'AskUserQuestion') {
-            // Détection live de la question (le hook natif ne se déclenche pas). On
-            // émet une `question` ; la réponse de l'UI reviendra comme tour suivant.
-            cancelledToolUseIds.add(block.id);
-            emit({ t: 'question', request_id: block.id, questions: block.input?.questions || [] });
-          } else {
-            emit({ t: 'tool_use', id: block.id, name: block.name, input: block.input });
-          }
+          // AskUserQuestion / ExitPlanMode sont matérialisés par canUseTool (events
+          // `question` / `plan_review`) — on ne ré-émet pas leur tool_use brut, et on masque
+          // leur tool_result par block.id (source d'id fiable : l'assistant arrive AVANT
+          // canUseTool et le tool_result).
+          if (block.name === 'AskUserQuestion' || block.name === 'ExitPlanMode') { maskedToolUseIds.add(block.id); continue; }
+          // Le mode plan natif fait écrire le plan dans ~/.claude/plans/*.md (plomberie
+          // interne) : le contenu est déjà surfacé via plan_review → on masque ce Write.
+          if (isPlanFileWrite(block.name, block.input)) { maskedToolUseIds.add(block.id); continue; }
+          emit({ t: 'tool_use', id: block.id, name: block.name, input: block.input });
         }
         if (msg.error) emit({ t: 'error', message: `assistant: ${msg.error}` });
         break;
@@ -351,9 +446,9 @@ try {
       case 'user': {
         for (const block of msg.message?.content || []) {
           if (block.type !== 'tool_result') continue;
-          // Le CLI auto-annule AskUserQuestion ("Pas de réponse sélectionnée") : on
-          // masque ce tool_result bidon (la vraie réponse arrive comme tour suivant).
-          if (cancelledToolUseIds.has(block.tool_use_id)) continue;
+          // tool_result d'AskUserQuestion/ExitPlanMode : la réponse/décision est livrée
+          // hors-bande (deny+message) → on masque le résultat brut.
+          if (maskedToolUseIds.has(block.tool_use_id)) continue;
           emit({
             t: 'tool_result',
             tool_use_id: block.tool_use_id,
