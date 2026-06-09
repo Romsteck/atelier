@@ -145,13 +145,14 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
             <span className="inline-block text-[10px] uppercase tracking-wider text-blue-300 bg-blue-500/15 px-1.5 py-0.5 rounded-sm">{q.header}</span>
           )}
           <div className="text-[13px] text-gray-200">{q.question}</div>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-col gap-1.5">
             {(q.options || []).map((o, oi) => {
               const chosen = sel[qi].chosen.has(o.label);
               return (
-                <button key={oi} disabled={answered} onClick={() => setChosen(qi, o.label, !!q.multiSelect)} title={o.description}
-                  className={`px-2 py-1 rounded-md text-[12px] border ${chosen ? 'bg-blue-500/25 border-blue-500/50 text-blue-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'} disabled:opacity-60`}>
-                  {o.label}
+                <button key={oi} disabled={answered} onClick={() => setChosen(qi, o.label, !!q.multiSelect)}
+                  className={`text-left px-2.5 py-1.5 rounded-md text-[12px] border ${chosen ? 'bg-blue-500/25 border-blue-500/50 text-blue-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'} disabled:opacity-60`}>
+                  <div className="font-medium">{o.label}</div>
+                  {o.description && <div className="text-[11px] text-gray-400 mt-0.5 font-normal">{o.description}</div>}
                 </button>
               );
             })}
@@ -401,10 +402,12 @@ export default function AgentPanel({ panelKey }) {
         })}
         {running && !awaitingUser && (
           <div className="flex items-center gap-1.5 text-[12px] text-gray-500">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" /> …
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> agent travaille…
           </div>
         )}
-        {running && awaitingUser && (
+        {/* Indépendant de `running` : une carte dialogue est intrinsèquement un état
+            d'attente, et l'action ne dépend que de runId (restauré au refresh). */}
+        {awaitingUser && (
           <div className="text-[12px] text-gray-600 italic">En attente de ta réponse…</div>
         )}
       </div>

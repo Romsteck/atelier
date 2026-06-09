@@ -18,6 +18,15 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=atelier
 
+# Arrêt : SIGTERM au SEUL process principal d'abord (KillMode=mixed), pas à tout le cgroup.
+# WHY : à l'arrêt, Atelier draine ses runners agent en vol (interrupt du tour + EOF stdin →
+# le SDK flush un transcript RESUMABLE) AVANT de sortir. En control-group (défaut), systemd
+# SIGKILLerait simultanément sudo→node→claude, tronquant le tour en cours → session
+# non-relançable. mixed laisse Atelier piloter l'arrêt propre, puis SIGKILL le reste du
+# cgroup seulement après TimeoutStopSec (> budget de drain ATELIER_AGENT_DRAIN_SECS=45s).
+KillMode=mixed
+TimeoutStopSec=60s
+
 # Security hardening
 ProtectSystem=strict
 # /var/lib/hr-studio : home de l'utilisateur hr-studio, où l'agent runner (lancé en

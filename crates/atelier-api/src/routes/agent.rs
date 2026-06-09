@@ -45,6 +45,10 @@ struct RunState {
     /// Mode courant côté UI ('plan' | 'bypass'). Mis à jour par les events `permission_mode`
     /// (approbation de plan, /set_mode) → exposé dans le snapshot pour survivre au reload.
     mode: String,
+    /// Un tour est-il en vol ? `true` du dépôt d'un tour (init/`message`/`answer`/
+    /// `plan_decision`) jusqu'au `turn_done`/`done`. Exposé dans le snapshot (`running`,
+    /// pour restaurer l'indicateur de réflexion après un refresh) et utilisé par le drain.
+    turn_active: bool,
 }
 
 static RUNS: LazyLock<Mutex<HashMap<String, RunState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -107,6 +111,10 @@ fn fold_into_run(run_id: &str, kind: &str, data: &Value) {
             if let Some(m) = data.get("mode").and_then(|x| x.as_str()) {
                 r.mode = m.to_string();
             }
+        }
+        // Fin de tour → le tour n'est plus en vol (snapshot `running` repasse à false).
+        if kind == "turn_done" || kind == "done" {
+            r.turn_active = false;
         }
         fold_item(&mut r.items, kind, data);
     }
@@ -172,6 +180,17 @@ fn idle_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1800u64);
+    Duration::from_secs(secs)
+}
+/// Plafond DUR d'un tour EN VOL. WHY : l'idle ci-dessus est ré-armé sur le stdout du
+/// runner, or un sous-agent (`Task`) n'émet AUCUN stdout côté parent — un tour long mais
+/// légitime serait SIGKILL à 1800s, ce qui tronque la session (tour pendouillant). Tant
+/// qu'un tour est actif on applique ce plafond large ; l'idle court ne vaut qu'ENTRE tours.
+fn hard_cap() -> Duration {
+    let secs = std::env::var("ATELIER_AGENT_HARD_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(14400u64); // 4 h
     Duration::from_secs(secs)
 }
 
@@ -327,6 +346,7 @@ async fn query(
             input_tx,
             items,
             mode: ui_mode.to_string(),
+            turn_active: true, // le prompt d'init est le tour #1
         },
     );
 
@@ -403,6 +423,7 @@ async fn message(
         // Le runner ne ré-émet pas le tour user → on l'ajoute au buffer (reload).
         if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
             r.items.push(user_item(&body.text));
+            r.turn_active = true; // nouveau tour soumis
         }
         info!(run_id = %run_id, "agent message sent");
         (StatusCode::OK, Json(json!({"ok": true}))).into_response()
@@ -454,6 +475,7 @@ async fn answer(
             parts.join("\n")
         };
         if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+            r.turn_active = true; // la réponse relance/poursuit le tour suspendu
             for it in r.items.iter_mut().rev() {
                 if it.get("type").and_then(|x| x.as_str()) == Some("question")
                     && it.get("request_id").and_then(|x| x.as_str()) == Some(body.request_id.as_str())
@@ -500,6 +522,7 @@ async fn plan_decision(
     if send_input(&run_id, line) {
         // Marque le plan_review décidé dans le buffer (reload).
         if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+            r.turn_active = true; // approbation/renvoi poursuit le tour suspendu
             for it in r.items.iter_mut().rev() {
                 if it.get("type").and_then(|x| x.as_str()) == Some("plan_review")
                     && it.get("request_id").and_then(|x| x.as_str()) == Some(body.request_id.as_str())
@@ -583,6 +606,24 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Dernier dialogue interactif NON résolu du buffer (`question` sans `answered`,
+/// `plan_review` sans `decided`) → `{kind, request_id}`, sinon `null`. Exposé dans le
+/// snapshot pour que l'UI restaure l'état « en attente de ta réponse » après un refresh.
+fn pending_dialog(items: &[Value]) -> Value {
+    for it in items.iter().rev() {
+        match it.get("type").and_then(|x| x.as_str()) {
+            Some("question") if !it.get("answered").and_then(|x| x.as_bool()).unwrap_or(false) => {
+                return json!({ "kind": "question", "request_id": it.get("request_id").cloned().unwrap_or(Value::Null) });
+            }
+            Some("plan_review") if !it.get("decided").and_then(|x| x.as_bool()).unwrap_or(false) => {
+                return json!({ "kind": "plan_review", "request_id": it.get("request_id").cloned().unwrap_or(Value::Null) });
+            }
+            _ => {}
+        }
+    }
+    Value::Null
 }
 
 /// Sessions vivantes de cet app : `(session_id, run_id, résumé)`. Sert à annoter la
@@ -682,9 +723,13 @@ async fn get_conversation(
     // Session vivante → fil servi depuis le buffer mémoire (pas encore sur disque).
     let rid = SID_RUN.lock().unwrap().get(&sid).cloned();
     if let Some(rid) = rid {
-        let snap = RUNS.lock().unwrap().get(&rid).map(|r| (r.items.clone(), r.mode.clone()));
-        if let Some((items, mode)) = snap {
-            return Json(json!({ "items": items, "live": true, "run_id": rid, "mode": mode })).into_response();
+        let snap = RUNS.lock().unwrap().get(&rid).map(|r| (r.items.clone(), r.mode.clone(), r.turn_active));
+        if let Some((items, mode, turn_active)) = snap {
+            // `running` (tour en vol) + `pending` (dialogue non résolu) permettent au
+            // frontend de restaurer l'indicateur de réflexion / la carte d'attente après
+            // un refresh (le WS broadcast ne rejoue pas `started`/`question`).
+            let pending = pending_dialog(&items);
+            return Json(json!({ "items": items, "live": true, "run_id": rid, "mode": mode, "running": turn_active, "pending": pending })).into_response();
         }
     }
     // Sinon → transcript persisté sur disque.
@@ -867,24 +912,40 @@ async fn run_agent(
 
     let mut cancelled = false;
     let mut timed_out = false;
+    // Tour #1 (prompt d'init) actif au démarrage. Tant qu'un tour est en vol on applique le
+    // plafond dur (`hard`) ; un sous-agent silencieux ne ré-arme pas l'idle, donc l'idle court
+    // ne vaut qu'ENTRE tours (reape une session oubliée sans tuer un tour long légitime).
+    let mut turn_active_local = true;
     if let Some(out) = child.stdout.take() {
         let mut lines = BufReader::new(out).lines();
         let idle = idle_timeout();
-        let deadline = tokio::time::sleep(idle);
+        let hard = hard_cap();
+        let deadline = tokio::time::sleep(hard);
         tokio::pin!(deadline);
         // `ending` : arrêt PROPRE demandé (cancel/idle) → on ferme stdin (EOF). Le runner
         // achève le tour courant puis termine la session ; le SDK flush sur disque. On lit
         // jusqu'à l'EOF stdout (grâce ré-armée sur activité : un tour qui stream n'est pas tué).
         let mut ending = false;
         let mut input_open = true;
-        let grace = Duration::from_secs(30);
+        let grace = Duration::from_secs(20);
         loop {
             tokio::select! {
                 biased;
                 _ = &mut cancel, if !ending => {
                     cancelled = true;
                     ending = true;
-                    if let Some(s) = stdin.as_mut() { let _ = s.shutdown().await; }
+                    // Arrêt PROPRE : on AVORTE d'abord le tour en vol (frontière propre → pas
+                    // de tool_use pendouillant → session RESUMABLE), PUIS EOF stdin pour
+                    // terminer la session (le SDK flush le transcript). Un EOF nu laisserait le
+                    // tour courant finir (potentiellement long) → dépassement du budget de drain
+                    // → SIGKILL → troncature, exactement ce qu'on cherche à éviter.
+                    if let Some(s) = stdin.as_mut() {
+                        if turn_active_local {
+                            let _ = s.write_all(b"{\"type\":\"interrupt\"}\n").await;
+                            let _ = s.flush().await;
+                        }
+                        let _ = s.shutdown().await;
+                    }
                     stdin = None;
                     deadline.as_mut().reset(tokio::time::Instant::now() + grace);
                 }
@@ -899,6 +960,16 @@ async fn run_agent(
                 maybe = input_rx.recv(), if input_open && !ending => {
                     match maybe {
                         Some(line) => {
+                            // Un message/réponse/décision relance un tour → plafond dur + état actif.
+                            // Les contrôles (interrupt/set_mode/set_model) ne changent pas l'état.
+                            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                                if matches!(v.get("type").and_then(|x| x.as_str()),
+                                    Some("user_message") | Some("answer") | Some("plan_decision"))
+                                {
+                                    turn_active_local = true;
+                                    deadline.as_mut().reset(tokio::time::Instant::now() + hard);
+                                }
+                            }
                             if let Some(s) = stdin.as_mut() {
                                 let _ = s.write_all(line.as_bytes()).await;
                                 let _ = s.write_all(b"\n").await;
@@ -910,8 +981,9 @@ async fn run_agent(
                 }
                 next = lines.next_line() => match next {
                     Ok(Some(line)) => {
-                        // Activité runner → ré-arme le timeout (idle normal, grâce courte pendant l'arrêt).
-                        deadline.as_mut().reset(tokio::time::Instant::now() + if ending { grace } else { idle });
+                        // Activité runner → ré-arme le timeout : grâce courte pendant l'arrêt,
+                        // sinon plafond dur si un tour est en vol, idle court entre tours.
+                        deadline.as_mut().reset(tokio::time::Instant::now() + if ending { grace } else if turn_active_local { hard } else { idle });
                         let trimmed = line.trim();
                         if trimmed.is_empty() { continue; }
                         let obj: Value = match serde_json::from_str(trimmed) {
@@ -919,6 +991,11 @@ async fn run_agent(
                             Err(_) => { continue; } // ligne non-JSON ignorée (robustesse)
                         };
                         let t = obj.get("t").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        // Fin de tour → bascule sur l'idle court (la session est entre tours).
+                        if t == "turn_done" {
+                            turn_active_local = false;
+                            if !ending { deadline.as_mut().reset(tokio::time::Instant::now() + idle); }
+                        }
                         // 1re ligne `system` → on lie session_id ↔ run_id (conversation
                         // vivante). Tous les events suivants (et le `system` lui-même)
                         // portent alors session_id, clé de routage stable du frontend.
@@ -996,6 +1073,40 @@ async fn run_agent(
         "done",
         json!({"exit_ok": exit_ok, "cancelled": cancelled, "timed_out": timed_out}),
     );
+}
+
+/// Drain de tous les runs vivants à l'arrêt d'Atelier. Envoie le signal d'arrêt PROPRE à
+/// chaque `run_agent` (interrupt du tour + EOF stdin → le SDK flush un transcript
+/// RESUMABLE), puis attend que `RUNS` se vide ou jusqu'à `deadline`. Appelé par le handler
+/// SIGTERM du binaire (`main.rs`) AVANT l'exit : un `make deploy` ne tronque plus un tour
+/// en vol (sinon la session devient non-relançable, cf. cause racine du symptôme #1).
+#[instrument(skip_all)]
+pub async fn drain_agent_runs(deadline: Duration) {
+    // Prendre les cancel_tx HORS du lock (on ne tient pas un std Mutex à travers un await).
+    let cancels: Vec<oneshot::Sender<()>> = {
+        let mut runs = RUNS.lock().unwrap();
+        runs.values_mut().filter_map(|r| r.cancel_tx.take()).collect()
+    };
+    let n = cancels.len();
+    if n == 0 {
+        return;
+    }
+    info!(runs = n, "draining live agent runs before shutdown");
+    for tx in cancels {
+        let _ = tx.send(()); // déclenche interrupt+EOF dans chaque run_agent
+    }
+    // Chaque run_agent retire son entrée de RUNS en fin de flush → RUNS vide = drain terminé.
+    let _ = tokio::time::timeout(deadline, async {
+        loop {
+            if RUNS.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let remaining = RUNS.lock().unwrap().len();
+    info!(remaining, "agent drain complete");
 }
 
 // --- SDK version check / update ---

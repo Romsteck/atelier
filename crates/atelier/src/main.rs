@@ -188,6 +188,15 @@ async fn main() -> Result<()> {
     shutdown_signal().await;
     info!("shutdown signal received");
 
+    // Drain des conversations agent en vol AVANT de couper le serveur : chaque run reçoit
+    // un arrêt propre (interrupt du tour + EOF stdin → le SDK flush un transcript
+    // RESUMABLE), pour qu'un `make deploy` ne tronque jamais un tour (sinon la session
+    // devient non-relançable). Budget borné, sous le TimeoutStopSec systemd.
+    let drain_budget = Duration::from_secs(
+        std::env::var("ATELIER_AGENT_DRAIN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(45),
+    );
+    atelier_api::routes::agent::drain_agent_runs(drain_budget).await;
+
     if ipc_sock.exists() {
         if let Err(err) = tokio::fs::remove_file(&ipc_sock).await {
             warn!(?err, path = %ipc_sock.display(), "failed to remove ipc socket");

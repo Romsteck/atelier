@@ -98,11 +98,20 @@ function reducer(state, a) {
       const items = a.items || [];
       const answered = new Set(items.filter((it) => it.type === 'question' && it.answered).map((it) => it.request_id));
       const decided = new Set(items.filter((it) => it.type === 'plan_review' && it.decided).map((it) => it.request_id));
+      // `running` (tour en vol) doit survivre au refresh : l'event WS `started` ne rejoue pas.
+      // Le backend l'expose dans le snapshot d'une session vivante → autoritaire. À défaut
+      // (vieux backend / session morte), on retombe sur l'attente d'un dialogue non résolu.
+      const lastItem = items[items.length - 1];
+      const awaiting =
+        !!lastItem &&
+        ((lastItem.type === 'question' && !(answered.has(lastItem.request_id) || lastItem.answered)) ||
+          (lastItem.type === 'plan_review' && !(decided.has(lastItem.request_id) || lastItem.decided)));
+      const running = typeof a.running === 'boolean' ? a.running : a.live ? awaiting : false;
       return {
         ...state,
         convos: {
           ...state.convos,
-          [a.key]: { ...c, items, live: a.live, runId: a.runId || null, answered, decided, activeMode: a.mode || c.activeMode, running: false, loading: false, error: null },
+          [a.key]: { ...c, items, live: a.live, runId: a.runId || null, answered, decided, activeMode: a.mode || c.activeMode, running, loading: false, error: null },
         },
       };
     }
@@ -229,7 +238,7 @@ export function AgentConversationsProvider({ slug, children }) {
     for (const sid of sids) {
       getConversation(slug, sid)
         .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode }),
+          dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
         )
         .catch((e) => {
           if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
@@ -262,7 +271,7 @@ export function AgentConversationsProvider({ slug, children }) {
       dispatch({ type: 'OPEN_PANEL', key, sid });
       getConversation(slug, sid)
         .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode }),
+          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
         )
         .catch((e) => dispatch({ type: 'SNAPSHOT_ERR', key, error: e.message }));
     },
@@ -285,7 +294,19 @@ export function AgentConversationsProvider({ slug, children }) {
       try {
         let runId = c.runId;
         if (c.runId) {
-          await sendAgentMessage(slug, c.runId, { text: t }); // tour suivant, session vivante
+          try {
+            await sendAgentMessage(slug, c.runId, { text: t }); // tour suivant, session vivante
+          } catch (e) {
+            // runId périmé : le run est mort sans que `done` n'ait atteint ce client (ex.
+            // après un deploy qui a coupé la session). On retombe sur la reprise de la session
+            // sur disque → la conversation se relance au lieu de renvoyer une erreur 404.
+            if (e.response?.status === 404 && c.sid) {
+              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings });
+              runId = r.data?.run_id;
+            } else {
+              throw e;
+            }
+          }
         } else if (c.sid) {
           const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings }); // reprise
           runId = r.data?.run_id;

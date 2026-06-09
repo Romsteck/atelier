@@ -168,6 +168,23 @@ rl.on('line', (line) => {
 });
 rl.on('close', () => { diag('stdin EOF (rl close) → closeInput'); closeInput(); }); // EOF stdin = fin de session
 
+// Arrêt PROPRE sur signal — backstop du drain piloté par Atelier (interrupt+EOF via stdin).
+// Si le cgroup est tué malgré KillMode=mixed (ex. crash d'Atelier, `systemctl kill`), on
+// avorte le tour en vol (frontière propre → pas de tool_use pendouillant) puis on ferme
+// l'entrée → le SDK termine la session et flush un transcript RESUMABLE. On NE fait PAS
+// process.exit() : on laisse la boucle `for await` finir pour que le flush s'achève (un
+// exit prématuré tronquerait le transcript, le défaut même qu'on corrige).
+let shuttingDown = false;
+function onShutdownSignal(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  diag(`signal ${sig} reçu → interrupt du tour + fin de session`);
+  if (turnActive && qHandle) qHandle.interrupt().catch(() => {});
+  closeInput();
+}
+process.on('SIGTERM', () => onShutdownSignal('SIGTERM'));
+process.on('SIGINT', () => onShutdownSignal('SIGINT'));
+
 let init;
 try {
   init = await initPromise;
