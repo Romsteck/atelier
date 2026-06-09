@@ -80,11 +80,12 @@ fn fold_item(items: &mut Vec<Value>, kind: &str, data: &Value) {
             }
             items.push(json!({ "type": ty, "text": text }));
         }
-        "tool_use" => items.push(json!({ "type": "tool_use", "name": data.get("name").cloned(), "input": data.get("input").cloned() })),
+        "tool_use" => items.push(json!({ "type": "tool_use", "name": data.get("name").cloned(), "input": data.get("input").cloned(), "id": data.get("id").cloned() })),
         "tool_result" => items.push(json!({
             "type": "tool_result",
             "text": data.get("text").and_then(|x| x.as_str()).unwrap_or(""),
             "isError": data.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false),
+            "tool_use_id": data.get("tool_use_id").cloned(),
         })),
         "result" => items.push(json!({ "type": "result", "data": data.clone() })),
         "question" => items.push(json!({

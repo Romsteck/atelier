@@ -22,10 +22,10 @@ export function appendEvent(items, ev) {
       break;
     }
     case 'tool_use':
-      next.push({ type: 'tool_use', name: ev.data?.name, input: ev.data?.input });
+      next.push({ type: 'tool_use', name: ev.data?.name, input: ev.data?.input, id: ev.data?.id });
       break;
     case 'tool_result':
-      next.push({ type: 'tool_result', text: ev.data?.text || '', isError: !!ev.data?.is_error });
+      next.push({ type: 'tool_result', text: ev.data?.text || '', isError: !!ev.data?.is_error, tool_use_id: ev.data?.tool_use_id });
       break;
     case 'result':
       next.push({ type: 'result', data: ev.data });

@@ -329,7 +329,7 @@ function messagesToItems(msgs) {
           } else if (isPlanFileWrite(b.name, b.input)) {
             planFileIds.add(b.id); // masqué (le plan est surfacé via plan_review)
           } else {
-            items.push({ type: 'tool_use', name: b.name, input: b.input });
+            items.push({ type: 'tool_use', name: b.name, input: b.input, id: b.id });
           }
         }
       }
@@ -358,7 +358,7 @@ function messagesToItems(msgs) {
               continue;
             }
             if (planFileIds.has(b.tool_use_id)) continue; // résultat du Write de plomberie
-            items.push({ type: 'tool_result', text: txt.slice(0, 4000), isError: !!b.is_error });
+            items.push({ type: 'tool_result', text: txt.slice(0, 4000), isError: !!b.is_error, tool_use_id: b.tool_use_id });
           }
         }
       }
