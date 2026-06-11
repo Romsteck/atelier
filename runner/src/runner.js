@@ -57,6 +57,7 @@ const inputQ = []; // SDKUserMessage[] en attente d'être yield par inputGen()
 let qResolve = null; // resolver qui réveille le générateur quand un tour arrive
 let inputClosed = false; // EOF / {type:'end'} vu → le générateur sortira (fin de session)
 let qHandle = null; // référence à la query() pour interrupt() / setPermissionMode()
+let liveMode = 'plan'; // mode produit COURANT ('plan'|'bypass') — suit setPermissionMode pour le garde-fou MCP
 let turnActive = false; // un tour est en cours (≠ session idle) — interrupt n'est SÛR que là
 let onInit;
 const initPromise = new Promise((r) => { onInit = r; });
@@ -153,6 +154,7 @@ rl.on('line', (line) => {
     case 'set_mode':
       if (qHandle && (msg.mode === 'plan' || msg.mode === 'bypass')) {
         qHandle.setPermissionMode(msg.mode === 'bypass' ? 'acceptEdits' : 'plan').catch(() => {});
+        liveMode = msg.mode;
         emit({ t: 'permission_mode', mode: msg.mode });
       }
       break;
@@ -242,9 +244,28 @@ if (mcpEndpoint && token) {
 //     au modèle via deny+message (le SDK reprend le tour avec — pas d'auto-annulation).
 //   - ExitPlanMode : on émet un `plan_review`, on SUSPEND ; approuver = on bascule la session
 //     en 'acceptEdits' (setPermissionMode) et on `allow` (le SDK enchaîne sur l'implémentation).
-// WHY settingSources:[] : le `.claude/settings.json` généré par Atelier auto-approuve
-// `mcp__studio__*` (dont `exec` EN ROOT). On ignore tout settings disque et on tranche ici.
+// WHY settingSources:['project'] (et SEULEMENT 'project') : c'est la source qui charge
+// CLAUDE.md, .claude/rules/ et les skills projet — sans elle l'agent travaille sans les
+// règles du workspace (bug constaté). On EXCLUT 'user' et 'local' : les settings user
+// hr-studio portent l'auto-approve `mcp__studio` des sessions interactives, et les
+// settings.local.json accumulent des allow larges (`Bash(*)`, `Write(*)`…) issus du
+// terminal Studio. INVARIANT : aucune source chargée ne doit contenir de permissions.allow
+// — une allow rule court-circuite canUseTool (vérifié SDK 0.3.167 : `mcp__studio` en allow
+// exécute `exec` EN ROOT même en Plan, sans consulter canUseTool). Le settings.json généré
+// par Atelier (context.rs) n'émet donc PLUS de bloc permissions.
 const isPlan = permissionMode !== 'bypassPermissions';
+liveMode = isPlan ? 'plan' : 'bypass';
+
+// Garde-fou Plan pour les tools MCP : le mode plan natif ne bloque QUE les tools builtin
+// (Write/Edit/Bash…) ; les tools MCP arrivent dans canUseTool même en Plan (vérifié), donc
+// sans cette liste le blanket-allow exécuterait `mcp__studio__exec` (root) en lecture seule.
+// Allowlist par suffixe (nom sans préfixe mcp__<server>__) : lectures uniquement.
+const MCP_READONLY = new Set([
+  'findings_list', 'memory_get', 'runs_list', 'pm_query', 'status', 'logs',
+  'db_tables', 'db_schema', 'db_query', 'db_overview', 'db_count_rows', 'db_get_schema',
+  'docs_overview', 'docs_list_entries', 'docs_get', 'docs_search', 'docs_completeness',
+  'docs_diagram_get', 'git_log', 'git_branches', 'scan_get',
+]);
 
 async function canUseTool(toolName, input, opts) {
   if (toolName === 'AskUserQuestion') {
@@ -264,6 +285,7 @@ async function canUseTool(toolName, input, opts) {
       // DANS LA MÊME SESSION (mémoire du plan conservée). Vérifié : le switch persiste sur
       // les tours suivants. On notifie l'UI pour qu'elle reflète le passage Plan → Bypass.
       await qHandle?.setPermissionMode('acceptEdits').catch(() => {});
+      liveMode = 'bypass';
       emit({ t: 'permission_mode', mode: 'bypass' });
       return { behavior: 'allow', updatedInput: input };
     }
@@ -275,6 +297,15 @@ async function canUseTool(toolName, input, opts) {
         : "L'utilisateur n'a pas approuvé le plan. Continue de l'affiner en lecture seule, puis re-propose.",
     };
   }
+  if (liveMode === 'plan' && toolName.startsWith('mcp__')) {
+    const bare = toolName.split('__').slice(2).join('__');
+    if (!MCP_READONLY.has(bare)) {
+      return {
+        behavior: 'deny',
+        message: `Mode plan (lecture seule) : \`${toolName}\` modifie l'état. Ne l'exécute pas maintenant — intègre cette action à ton plan.`,
+      };
+    }
+  }
   return { behavior: 'allow', updatedInput: input };
 }
 
@@ -285,8 +316,11 @@ const options = {
   thinking: { type: 'adaptive', display: 'summarized' },
   includePartialMessages: true,
   permissionMode: isPlan ? 'plan' : 'acceptEdits',
-  settingSources: [],
-  canUseTool, // host unique : intercepte AskUserQuestion (2 modes) + ExitPlanMode (plan)
+  // 'project' charge CLAUDE.md + .claude/rules/ + skills du workspace (cf. WHY ci-dessus).
+  // Le preset claude_code est REQUIS pour que CLAUDE.md soit injecté (vérifié SDK 0.3.167).
+  settingSources: ['project'],
+  systemPrompt: { type: 'preset', preset: 'claude_code' },
+  canUseTool, // host unique : AskUserQuestion (2 modes) + ExitPlanMode (plan) + garde-fou MCP en plan
   // Omettre model → le CLI résout le défaut de l'abonnement = claude-opus-4-8[1m] (contexte 1M).
   ...(model ? { model } : {}),
   ...(cwd ? { cwd } : {}),

@@ -13,7 +13,7 @@
 //! Fichiers per-app générés (tous sous `{slug}/src/`) :
 //!   - `src/CLAUDE.md`                         — carnet de bord agent-owned (write-once)
 //!   - `src/.mcp.json`                         — MCP server config (CLI compat)
-//!   - `src/.claude/settings.json`             — MCP server + auto-approve
+//!   - `src/.claude/settings.json`             — MCP server (sans permissions — cf. render_settings_json_with_auth)
 //!   - `src/.claude/rules/app-info.md`         — identité / stack / port / autres apps (régénéré)
 //!   - `src/.claude/rules/mcp-tools.md`        — tools MCP disponibles
 //!   - `src/.claude/rules/workflow.md`         — workflow dev
@@ -340,8 +340,9 @@ impl ContextGenerator {
              `.claude/settings.json` and `.mcp.json`. Read-only tools (`app.list`, \
              `app.status`, `app.logs`, `db.tables`, `db.schema`, `db.query`, \
              `docs.overview`, `docs.list_entries`, `docs.get`, `docs.search`, \
-             `docs.completeness`, `docs.diagram_get`) are auto-approved. Doc \
-             mutations (`docs.update`, `docs.delete`, `docs.diagram_set`) require \
+             `docs.completeness`, `docs.diagram_get`) are auto-approved for the \
+             interactive Studio user (user-level settings). Doc mutations \
+             (`docs.update`, `docs.delete`, `docs.diagram_set`) require \
              confirmation.\n\
              \n\
              ## Rules\n\
@@ -452,8 +453,8 @@ fn render_mcp_tools_md(app: &Application) -> String {
         "# MCP tools — {name}\n\
          \n\
          A single MCP server is configured: `studio`. Read-only tools are \
-         auto-approved via `.claude/settings.json` — mutations require explicit \
-         confirmation.\n\
+         auto-approved for the interactive Studio user (user-level settings) — \
+         mutations require explicit confirmation.\n\
          \n\
          ## Documentation (`docs_*`) — DOC-FIRST OBLIGATOIRE\n\
          **Avant toute exploration de code, appelle `docs_overview`.** Voir `.claude/rules/docs.md` pour le workflow complet.\n\
@@ -1195,19 +1196,17 @@ fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
 }
 
 fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> String {
+    // PAS de bloc `permissions` ici : le runner agent (runner.js) charge ce fichier via
+    // settingSources:['project'], et une allow rule court-circuiterait son canUseTool
+    // (vérifié : `mcp__studio` en allow exécute `exec` EN ROOT même en mode plan).
+    // L'auto-approve `mcp__studio` des sessions interactives Studio vit dans les settings
+    // USER de hr-studio (/var/lib/hr-studio/.claude/settings.json), source que le runner
+    // ne charge jamais.
     let settings = serde_json::json!({
         "mcpServers": {
             "studio": mcp_server_entry(mcp_endpoint, token),
         },
         "enabledMcpjsonServers": ["studio"],
-        "permissions": {
-            // Wildcard : tous les tools du serveur `studio` sont auto-approuvés
-            // (incluant les mutations dv_* et db_*). Décision utilisateur :
-            // l'agent travaillant dans le Studio doit pouvoir tout faire sans
-            // friction de prompt.
-            "allow": ["mcp__studio"],
-            "deny": [],
-        }
     });
     serde_json::to_string_pretty(&settings).expect("settings JSON serializes")
 }
@@ -1679,12 +1678,13 @@ mod tests {
         let wallet = make_app("wallet", "Wallet", false);
         let all = vec![trader.clone(), wallet.clone()];
 
-        // Scaffold src/ pour que `app.src_dir().exists()` soit vrai dans le test.
-        // src_dir() résout via ATELIER_APPS_RUNTIME_ROOT, donc on construit le
-        // path "relatif au tmp" manuellement pour les assertions ; on valide
-        // ici le contenu renderer par renderer plutôt que leur écriture
-        // physique sous tmp.
-        fs::create_dir_all(tmp.join("trader/src")).unwrap();
+        // ⚠️ On passe par `generate_for_app_at` avec un src_dir SOUS TMP, jamais par
+        // `generate_for_app` : ce dernier résout `app.src_dir()` via
+        // ATELIER_APPS_RUNTIME_ROOT (défaut /var/lib/atelier/apps) — sur Medion, un
+        // `cargo test` écrirait alors dans le VRAI workspace trader (constaté le
+        // 2026-06-11 : settings.json/.mcp.json de prod écrasés par la config fixture).
+        let src_dir = tmp.join("trader/src");
+        fs::create_dir_all(&src_dir).unwrap();
 
         // Pré-créer des vestiges au niveau parent (app_dir) : CLAUDE.md, .mcp.json, .claude/
         // → doivent tous disparaître après generate_for_app (cleanup legacy).
@@ -1697,8 +1697,19 @@ mod tests {
         assert!(parent_dir.join("CLAUDE.md").exists());
         assert!(parent_dir.join(".claude").exists());
 
-        ctx.generate_for_app(&trader, &all, Some(vec!["users".into(), "trades".into()]))
-            .unwrap();
+        ctx.generate_for_app_at(
+            &trader,
+            &src_dir,
+            &all,
+            Some(vec!["users".into(), "trades".into()]),
+            true,
+        )
+        .unwrap();
+
+        // Les écritures sont bien confinées sous tmp.
+        assert!(src_dir.join(".claude/settings.json").exists());
+        assert!(src_dir.join(".mcp.json").exists());
+        assert!(src_dir.join(".claude/rules/docs.md").exists());
 
         // Cleanup legacy parent-level : tout a disparu.
         assert!(!parent_dir.join("CLAUDE.md").exists(),
@@ -1708,8 +1719,7 @@ mod tests {
         assert!(!parent_dir.join(".claude").exists(),
                 "trader/.claude/ parent-level doit être supprimé intégralement");
 
-        // Les renderers produisent le bon contenu (vérif directe, indépendante du
-        // path d'écriture physique qui dépend du hardcoded src_dir).
+        // Les renderers produisent le bon contenu (vérif directe).
         let settings = render_settings_json_with_auth(
             "http://127.0.0.1:4001/mcp?project=trader",
             None,
@@ -1719,13 +1729,10 @@ mod tests {
             parsed["mcpServers"]["studio"]["url"].as_str().unwrap(),
             "http://127.0.0.1:4001/mcp?project=trader"
         );
-        assert!(
-            parsed["permissions"]["allow"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v.as_str() == Some("mcp__studio"))
-        );
+        // INVARIANT runner : aucune allow rule dans le settings.json projet (une allow
+        // court-circuiterait le canUseTool du runner agent — exec root même en plan).
+        assert!(parsed.get("permissions").is_none(),
+                "settings.json projet ne doit plus porter de bloc permissions");
 
         // app-info.md contient l'identité + autres apps + DB tables.
         let app_info = render_app_info_md(&trader, &all, &Some(vec!["users".into(), "trades".into()]));
