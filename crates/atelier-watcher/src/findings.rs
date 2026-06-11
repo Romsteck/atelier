@@ -210,6 +210,36 @@ impl FindingsStore {
             .await?;
         Ok(row.try_get("c")?)
     }
+
+    /// Open-finding counts grouped by (slug, kind, severity), all apps at once.
+    /// Backs the global surveillance dashboard (`GET /api/surveillance/overview`).
+    pub async fn count_open_grouped(&self) -> anyhow::Result<Vec<OpenCountRow>> {
+        let sql = r#"
+            SELECT slug, kind, severity, COUNT(*)::bigint AS c
+              FROM findings
+             WHERE status = 'open'
+             GROUP BY slug, kind, severity
+        "#;
+        let rows: Vec<PgRow> = query(sql).fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(|row| {
+                Ok(OpenCountRow {
+                    slug: row.try_get("slug")?,
+                    kind: row.try_get("kind")?,
+                    severity: row.try_get("severity")?,
+                    count: row.try_get("c")?,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenCountRow {
+    pub slug: String,
+    pub kind: String,
+    pub severity: String,
+    pub count: i64,
 }
 
 fn row_to_finding(row: &PgRow) -> anyhow::Result<Finding> {

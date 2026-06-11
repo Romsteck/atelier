@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -15,6 +17,7 @@ use crate::state::ApiState;
 
 /// Routes mounted under `/api`. Exposed:
 ///   GET    /api/findings
+///   GET    /api/surveillance/overview
 ///   GET    /api/apps/:slug/findings
 ///   POST   /api/apps/:slug/findings/:id/dismiss
 ///   POST   /api/apps/:slug/findings/:id/resolve
@@ -22,6 +25,10 @@ use crate::state::ApiState;
 ///   GET    /api/apps/:slug/surveillance/runs
 pub fn global_router() -> Router<ApiState> {
     Router::new().route("/", get(list_findings_global))
+}
+
+pub fn overview_router() -> Router<ApiState> {
+    Router::new().route("/overview", get(surveillance_overview))
 }
 
 pub fn app_router() -> Router<ApiState> {
@@ -102,6 +109,125 @@ async fn list_findings_app(
             err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         }
     }
+}
+
+/// Aggregated snapshot for the global dashboard: per app × kind, open-finding
+/// counts by severity + last run, plus global totals. One round-trip — the
+/// detail (findings list, actions, live console) lives in the per-app Studio tab.
+#[instrument(skip(state))]
+async fn surveillance_overview(State(state): State<ApiState>) -> impl IntoResponse {
+    let (Some(findings), Some(runs)) = (state.surveillance.findings(), state.surveillance.runs())
+    else {
+        return err503();
+    };
+    let counts = match findings.count_open_grouped().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(?e, "overview: count_open_grouped failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    };
+    let latest = match runs.latest_per_app_kind().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(?e, "overview: latest_per_app_kind failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    };
+
+    const SEVERITIES: [&str; 4] = ["critical", "high", "medium", "low"];
+    let mut count_map: HashMap<(String, String), [i64; 4]> = HashMap::new();
+    for row in counts {
+        let Some(idx) = SEVERITIES.iter().position(|s| *s == row.severity) else {
+            continue;
+        };
+        count_map.entry((row.slug, row.kind)).or_default()[idx] += row.count;
+    }
+    let mut run_map: HashMap<(String, String), atelier_watcher::Run> = HashMap::new();
+    for run in latest {
+        run_map.insert((run.slug.clone(), run.kind.clone()), run);
+    }
+
+    let kinds = [
+        atelier_watcher::SECURITY_KIND,
+        atelier_watcher::CODE_REVIEW_KIND,
+        atelier_watcher::BIZ_KIND,
+    ];
+    let mut totals = [0i64; 4];
+    let (mut running, mut failed) = (0u32, 0u32);
+    let mut apps_json = Vec::new();
+    for app in state.app_registry.list().await {
+        let biz_scan = state.surveillance.scan_get(&app.slug).await;
+        let mut app_total = 0i64;
+        let mut kinds_json = Vec::new();
+        for kind in kinds {
+            let (label, blank) = if kind == atelier_watcher::BIZ_KIND {
+                let blank = biz_scan.as_ref().map(|s| s.is_blank()).unwrap_or(true);
+                let label = biz_scan
+                    .as_ref()
+                    .filter(|s| !s.label.is_empty())
+                    .map(|s| s.label.clone())
+                    .unwrap_or_else(|| "Business".to_string());
+                (label, blank)
+            } else if kind == atelier_watcher::SECURITY_KIND {
+                ("Sécurité".to_string(), false)
+            } else {
+                ("Qualité".to_string(), false)
+            };
+            let open = count_map
+                .get(&(app.slug.clone(), kind.to_string()))
+                .copied()
+                .unwrap_or_default();
+            let open_total: i64 = open.iter().sum();
+            app_total += open_total;
+            for (i, n) in open.iter().enumerate() {
+                totals[i] += n;
+            }
+            let last_run = run_map.get(&(app.slug.clone(), kind.to_string())).map(|r| {
+                match r.status.as_str() {
+                    "running" => running += 1,
+                    "failed" => failed += 1,
+                    _ => {}
+                }
+                json!({
+                    "id": r.id,
+                    "status": r.status,
+                    "trigger": r.trigger,
+                    "started_at": r.started_at,
+                    "finished_at": r.finished_at,
+                    "findings_count": r.findings_count,
+                    "error": r.error,
+                })
+            });
+            kinds_json.push(json!({
+                "kind": kind,
+                "label": label,
+                "blank": blank,
+                "open": SEVERITIES.iter().zip(open).collect::<HashMap<_, _>>(),
+                "open_total": open_total,
+                "last_run": last_run,
+            }));
+        }
+        apps_json.push(json!({
+            "slug": app.slug,
+            "name": app.name,
+            "open_total": app_total,
+            "kinds": kinds_json,
+        }));
+    }
+
+    let apps_count = apps_json.len();
+    let body = json!({
+        "apps": apps_json,
+        "totals": {
+            "open": SEVERITIES.iter().zip(totals).collect::<HashMap<_, _>>(),
+            "open_total": totals.iter().sum::<i64>(),
+            "apps": apps_count,
+            "running": running,
+            "failed": failed,
+        },
+    });
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 #[derive(Debug, Deserialize)]

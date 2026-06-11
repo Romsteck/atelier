@@ -69,6 +69,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/tasks", routes::tasks::router())
         .nest("/logs", routes::logs::router())
         .nest("/findings", routes::surveillance::global_router())
+        .nest("/surveillance", routes::surveillance::overview_router())
         .nest("/apps", routes::surveillance::app_router())
         .nest("/apps", routes::agent::app_router())
         .nest("/apps", routes::source::app_router())

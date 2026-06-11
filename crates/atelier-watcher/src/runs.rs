@@ -162,6 +162,40 @@ impl RunsStore {
             .await?;
         rows.iter().map(row_to_run).collect()
     }
+
+    /// Latest run per (slug, kind), all apps at once. An in-flight (`running`)
+    /// run always wins the DISTINCT ON tiebreak — a concurrent run of the same
+    /// pair that settles fast (skipped/failed) must not hide the dashboard's
+    /// "in progress" indicator. Backs `GET /api/surveillance/overview`.
+    pub async fn latest_per_app_kind(&self) -> anyhow::Result<Vec<Run>> {
+        let sql = r#"
+            SELECT DISTINCT ON (slug, kind)
+                   id, slug, kind, trigger, started_at, finished_at, status,
+                   skip_reason, findings_count, tokens_in, tokens_out,
+                   git_sha_before, git_sha_reviewed, error
+              FROM surveillance_runs
+             ORDER BY slug, kind, (status = 'running') DESC, started_at DESC
+        "#;
+        let rows: Vec<PgRow> = query(sql).fetch_all(&self.pool).await?;
+        rows.iter().map(row_to_run).collect()
+    }
+
+    /// Boot reconciliation: any row still 'running' belongs to a previous
+    /// process (its tokio task died with it) — mark it failed so the dashboard
+    /// "running" counter cannot stay stuck.
+    pub async fn reconcile_interrupted(&self) -> anyhow::Result<u64> {
+        let res = query(
+            r#"
+            UPDATE surveillance_runs
+               SET status = 'failed', finished_at = now(),
+                   error = 'interrupted by restart'
+             WHERE status = 'running'
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 fn row_to_run(row: &PgRow) -> anyhow::Result<Run> {

@@ -263,8 +263,18 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
   );
 }
 
-export default function SurveillanceTab({ slug }) {
-  const [activeKind, setActiveKind] = useState('security');
+const VALID_KINDS = ['security', 'code_review', 'business'];
+
+export default function SurveillanceTab({ slug, initialKind }) {
+  const [activeKind, setActiveKind] = useState(
+    VALID_KINDS.includes(initialKind) ? initialKind : 'security'
+  );
+
+  // Deep-link hint (?kind= from the global dashboard) — also applies when the
+  // Studio is already mounted. Manual tab clicks afterwards take precedence.
+  useEffect(() => {
+    if (VALID_KINDS.includes(initialKind)) setActiveKind(initialKind);
+  }, [initialKind]);
   const [scan, setScan] = useState(null); // the BUSINESS scan definition
   const [blank, setBlank] = useState(true);
   const [showDef, setShowDef] = useState(false); // business definition panel toggle

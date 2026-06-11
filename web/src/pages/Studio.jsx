@@ -597,7 +597,7 @@ export default function Studio() {
       case 'db':           return currentApp?.has_db ? <DbExplorer appSlug={selectedSlug} embedded /> : null;
       case 'logs':         return <LogsTab slug={selectedSlug} />;
       case 'docs':         return <DocsTab slug={selectedSlug} />;
-      case 'surveillance': return <SurveillanceTab slug={selectedSlug} />;
+      case 'surveillance': return <SurveillanceTab slug={selectedSlug} initialKind={searchParams.get('kind')} />;
       case 'env':          return <EnvTab slug={selectedSlug} />;
       case 'settings':     return <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />;
       default:             return null;

@@ -233,7 +233,9 @@ export const searchDocs = (params) => api.get('/docs/search', { params });
 export const getDocsCompleteness = (appId) => api.get(`/docs/${appId}/completeness`);
 
 // ========== Surveillance IA (3 scans : security, code_review, business) ==========
-export const getFindings = (params = {}) => api.get('/findings', { params });
+// Snapshot agrégé pour le dashboard global : par app × kind, compteurs open par
+// sévérité + dernier run, plus totaux. Le détail vit dans l'onglet Studio per-app.
+export const getSurveillanceOverview = () => api.get('/surveillance/overview');
 export const getAppFindings = (slug, params = {}) =>
   api.get(`/apps/${slug}/findings`, { params });
 export const dismissFinding = (slug, id, reason) =>

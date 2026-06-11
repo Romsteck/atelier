@@ -117,6 +117,16 @@ impl SurveillanceService {
         };
 
         if enabled {
+            // Boot reconciliation: rows left 'running' by a previous process
+            // (restart mid-scan kills the detached tokio task) would otherwise
+            // pin the dashboard's "running" counter forever.
+            if let Some(r) = svc.inner.runs.as_ref() {
+                match r.reconcile_interrupted().await {
+                    Ok(0) => {}
+                    Ok(n) => warn!(count = n, "surveillance: marked interrupted runs as failed"),
+                    Err(e) => warn!(?e, "surveillance: stale-run reconciliation failed"),
+                }
+            }
             // No internal scheduler — runs are manual only (a cron would burn
             // too much GPT+ subscription). git_watcher still auto-resolves
             // findings from `fix(surveillance:N)` commits.

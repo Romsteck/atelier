@@ -34,7 +34,7 @@ pub mod scandef;
 pub mod service;
 
 pub use codex::{CodexConfig, CodexRunner};
-pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding};
+pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding, OpenCountRow};
 pub use memory::{Memory, MemoryStore};
 pub use runs::{Run, RunsStore};
 pub use scandef::{
