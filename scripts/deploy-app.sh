@@ -95,15 +95,16 @@ curl -fsS -X POST "$ATELIER_API/api/apps/$SLUG/control" \
   exit 1
 }
 
-# Healthcheck: poll the public app URL — exercises the full chain (hr-edge
-# route + auth bypass for healthchecks + app TCP listener). A 3xx is accepted
-# because `auth_required: true` apps redirect anonymous calls to /login.
-DOMAIN="${SLUG}.mynetwk.biz"
-echo "→ healthcheck https://$DOMAIN$HEALTH_PATH"
+# Healthcheck: poll the app through the Atelier path-proxy (/apps/{slug}) —
+# exercises the same proxy chain users traverse and reaches the app's TCP
+# listener. The {slug}.mynetwk.biz hostnames are dead (path-routing era), and
+# the edge would 302 anonymous calls before reaching the app anyway.
+HEALTH_URL="${ATELIER_API}/apps/${SLUG}${HEALTH_PATH}"
+echo "→ healthcheck $HEALTH_URL"
 HEALTH_CODE="000"
 for i in $(seq 1 15); do
   sleep 2
-  HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://$DOMAIN$HEALTH_PATH" || echo 000)"
+  HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$HEALTH_URL" || echo 000)"
   if [[ "$HEALTH_CODE" =~ ^(2|3)[0-9][0-9]$ ]]; then
     echo "  healthcheck OK (HTTP $HEALTH_CODE after $((i * 2))s)"
     exit 0
