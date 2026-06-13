@@ -174,7 +174,16 @@ impl AppSupervisor {
         // If a stale unit is lingering (e.g. after a crash while we were offline), reset it.
         let _ = run_systemctl(&["reset-failed", &unit_name(slug)]).await;
 
-        if !port_is_free(app.port).await && !unit_is_active(slug).await {
+        // Une unité déjà active (supervision perdue, état persisté divergent) est
+        // la réalité : l'adopter plutôt que de laisser systemd-run échouer sur
+        // « unit already loaded ».
+        if unit_is_active(slug).await {
+            info!(app_slug = slug, "start: unit already active, adopting");
+            self.adopt_active_unit(app).await;
+            return Ok(());
+        }
+
+        if !port_is_free(app.port).await {
             warn!(app_slug = slug, port = app.port, "start: port not free (foreign process)");
             {
                 let mut proc = proc_arc.lock().await;
@@ -203,28 +212,33 @@ impl AppSupervisor {
     /// Retour synchrone : à la fin de l'await, l'unité est garantie déchargée
     /// — un `systemd-run` immédiat suivant cet appel ne se fera pas refuser.
     pub async fn stop(&self, slug: &str) -> Result<()> {
-        let proc_arc = match self.processes.read().await.get(slug).cloned() {
-            Some(p) => p,
-            None => {
+        let proc_arc = self.processes.read().await.get(slug).cloned();
+        if proc_arc.is_none() {
+            if !unit_is_active(slug).await {
                 info!(app_slug = slug, "stop: not supervised");
                 return Ok(());
             }
-        };
+            // Unité vivante mais supervision perdue : la stopper quand même,
+            // sinon le systemd-run du start suivant échoue sur « unit already
+            // loaded ».
+            warn!(app_slug = slug, "stop: unit active but not supervised, stopping orphan unit");
+        }
 
-        let (watcher, health) = {
-            let mut proc = proc_arc.lock().await;
-            proc.stop_requested = true;
-            proc.state = AppState::Stopping;
-            (proc.watcher.take(), proc.health.take())
-        };
+        if let Some(proc_arc) = &proc_arc {
+            let (watcher, health) = {
+                let mut proc = proc_arc.lock().await;
+                proc.stop_requested = true;
+                proc.state = AppState::Stopping;
+                (proc.watcher.take(), proc.health.take())
+            };
+            if let Some(h) = health {
+                h.abort();
+            }
+            if let Some(w) = watcher {
+                w.abort();
+            }
+        }
         self.update_app_state(slug, AppState::Stopping).await;
-
-        if let Some(h) = health {
-            h.abort();
-        }
-        if let Some(w) = watcher {
-            w.abort();
-        }
 
         let unit = unit_name(slug);
 
@@ -267,7 +281,7 @@ impl AppSupervisor {
         //    pourraient considérer le slot encore occupé.
         let _ = run_systemctl(&["reset-failed", &unit]).await;
 
-        {
+        if let Some(proc_arc) = &proc_arc {
             let mut proc = proc_arc.lock().await;
             proc.state = AppState::Stopped;
             proc.pid = None;
@@ -295,32 +309,39 @@ impl AppSupervisor {
         Some(proc.status())
     }
 
-    /// For each app with persisted state `Running`, either adopt the existing systemd unit
-    /// (if still active) or start it fresh. Called once at orchestrator boot.
+    /// For each app, adopt the existing systemd unit if still active, or start it
+    /// fresh when its persisted state says it should run. Called once at boot.
     pub async fn start_all_running(&self) -> Result<()> {
         let apps = self.registry.list().await;
         for app in apps {
-            if !matches!(app.state, AppState::Running | AppState::Starting) {
-                continue;
-            }
+            // L'unité active fait foi, même si l'état persisté diverge (ex. un
+            // `crashed` périmé) : sans adoption l'app devient orpheline — unité
+            // vivante mais stop/restart no-op (« not supervised »).
             if unit_is_active(&app.slug).await {
                 info!(app_slug = %app.slug, "adopt: unit still active, attaching watcher");
-                let proc_arc = self.get_or_create_process(&app.slug, app.port).await;
-                {
-                    let mut proc = proc_arc.lock().await;
-                    proc.state = AppState::Running;
-                    proc.started_at = Some(Instant::now());
-                    proc.last_start = Some(Instant::now());
-                    proc.pid = unit_main_pid(&app.slug).await;
+                self.adopt_active_unit(app).await;
+            } else if matches!(app.state, AppState::Running | AppState::Starting) {
+                if let Err(e) = self.start(&app.slug).await {
+                    error!(app_slug = %app.slug, error = %e, "start_all_running failed");
                 }
-                self.update_app_state(&app.slug, AppState::Running).await;
-                let app_clone = app.clone();
-                self.attach_watcher(app_clone, proc_arc).await;
-            } else if let Err(e) = self.start(&app.slug).await {
-                error!(app_slug = %app.slug, error = %e, "start_all_running failed");
             }
         }
         Ok(())
+    }
+
+    /// Adopt an already-active systemd unit: mark the process Running, record
+    /// the PID and attach watcher/health loops without spawning anything.
+    async fn adopt_active_unit(&self, app: Application) {
+        let proc_arc = self.get_or_create_process(&app.slug, app.port).await;
+        {
+            let mut proc = proc_arc.lock().await;
+            proc.state = AppState::Running;
+            proc.started_at = Some(Instant::now());
+            proc.last_start = Some(Instant::now());
+            proc.pid = unit_main_pid(&app.slug).await;
+        }
+        self.update_app_state(&app.slug, AppState::Running).await;
+        self.attach_watcher(app, proc_arc).await;
     }
 
     /// Detach from supervised apps without killing them. Called at orchestrator shutdown
