@@ -365,6 +365,7 @@ impl AppsContext {
         &self,
         slug: String,
         name: Option<String>,
+        stack: Option<String>,
         visibility: Option<String>,
         run_command: Option<String>,
         build_command: Option<String>,
@@ -383,6 +384,12 @@ impl AppsContext {
 
         if let Some(n) = name {
             app.name = n;
+        }
+        if let Some(s) = stack {
+            match parse_stack(&s) {
+                Some(st) => app.stack = st,
+                None => return IpcResponse::err(format!("invalid stack: {s}")),
+            }
         }
         if let Some(v) = visibility {
             match parse_visibility(&v) {

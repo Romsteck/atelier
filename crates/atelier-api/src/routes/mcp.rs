@@ -649,6 +649,7 @@ async fn handle_tools_call(
             tool_name,
             "app.status" | "app.control" | "app.logs" | "app.exec" | "app.get" |
             "app.health" | "app.regenerate_context" | "app.delete" | "app.build" |
+            "app.update" |
             "git.log" | "git.branches" |
             "studio.refresh_context" |
             "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete"
@@ -696,6 +697,7 @@ async fn handle_tools_call(
         "app.build" => tool_app_build(id, &arguments, state).await,
         "app.logs" => tool_app_logs(id, &arguments, state).await,
         "app.create" => tool_app_create(id, &arguments, state).await,
+        "app.update" => tool_app_update(id, &arguments, state).await,
         "app.delete" => tool_app_delete(id, &arguments, state).await,
         "app.regenerate_context" => tool_app_regenerate_context(id, &arguments, state).await,
         // ── Studio ──
@@ -1400,6 +1402,26 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
+            "name": "app.update",
+            "description": "Update an application's registry config (partial: only provided fields change). Does not restart the app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "name": { "type": "string" },
+                    "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum"] },
+                    "visibility": { "type": "string", "enum": ["public", "private"] },
+                    "run_command": { "type": "string" },
+                    "build_command": { "type": "string" },
+                    "health_path": { "type": "string" },
+                    "env_vars": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "has_db": { "type": "boolean" },
+                    "build_artefact": { "type": "string", "description": "Override artefact path(s) rsynced back after `app.build`. One per line, relative to src/." }
+                },
+                "required": ["slug"]
+            }
+        },
+        {
             "name": "app.control",
             "description": "Control an application process: start, stop, or restart.",
             "inputSchema": {
@@ -1731,6 +1753,39 @@ async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
             build_command,
             health_path,
             build_artefact,
+        )
+        .await,
+    )
+}
+
+async fn tool_app_update(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let opt_str = |key: &str| args.get(key).and_then(|v| v.as_str()).map(String::from);
+    let env_vars = args.get("env_vars").and_then(|v| v.as_object()).map(|m| {
+        m.iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    });
+    let has_db = args.get("has_db").and_then(|v| v.as_bool());
+    ipc_resp_to_mcp(
+        id,
+        ctx.update(
+            slug.to_string(),
+            opt_str("name"),
+            opt_str("stack"),
+            opt_str("visibility"),
+            opt_str("run_command"),
+            opt_str("build_command"),
+            opt_str("health_path"),
+            env_vars,
+            has_db,
+            opt_str("build_artefact"),
         )
         .await,
     )
