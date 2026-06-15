@@ -1,22 +1,17 @@
-# 🚧 Path-routing — phase ultérieure
+# 🚧 Path-routing — couche interne LIVE, intégration hr-edge pendante
 
-> **Le but initial de la séparation Studio→Atelier était de servir les apps via path-based routing** : `https://app.mynetwk.biz/apps/{slug}` au lieu de `https://{slug}.mynetwk.biz`. Cette transformation est **explicitement reportée** ; à reprendre une fois le rapatriement Medion stabilisé.
+> **MAJ 2026-06-15** : le path-routing **interne à Atelier est LIVE**. Les apps sont servies en même-origine sous `http://127.0.0.1:4100/apps/{slug}/` (`crates/atelier-api/src/routes/apps_proxy.rs`), `www` en mode no-strip avec `basePath:/apps/www` (autres slugs no-strip via `ATELIER_PRESERVE_PREFIX_SLUGS`). Les sous-domaines `{slug}.mynetwk.biz` sont **morts** (404). Ce qui reste pendant : l'intégration **côté hr-edge** (hostname public + path) et l'**auth path-aware**.
 
-## Pourquoi reporté ?
+## État par couche
 
-Le path-routing demande un changement coordonné sur 4 couches :
-1. **hr-edge / hr-proxy** : matcher hostname-only aujourd'hui (`find_route(host)` dans `crates/edge/hr-proxy/src/handler.rs`). Faut ajouter une couche de path-matching pour `/apps/{slug}`.
-2. **NextJS apps** (`www`, plus tard aptymus/calendar/forge/padel) : ajouter `basePath: "/apps/{slug}"` dans `next.config.{ts,js}` au build. Sinon les chemins relatifs CSS/JS (`/_next/static/...`) cassent.
-3. **Apps Rust/Axum** : utiliser `Router::nest("/apps/{slug}", ...)` (pris en charge nativement par axum). Vérifier les redirections internes (`/login` → `/apps/<slug>/login`).
-4. **Auth** : forward-auth actuel matche par `domain_only`. Faut étendre pour matcher path + hostname.
-
-Le rapatriement Medion (2026-05-09) ne touche pas à ces couches : routes restent `{slug}.mynetwk.biz → 127.0.0.1:port`. Reprendre path-routing ensuite.
+1. **hr-edge / hr-proxy** — ⏳ PENDANT : matcher hostname-only aujourd'hui (`find_route(host)` dans `crates/edge/hr-proxy/src/handler.rs`). Pas encore de path-matching `/apps/{slug}` côté edge ; l'accès externe passe par `atelier.mynetwk.biz` (le frontend Atelier proxifie en interne).
+2. **NextJS apps** — ✅ FAIT pour `www` (`basePath:/apps/www` dans `next.config.ts`, servi no-strip par le path-proxy). À refaire par app NextJS future.
+3. **Apps Rust/Axum** — ✅ servies en mode strip par le path-proxy (préfixe `/apps/{slug}` retiré avant proxy) ; pas de `Router::nest` requis côté app.
+4. **Auth** — ⏳ PENDANT : forward-auth hr-edge matche par `domain_only` ; à étendre pour matcher path + hostname quand on exposera `/apps/{slug}` publiquement.
 
 ## Trigger de reprise
 
-Quand l'écosystème est stable (≥1 semaine post-rapatriement, pas de régression majeure), annoncer :
-
-> "Le rapatriement Medion est stable depuis N jours. On peut maintenant attaquer le path-routing `app.mynetwk.biz/apps/{slug}` (cf. .claude/rules/path-routing-pending.md)."
+La couche interne est faite. Le trigger restant concerne l'**exposition publique** par path. Quand on veut router `atelier.mynetwk.biz/apps/{slug}` (ou un autre hostname) avec auth path-aware au lieu de tout passer par le frontend Atelier, attaquer les Phases A (hr-edge path-matching) + C (auth path-aware) ci-dessous.
 
 ## Plan d'attaque (esquisse, à raffiner)
 

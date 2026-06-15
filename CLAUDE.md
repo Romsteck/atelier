@@ -1,157 +1,281 @@
 # Atelier — Plateforme applicative HomeRoute
 
-## Statut migration (2026-05-27)
+## Statut migration (2026-06-15)
 
-> ✅ **Studio Atelier + sources apps rapatriés sur Medion** — `atelier-studio.service` (code-server, 127.0.0.1:8443) tourne sur Medion, route hr-edge `codeserver.mynetwk.biz → 127.0.0.1:8443`. Les sources canoniques des 6 apps vivent désormais à `/var/lib/atelier/apps/<slug>/src/` (source = runtime, plus de copie interne).
+> ✅ **Plateforme stabilisée sur Medion** — 5 apps live (`www:3005`, `home:3007`, `trader:3008`, `wallet:3009`, `myfrigo:3010`), l'app `files` décommissionnée (2026-05-31). Atelier tourne en `atelier.service` (4100) : supervisor + apps API + frontend + passerelle dataverse + agent Claude (Studio) + surveillance IA (Codex) + backup restic.
 >
-> Précédemment (2026-05-09) : Atelier supervisor + apps rapatriés sur Medion. CloudMaster ne servait plus que le Studio + sources apps.
+> ✅ **Path-routing interne LIVE** — les apps sont servies via le proxy même-origine `/apps/{slug}/` (`crates/atelier-api/src/routes/apps_proxy.rs`). Les sous-domaines `{slug}.mynetwk.biz` sont **morts** (404 hr-edge) et `app.mynetwk.biz` n'a **plus de route hr-edge**. Hostname externe fonctionnel = **`atelier.mynetwk.biz`** ; accès direct sans auth en local = `http://127.0.0.1:4100/apps/{slug}/`.
 >
-> **Maintenant CloudMaster héberge encore** : (a) le code source d'Atelier (`/nvme/atelier/`) — édité, buildé et déployé via `make deploy` ; (b) le code-server perso (port 9080, `code.mynetwk.biz`).
+> ✅ **Control-plane en Postgres** — registres (apps/ports), tasks et index docs migrés des fichiers/SQLite vers la base partagée `atelier_meta` (commit `ac85017`, 2026-05-31 ; déployé dans le binaire installé le 2026-06-11). Les fichiers `/opt/atelier/data/{apps.json,port-registry.json}` + `docs-index.sqlite` ne restent que comme filets de backfill (importés une seule fois, idempotent, au 1er boot post-migration).
+>
+> ✅ **Source Atelier + binaire sur Medion** — code à `/home/romain/atelier`, `make deploy` build **en place** et installe dans `/opt/atelier`. CloudMaster décommissionné (2026-05-31).
 
-### Restant à faire (différé)
+### Historique condensé
 
-- **9.2 finition write endpoints Atelier** — list/get/env/control/status implémentés. Manquent : create/update/delete/build/deploy/exec/update_env/regenerate_context/logs/todos. Boutons Studio/DbExplorer correspondants → 404 silencieux. **Symptôme observé** : Files /api/files/upload retourne `dv: gateway error 405`, et le scheduler `home` log toutes les 10s `failed to log command_history: gateway error 405`.
-- **Path-routing `app.mynetwk.biz/apps/{slug}`** — but initial de la séparation Studio. Le proxy par chemin est en place dans Atelier (`crates/atelier-api/src/routes/apps_proxy.rs`). `www` (Next.js) est servi en **no-strip** : son préfixe `/apps/www` est préservé jusqu'à l'app (requis par `basePath`/`assetPrefix`). Les slugs no-strip sont listés via `ATELIER_PRESERVE_PREFIX_SLUGS` (défaut `www`) ; les autres apps (Vite/Axum) restent en strip. La généralisation (basePath par app, auth path-aware, bascule des hostnames) reste reportée ; cf. [.claude/rules/path-routing-pending.md](.claude/rules/path-routing-pending.md).
+- **2026-05-09** — Rapatriement supervisor + apps sur Medion (Atelier autonome, port 4100).
+- **2026-05-26** — Système de flux `hr-flow` **éradiqué** (lib + daemon + macros + callback + 34 TOML sur 6 apps). Chaque app refondue en code natif (Rust/TS). 4 crates `hr-flow*` supprimées, daemon `hr-flowd` désinstallé, routes/MCP/UI flow retirés. Cf. [docs/refonte/](docs/refonte/).
+- **2026-05-27** — Studio (code-server) rapatrié sur Medion (`atelier-studio.service`, 127.0.0.1:8443). Sources canoniques apps = runtime à `/var/lib/atelier/apps/{slug}/src/`.
+- **2026-05-30** — Migration **postgres-dataverse** finalisée + découplage homeroute terminé (crates renommées `atelier-*`). SQLite excisé. Décommission de l'accès Postgres direct (gateway-only).
+- **2026-05-31** — Control-plane → Postgres `atelier_meta`. App `files` décommissionnée. CloudMaster décommissionné.
+- **2026-06-05 → 06-11** — Agent Claude natif intégré au Studio (multi-conversations, gate de plan, drain au shutdown) ; surveillance IA refondue en 3 scans/app ; backup restic+rclone ; control-plane déployé.
 
-## Système de flux — supprimé (2026-05-26)
+---
 
-Le système `hr-flow` (lib + daemon + macros + callback + 34 TOML répartis sur 6 apps) a été éradiqué le 2026-05-26. Chaque app a été refondue en code natif (Rust ou TS). Voir [docs/refonte/](docs/refonte/) pour le journal détaillé. Les 4 crates `hr-flow*` ont été supprimées du workspace, le daemon `hr-flowd` désinstallé sur Medion, et toutes les routes/MCP tools/UI flow ont été retirées d'Atelier.
+## Migration postgres-dataverse + gateway-only (finalisée 2026-05-30)
 
-## Migration postgres-dataverse — finalisée (2026-05-30)
+Les **5 apps** (www, home, trader, wallet, myfrigo) tournent sur **postgres-dataverse** (bases `app_{slug}`, provisionnées dans `dataverse-secrets.json`). L'ancien moteur **SQLite** a été supprimé (crates `atelier-db` + `atelier-dataverse-migrate` retirées du workspace). Tous les handlers `db_*` routent vers le moteur Postgres (`atelier-dataverse`) ; plus de `db.sqlite`, plus d'env `DB_PATH`/`DATABASE_PATH`. Le SQL brut (`db_query`/`db_exec`) renvoie une erreur dirigée vers `dv_*` / la passerelle REST `/api/dv/{slug}/{table}`.
 
-Les 6 apps (www, files, home, trader, wallet, myfrigo) tournent sur **postgres-dataverse** (bases `app_{slug}`, provisionnées dans `dataverse-secrets.json`). L'ancien moteur **SQLite** a été supprimé :
+**Gateway-only.** Les 5 apps n'ont **aucune lecture directe** de Postgres : plus de `DATABASE_URL`/`sqlx` dans leur code, tout passe par la passerelle REST `/api/dv/{slug}` + le contrat `HR_DV_*` :
 
-- Crates `atelier-db` (moteur SQLite) et `atelier-dataverse-migrate` (outil de migration one-shot) supprimées du workspace.
-- `DbManager` SQLite + ses branches mortes retiré ; tous les handlers MCP `db_*` routent vers le moteur Postgres (`atelier-dataverse`). La génération de contexte lit le schéma depuis Postgres (plus le SQLite périmé).
-- Plus de création de `db.sqlite` ni d'injection d'env `DB_PATH`/`DATABASE_PATH`.
-- Le SQL brut (`db_query`/`db_exec`) renvoie une erreur dirigée vers `dv_*` / la passerelle REST `/api/dv/{slug}/{table}`.
+```
+HR_DV_BASE_URL=http://127.0.0.1:4100/api/dv/{slug}
+HR_DV_TOKEN=<base64url(32 octets aléatoires)>   # Authorization: Bearer
+HR_APP_UUID=<identité stable par app>
+```
 
-**Décommission de l'accès Postgres direct — terminée (2026-05-30).** Les 6 apps sont en **gateway-only** : plus aucune lecture de `DATABASE_URL`/`sqlx` dans leur code (tout passe par la passerelle REST `/api/dv/{slug}` + `HR_DV_*`). `sync_dv_env` n'injecte plus `DATABASE_URL` et le DSN a été purgé des `.env` runtime — **le process applicatif n'a donc plus aucun moyen de se connecter directement** à Postgres.
+`sync_dv_env` n'injecte plus `DATABASE_URL` ; le DSN est purgé des `.env` runtime — le process applicatif n'a donc **plus aucun moyen** de se connecter directement à Postgres.
 
-> ⚠️ Les rôles PG `app_{slug}` **gardent `LOGIN`** : c'est la passerelle (Atelier `atelier-dataverse`) qui se connecte à la base `app_{slug}` **en s'authentifiant comme ce rôle** (isolation par app via les credentials de `dataverse-secrets.json`), pas comme `dataverse_admin`. Les passer en `NOLOGIN` casse la passerelle — vérifié le 2026-05-30 (www : « le rôle app_www n'est pas autorisé à se connecter »). Ne PAS révoquer `LOGIN` sans d'abord re-câbler la passerelle sur un rôle partagé (ce qui perdrait l'isolation par app).
+> ⚠️ Les rôles PG `app_{slug}` **gardent `LOGIN`** : la passerelle (`atelier-dataverse`) se connecte à la base `app_{slug}` **en s'authentifiant comme ce rôle** (isolation par app via les credentials de `dataverse-secrets.json`), pas comme `dataverse_admin`. Les passer en `NOLOGIN` casse la passerelle (vérifié 2026-05-30). Ne PAS révoquer `LOGIN` sans re-câbler la passerelle sur un rôle partagé (perdrait l'isolation).
 
-Le DbExplorer écrit aussi via la passerelle (endpoints admin `POST/PATCH/DELETE /api/apps/{slug}/db/tables/...`), plus aucun SQL brut.
+**DbExplorer** écrit via les endpoints admin (`POST/PATCH/DELETE /api/apps/{slug}/db/tables/...`, identité système, capture de version côté serveur pour éviter les races optimistic-lock), plus aucun SQL brut.
 
-Les anciens fichiers `db.sqlite` (snapshots d'avant migration, ~300 Mo) sont archivés puis supprimés sur Medion après vérification de parité Postgres (archive : `/var/backups/atelier-sqlite-snapshots-2026-05-30.tar.gz`).
+> **Bug réglé (ca7c94e, 2026-06-05)** : empoisonnement du cache de prepared-statements (`08P01`). Fix : le littéral NULL est inliné typé pour **tous** les types de colonne nullable (pas seulement jsonb/date/uuid/timestamptz) + contrôle du nombre de paramètres sur les builders CRUD.
 
 ---
 
 ## Quoi est Atelier
 
-Plateforme applicative autonome (post-rapatriement 2026-05-09). Contient :
+Plateforme applicative autonome (sur Medion, port 4100). Contient :
 
-- **Apps** : supervisor Tokio des apps locales (lifecycle, ports, logs) — services nommés `atelier-app-{slug}.service` (slice `atelier-apps.slice`).
-- **Dataverse** : moteur Postgres avec schéma dynamique, GraphQL, dvexpr.
-- **Docs** : système de documentation per-app (FTS5).
+- **Apps** : supervisor Tokio des apps locales (lifecycle, ports, logs, adoption d'unités orphelines) — services `atelier-app-{slug}.service` (slice `atelier-apps.slice`).
+- **Dataverse** : moteur Postgres avec schéma dynamique, passerelle REST gateway-only, dvexpr.
+- **Path-proxy** : sert les apps en même-origine sous `/apps/{slug}/` (strip ou no-strip).
+- **Studio** : code-server (`atelier-studio.service`) + **agent Claude natif** (Agent SDK Node : chat/raisonnement/planification/approbation).
+- **Surveillance IA** : 3 scans Codex par app (sécurité, qualité, business) — crate `atelier-watcher`.
+- **Backup** : restic + rclone vers SMB (incrémental, chiffré, dédupliqué) — crate `atelier-backup`.
+- **Docs** : système de documentation per-app (index de recherche désormais en Postgres `doc_entries`).
 - **Git** : bare repos.
-- **MCP** : exposition des tools `app.*`, `db.*`, `docs.*`.
+- **MCP** : tools `app.*`, `db.*`/`dv.*`, `docs.*`, `git.*`, `scan.*`. (`app.ship`/deploy est exposé en **HTTP-only** via `POST /api/apps/{slug}/ship`, pas comme tool MCP.)
 
-Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME (ces concerns restent dans `hr-edge` + `hr-netcore` sur Medion). Le **Studio** (code-server pour éditer les apps) tourne désormais aussi sur Medion (`atelier-studio.service`).
+Atelier ne contient **pas** : DNS, DHCP, reverse proxy, ACME (ces concerns restent dans `hr-edge` + `hr-netcore` côté homeroute sur Medion).
 
-## Architecture (post-rapatriement Studio, 2026-05-27)
+## Architecture
 
 ```
 Internet → Cloudflare → Medion (10.0.0.254)
                           ├─ hr-edge (proxy + ACME + auth + tunnel)
-                          │   ├─ app.mynetwk.biz       → 127.0.0.1:4100      (Atelier API + frontend)
-                          │   ├─ codeserver.mynetwk.biz → 127.0.0.1:8443     (Studio code-server)
-                          │   └─ atelier.mynetwk.biz    → 127.0.0.1:4100     (Atelier)
-                          ├─ atelier.service (4100) — supervisor + apps API + frontend
+                          │   ├─ atelier.mynetwk.biz   → 127.0.0.1:4100  (Atelier API + frontend, 302→/login anonyme)
+                          │   └─ codeserver.mynetwk.biz → 127.0.0.1:8443 (Studio code-server)
+                          │   ⚠ app.mynetwk.biz n'a PLUS de route edge ; {slug}.mynetwk.biz morts (404)
+                          ├─ atelier.service (4100) — supervisor + apps API + frontend + dataverse + agent + watcher + backup
+                          │   └─ /apps/{slug}/ — path-proxy même-origine vers 127.0.0.1:3005-3010
                           ├─ atelier-studio.service (127.0.0.1:8443) — code-server pour apps
-                          ├─ code-server@romain.service (127.0.0.1:8081) — édition source Atelier
+                          ├─ runner Node (Agent SDK) spawné en hr-studio par atelier.service
+                          ├─ code-server@romain.service (127.0.0.1:8081) — édition source Atelier (à la demande, normalement arrêté)
                           ├─ /home/romain/atelier — sources Atelier (édition + make deploy en place)
-                          ├─ atelier-app-{files,home,myfrigo,trader,wallet,www}.service
+                          ├─ atelier-app-{home,myfrigo,trader,wallet,www}.service
                           ├─ hr-edge.service / hr-orchestrator.service / homeroute.service
-                          └─ Postgres-dataverse (5432)
-
-CloudMaster (10.0.0.10)  ← décommissionné (2026-05-31)
+                          └─ Postgres (5432) : bases app_{slug} (dataverse) + atelier_meta (control-plane) + atelier_logs
 ```
 
 ## Stockage
 
 | Données | Chemin |
 |---------|--------|
-| Sources canoniques apps (= runtime) | `/var/lib/atelier/apps/{slug}/{src,bin,.env,runs,todos.json}` (Medion) — édition via Studio. Données app dans Postgres-dataverse (`app_{slug}`), plus de `db.sqlite`. |
+| Sources canoniques apps (= runtime) | `/var/lib/atelier/apps/{slug}/{src,bin,.env,runs}` (Medion) — édition via Studio. Données app dans Postgres-dataverse (`app_{slug}`), plus de `db.sqlite`. |
 | Studio code-server user-data | `/var/lib/atelier/studio/code-server/` (Medion, hr-studio:hr-studio 750) |
-| Studio user HOME | `/var/lib/hr-studio/` (Medion, user `hr-studio` UID 993) |
-| Atelier registry canonical | `/opt/atelier/data/{apps.json, port-registry.json}` (Medion) |
-| Atelier binaire + frontend | `/opt/atelier/{bin/atelier,web/dist}` (Medion) |
+| Studio user HOME + sessions agent | `/var/lib/hr-studio/` (UID 993) ; sessions agent à `/var/lib/hr-studio/.claude/sessions/{scope}/`, credentials OAuth à `.claude/.credentials.json` |
+| Control-plane canonical | **Postgres `atelier_meta`** : apps/ports (`applications`), tasks (`tasks`/`task_steps`), index docs (`doc_entries`, tsvector+GIN), surveillance (`app_scan`/`findings`/`surveillance_runs`), backup (`backup_target`/`backup_runs`/`backup_run_snapshots`), mémoire agent (`agent_memory`) |
+| Backfill control-plane (legacy, non-live) | `/opt/atelier/data/{apps.json, port-registry.json}` + `/var/lib/atelier/docs-index.sqlite` — importés 1× au 1er boot post-migration, gardés pour rollback |
+| Logs structurés | Postgres `atelier_logs` (ingest via `atelier-logging`) |
+| Atelier binaire + frontend + runner | `/opt/atelier/{bin/atelier, web/dist, runner, crates/atelier-logging-shipper}` (Medion) |
 | Atelier env | `/opt/atelier/.env` (Medion) |
-| Docs FTS5 + index | `/var/lib/atelier/{docs, docs-index.sqlite}` (Medion) |
-| Postgres-dataverse | Medion 127.0.0.1:5432 (local depuis Atelier) |
+| Docs (source contenu) | `/var/lib/atelier/docs/` (l'index de recherche est en Postgres `doc_entries`) |
+| Postgres | Medion 127.0.0.1:5432 (local depuis Atelier) |
 | dataverse-secrets.json | `/var/lib/atelier/state/dataverse-secrets.json` (Medion) |
-| **Files data (raid0)** | `/ssd_pool/homecloud/data/{files,thumbnails,downloads,films}` (Medion zfs pool) |
-| Sources Atelier (code) | `/home/romain/atelier` (Medion — édition via code-server@romain :8081, build en place) |
+| Git bare repos | `/var/lib/atelier/git/` (Medion) |
+| Files data ZFS (hors deploy) | `/ssd_pool/homecloud/data/{files,thumbnails,downloads,films}` — pool zfs Medion, géré hors Atelier, **non** synchronisé par `make deploy` (vestige de l'app files décommissionnée) |
+| Sources Atelier (code) | `/home/romain/atelier` (Medion — build en place) |
+| Backup restic (off-site) | SMB `files.mynetwk.biz:files/atelier-backup` via rclone |
 
 ## Ports & sockets
 
 | Port/socket | Hôte | Service |
 |---|---|---|
-| 4100 | Medion | Atelier HTTP API |
+| 4100 | Medion (0.0.0.0) | Atelier HTTP API + frontend + `/mcp` + `/apps/{slug}/` proxy |
 | /run/atelier.sock | Medion | Atelier IPC |
-| 3005-3010 | Medion (loopback) | Apps |
-| 8443 | Medion (loopback) | atelier-studio.service (code-server apps) |
-| 8081 | Medion (loopback) | code-server@romain (édition source Atelier) |
+| 3005-3010 | Medion (0.0.0.0) | Apps : www:3005, home:3007, trader:3008, wallet:3009, myfrigo:3010 (3006 libre) — atteintes en pratique uniquement via le path-proxy |
+| 8443 | Medion (127.0.0.1) | atelier-studio.service (code-server apps) |
+| 8081 | Medion (127.0.0.1) | code-server@romain (édition source Atelier) — **à la demande, normalement arrêté/disabled** |
+
+> Port 4001 = référence **legacy hr-orchestrator** uniquement ; aucun serveur n'écoute dessus. Le MCP d'Atelier est à `http://127.0.0.1:4100/mcp` (Bearer `MCP_TOKEN`, scope par app via `?project={slug}` ; `?scope=surveillance` restreint à une whitelist read-only pour le watcher Codex).
 
 ## Variables d'environnement Atelier (Medion `/opt/atelier/.env`)
 
 ```
+# Réellement présentes dans /opt/atelier/.env :
 ATELIER_DV_ADMIN_URL=postgres://dataverse_admin:...@127.0.0.1:5432/postgres
+ATELIER_DV_HOST=127.0.0.1
 ATELIER_APPS_RUNTIME_ROOT=/var/lib/atelier/apps
 ATELIER_APPS_SRC_ROOT=/var/lib/atelier/apps
-ATELIER_DV_HOST=127.0.0.1
-# Defaults: ATELIER_APP_UNIT_PREFIX=atelier-app, ATELIER_APP_SLICE=atelier-apps.slice
+ATELIER_GIT_REPOS_DIR=/var/lib/atelier/git
+ATELIER_BUILD_AS_USER=...                # user de build des apps
+ATELIER_LOGS_TOKEN=...                    # auth ingestion logs (shipper)
+MCP_TOKEN=...                             # auth MCP (jamais loggé)
+CODEX_HOME=/root/.codex                   # config Codex (surveillance)
+ATELIER_CODEX_ARGS=exec --json ...        # args Codex CLI (--json OBLIGATOIRE pour streamer)
+
+# Surchargeables (défauts en code, NON listées dans .env aujourd'hui) :
+# ATELIER_PRESERVE_PREFIX_SLUGS=www        slugs no-strip du path-proxy (défaut www)
+# ATELIER_AGENT_DRAIN_SECS=45              budget de drain agent au shutdown
+# ATELIER_DV_TOKEN_MAX_AGE_SECS            rotation HR_DV_TOKEN (défaut 90j)
+# ATELIER_APP_UNIT_PREFIX=atelier-app, ATELIER_APP_SLICE=atelier-apps.slice
+# Backup : ATELIER_RESTIC_BIN, ATELIER_RCLONE_BIN, ATELIER_PG_DUMPALL_BIN, ATELIER_BACKUP_PG_USER, ATELIER_BACKUP_ENV_FILE
 ```
+
+---
+
+## Routing des apps (path-proxy)
+
+Les apps sont servies en **même-origine** sous `http://127.0.0.1:4100/apps/{slug}/` (`routes/apps_proxy.rs`, monté top-level). Deux modes :
+
+- **strip** (Vite/Axum) — le préfixe `/apps/{slug}` est retiré avant de proxifier vers l'app.
+- **no-strip** (Next.js, ex. `www`) — le préfixe `/apps/www` est **préservé** jusqu'à l'app (requis par `basePath`/`assetPrefix`, configuré dans `next.config.ts`). Slugs no-strip listés via `ATELIER_PRESERVE_PREFIX_SLUGS` (défaut `www`).
+
+Le path-routing **interne** est donc complet et live. Ce qui reste pendant : l'intégration **côté hr-edge** (hostname public + path + auth path-aware), cf. [.claude/rules/path-routing-pending.md](.claude/rules/path-routing-pending.md). Pour atteindre une app : `/apps/{slug}/` en relatif même-origine (gallery Studio, PreviewTab) ; e2e externe via `https://atelier.mynetwk.biz/...` (302 anonyme = sain) ; sans auth en local via `127.0.0.1:4100/apps/{slug}/`.
+
+> Le supervisor **adopte les unités systemd orphelines** au démarrage (commit `b6cc47f`) même si l'état persisté a divergé.
+
+## Studio — agent Claude natif
+
+Le Studio inclut **code-server** (édition) ET un **agent Claude** (chat, raisonnement, plan, approbation interactive). L'agent est un shim Node (`runner/src/runner.js`) piloté par `routes/agent.rs` et le **Claude Agent SDK** (binaire natif linux-x64).
+
+- **Runner** : `/opt/atelier/runner/src/runner.js`, exécuté **en `hr-studio`** via `sudo -n -u hr-studio node runner.js` (process group propre pour reaper le binaire `claude` petit-fils). Reçoit son init JSON sur stdin (dont `MCP_TOKEN` — jamais en env/argv, anti-leak journalctl), émet du NDJSON sur stdout.
+- **Auth** : abonnement OAuth via `/var/lib/hr-studio/.claude/.credentials.json`, **PAS** de clé API (le runner échoue si `ANTHROPIC_API_KEY` est présent).
+- **Sessions** : persistées incrémentalement par le SDK à `/var/lib/hr-studio/.claude/sessions/{scope}/` (scope = `cwd` par workspace d'app), reprises via `sessionId`.
+  - ⚠️ **Gotcha** : `ProtectSystem=strict` + `ReadWritePaths=/var/lib/hr-studio` (dans `atelier.service`) est **critique** — sans lui, EROFS empêche le flush des sessions (non-resumables, transcripts tronqués). Le namespace mount est hérité par les descendants `sudo→node→claude`.
+- **Plan-mode gate** (étanche aux mutations MCP) : SDK natif en read-only (`permissionMode:plan`) + allowlist `MCP_READONLY` + interception **bloquante** de `AskUserQuestion`/`ExitPlanMode` via `canUseTool`. `settingSources=['project']` charge **CLAUDE.md + .claude/rules/ + skills** du workspace, et **exclut** les sources user/local (les settings de `hr-studio` contiennent un auto-approve `mcp__studio__*` qui casserait le gate). Le `settings.json` projet n'a **aucun bloc `permissions`** (court-circuiterait `canUseTool`).
+- **Dialogues interactifs** : `AskUserQuestion` émet un event `question` et suspend sur Promise jusqu'à réponse sur stdin ; `ExitPlanMode` idem pour l'approbation de plan (transition vers `acceptEdits`/bypass tout en conservant le blocage des questions).
+- **Streaming** : EventBus channel `agent` (buffer 2048) diffuse en WebSocket les events NDJSON (`started`, `system`, `assistant_delta`, `thinking_delta`, `tool_use`, `tool_result`, `question`, `plan_review`, `result`, `turn_done`, `done`, `error`). Le front route par `session_id` (fallback `run_id` avant l'event `system`).
+- **Introspection** : opérations one-shot `op:list/messages/rename/delete/tag` (timeout 30s) pour la gestion des conversations.
+- **Drain au shutdown** : interrupt + EOF à tous les runs live, attente `ATELIER_AGENT_DRAIN_SECS` (45s), puis SIGKILL. `KillMode=mixed` + `TimeoutStopSec=60s` laissent le budget de drain (sinon SIGKILL simultané de `sudo→node→claude` tronque le tour → session non-relançable).
+
+**API** : `POST /api/apps/{slug}/agent/{query,message,answer,plan_decision,set_mode,set_model,interrupt,cancel}` + CRUD conversations. **Debug** : runner à `/opt/atelier/runner/src/runner.js`, binaire natif `runner/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64`, `journalctl -u atelier` (stderr runner), croissance des fichiers de session.
+
+> ⚠️ Ne pas confondre cet **agent Studio (Claude)** avec la **surveillance IA (Codex)** ci-dessous ni avec `hr-orchestrator` (déploiements network).
+
+## Surveillance IA (3 scans/app, Codex)
+
+Crate `atelier-watcher` : 3 scans **Codex** (CLI OpenAI) par app, écrivant des **findings catégorisées** via MCP. Findings + runs + mémoire + config en Postgres `atelier_meta`. UI : page `/surveillance` (overview global) + tab Surveillance per-app. Live via WebSocket (`surveillance:event`, `surveillance:transcript`). Modèle hybride **3 scans** (déployé 2026-06-05, commit `6dec754`) ; le champ `kind` discrimine partout :
+
+- **`security`** + **`code_review`** (« Qualité ») = scans **plateforme FIXES** (prompts en code `crates/atelier-watcher/src/prompts/{security,code_review}.md`), gate diff git, tournent pour toutes les apps, **non éditables par l'agent**.
+- **`business`** = **seul scan possédé par l'agent**, défini en **données** (table `app_scan` : label/prompt/cadence/gate/gate_sql/categories) via MCP `scan_get`/`scan_set`, **vide par défaut** (run `skipped("blank")`). `gate_sql` SELECT-only, fourni par l'agent et adapté au schéma de SON app (jamais hardcodé plateforme).
+
+Gates : (1) plafond `MAX_OPEN_FINDINGS = 6` **par (app,kind)** (constante non configurable, injectée dans le prompt pour priorisation) ; (2) diff-aware. **Runs manuels uniquement** (scheduler cron retiré — coût GPT+) ; le `git_watcher` (auto-resolve via commit `fix(surveillance:N)`) tourne toujours. Kill d'un run = SIGKILL du **groupe de process** (Codex spawn des shells enfants). Findings : la liste = titre + `summary` ; le `plan` = document de résolution complet (tiroir latéral).
+
+> La **config ops de Codex vit hors repo, sur Medion en root** : `~/.codex/{auth.json,config.toml}` (serveur MCP `atelier` + profil read-only + **modèle**), `/etc/gitconfig` `safe.directory=*`. Args CLI par défaut : `exec --json --sandbox read-only` (le `--json` est OBLIGATOIRE pour streamer ; surchargé via `ATELIER_CODEX_ARGS`). Cf. mémoire `atelier-surveillance-ia`.
+
+## Backup (restic + rclone)
+
+Crate `atelier-backup` + `routes/backup.rs`. Backups incrémentaux, dédupliqués, chiffrés via **restic** → SMB `files.mynetwk.biz:files/atelier-backup` via le backend **rclone** de restic. Config + état en Postgres `atelier_meta` (`backup_target` singleton, `backup_runs`, `backup_run_snapshots` — 3 tags/run).
+
+- **3 sources/run** : GIT (`/var/lib/atelier/git/`), PostgreSQL (`pg_dumpall` en `runuser -u postgres`), CONFIG (.env, registres, secrets, docs, `.env` per-app).
+- **Scheduler** : boucle Tokio (tick périodique), quotidien ~03:00 (min-age ≈ 20h ; hebdo ≈ 6.5j). Single-flight (409 si déjà en cours). Progress par phases via WebSocket (`backup:live`).
+- **Rétention** : `restic forget --group-by host,tags --keep-last <keep> --prune` (défaut keep=7).
+- **Secrets** : mot de passe restic auto-généré au 1er run, stocké en Postgres (révélable via `GET /api/backup/repo/password` pour disaster-recovery) ; credentials SMB obscurcis via `rclone obscure` ; transmis aux child-process **par env vars uniquement**.
+- **Noop mode** : 503 sur les endpoints si `ATELIER_DV_ADMIN_URL` absent / Postgres injoignable / binaires `restic`/`rclone` manquants.
+- **Système backup-only** : aucune restauration automatisée (restauration manuelle = `restic restore` + credentials).
+
+API : `PUT /api/backup/target`, `POST /api/backup/discover`, `GET /api/backup/runs`, `GET /api/backup/repo/password`. État au 2026-06-15 : 11 runs / 33 snapshots (3 tags/run).
+
+## Frontend / control-panel (web/, React + Vite)
+
+SPA React + Vite servie à `http://127.0.0.1:4100/` depuis `/opt/atelier/web/dist`. Panneau de contrôle unifié : Studio (iframe code-server), gestion des 5 apps, DbExplorer, git history, surveillance, backup, chat agent.
+
+- **WebSocket = la convention temps réel** : tous les updates live passent par `/api/ws` (broadcast Axum, `routes/ws.rs`), **jamais de polling front**. Channels : état app, builds, logs, tasks, `surveillance:event`/`transcript`, `backup:live`, `agent`. Hook `useWebSocket` (auto-reconnect).
+- **Studio hub** : tabs (code/preview/db/logs/docs/surveillance/env/settings) ou mode split (code-server à gauche, tabs à droite). **PreviewTab** = mini-navigateur iframe vers `/apps/{slug}/` (barre d'adresse relative).
+- **AgentPanel** + `AgentConversationsContext` : multi-sessions, streaming via le channel `agent`, rendu par type de tool (Read/Write/Bash/Edit/MCP), `ConversationsSplit` (max 3 côte-à-côte).
+- **DbExplorer** : CRUD tables/colonnes via endpoints typés (`/apps/{slug}/db/...`), pas de SQL brut.
+- **Surveillance** : overview global + détail per-app (3 kinds), console live (`surveillance:transcript`).
+- **Git** : heatmap de commits, stats per-commit, diff viewer.
+- **Thème** dark/light (pré-paint + localStorage), **PWA** installable (manifest + maskable icons + service worker).
+
+> ⚠️ Le service worker est cache-first : **vérifier visuellement** après tout deploy frontend (le SW peut masquer le résultat).
+
+---
 
 ## Build & deploy
 
 ### Atelier lui-même (build en place sur Medion)
 
-Le code source d'Atelier vit sur Medion à `/home/romain/atelier`, édité via `code-server@romain.service` (127.0.0.1:8081). Build, install et restart se font **en local** (plus de rsync/SSH vers un hôte distant).
+Source à `/home/romain/atelier`. Build, install, restart **en local** (plus de cross-build/rsync distant).
 
 ```bash
 make help              # tous les targets
-make atelier           # cargo build --release -p atelier (local Medion)
+make atelier           # cargo build --release -p atelier
 make web               # npm ci (si besoin) + build frontend (web/dist)
-make deploy            # build + install dans /opt/atelier + restart atelier.service + healthcheck
+make runner            # npm ci --omit=dev du runner + vérifie runner.js + binaire SDK natif
+make deploy            # build atelier+web+runner + install /opt/atelier + restart + healthcheck
 make logs              # tail journalctl atelier (local)
 ```
 
-`make deploy` détecte l'hôte : sur Medion → build en place + `sudo install` dans `/opt/atelier` ; ailleurs → fallback `deploy-remote` (build local + rsync/SSH). L'install du binaire est atomique (`.new` + rename), suivie du restart et d'un healthcheck sur `127.0.0.1:4100`.
+`make deploy` détecte l'hôte : sur Medion → `deploy-local` (build + `sudo install` atomique `.new`+rename + restart + healthcheck `/api/health`) ; ailleurs → fallback `deploy-remote` (build local + rsync/SSH vers `$MEDION`). Le deploy synchronise aussi :
+
+- `web/dist/` → `/opt/atelier/web/dist/`
+- le crate **source** `atelier-logging-shipper` → `/opt/atelier/crates/atelier-logging-shipper/` (path-dep absolu consommé par les apps qui shippent leurs logs ; modifier le shipper impose de rebuild ces apps).
+- le **runner** Node → `/opt/atelier/runner/{src,node_modules,package*.json,.npmrc}`. ⚠️ `npm ci` du runner se fait en `--omit=dev` mais **JAMAIS `--omit=optional`** : le binaire natif `@anthropic-ai/claude-agent-sdk-linux-x64` est une optional-dep, sans lui le runner échoue au runtime (le Makefile garde-fou teste sa présence avant deploy).
 
 ### Apps HomeRoute
 
-Les sources des 6 apps vivent sur Medion (`/var/lib/atelier/apps/<slug>/src/`), éditées via le Studio (`codeserver.mynetwk.biz`).
+Sources des 5 apps sur Medion (`/var/lib/atelier/apps/<slug>/src/`), éditées via le Studio (`codeserver.mynetwk.biz`). Source = runtime.
 
 ```bash
-make deploy-app SLUG=files   # build sur Medion + restart via API + healthcheck
+make deploy-app SLUG=home   # build sur Medion + restart via API + healthcheck path-proxy
 ```
 
-Le script (`scripts/deploy-app.sh`) détecte `hostname == medion` → build in-place. Source = runtime depuis le 2026-05-27.
+[scripts/deploy-app.sh](scripts/deploy-app.sh) : lit `build_command`/`stack`/`port`/`health_path` depuis l'API → build in-place (`hostname == medion`) → `POST /api/apps/<slug>/control action=restart` → healthcheck via le **path-proxy local** `http://127.0.0.1:4100/apps/<slug><health_path>` (commit `bf1e3a8`, 2026-06-13 ; les hostnames `{slug}.mynetwk.biz` sont morts). Un `3xx` est accepté (les apps `auth_required` redirigent les anonymes vers `/login`).
+
+### Boot ordering & indisponibilité
+
+`atelier.service` a `After=postgresql.service` (**pas** `Requires=`) : un échec Postgres **au boot** fait échouer volontairement le démarrage (control-plane critique), mais une perte Postgres **à chaud** est dégradée gracieusement (écritures dégradées, noop backup, 503 dataverse). `make deploy` : ~5 s d'API down au restart (les apps continuent). `make deploy-app` : 1-3 s d'indispo de l'app concernée. Rollback : `git checkout <commit>` puis `make deploy` (binaire/frontend précédents restent jusqu'au prochain deploy ; historique poussé sur `origin`).
 
 ## Règles obligatoires
 
-- **JAMAIS** `cargo run` directement — utiliser `make deploy`.
-- **TOUJOURS** `make deploy` après modification du code Atelier (build en place + install /opt/atelier + restart).
+- **JAMAIS** `cargo run` directement — utiliser `make deploy` (install dans `/opt/atelier`).
+- **TOUJOURS** `make deploy` après modification du code Atelier (build en place + install + restart + healthcheck).
 - **TOUJOURS** `make deploy-app SLUG=<x>` après modification d'une app (build Medion + restart via API).
 - **TOUJOURS** vérifier visuellement après deploy frontend (SW cache-first peut masquer le résultat).
+- **TOUJOURS** vérifier le healthcheck dans la sortie du `make deploy*` avant de considérer un deploy réussi.
 - **TOUJOURS** tester e2e les endpoints créés/modifiés (cf. `.claude/rules/testing.md`).
-- **TOUJOURS** logger structuré (cf. `.claude/rules/logging.md`).
+- **TOUJOURS** logger structuré via `tracing` (cf. `.claude/rules/logging.md`).
 - **JAMAIS** d'attribution Claude dans les commits.
 
-## Crates internes (plus aucun path-dep vers homeroute)
+## Crates (workspace `atelier-*`)
 
-Atelier est **autonome** : toutes ses crates vivent sous `crates/` et portent le préfixe `atelier-*` (renommées depuis `hr-*` le 2026-05-30, en même temps que la purge du code mort hérité de homeroute). Le découplage `homeroute-core` est **terminé** (2026-05-30) — les 3 dernières crates partagées (`atelier-common`, `atelier-ipc`, `atelier-docs`) ont été rapatriées depuis `/nvme/homeroute/crates/shared/` (snapshot du HEAD homeroute) car un refacto en cours côté homeroute avait divergé leur API et cassait le build d'Atelier.
+Atelier est **autonome** : toutes ses crates vivent sous `crates/` (renommées depuis `hr-*` le 2026-05-30), plus aucun path-dep vers `/nvme/homeroute/`.
 
-Crates internes (`crates/atelier-XXX`, modifiables localement) :
-- `atelier-common`, `atelier-ipc`, `atelier-docs` — internalisées le 2026-05-30.
-- `atelier-apps`, `atelier-git`, `atelier-dataverse`, `atelier-dvexpr`, `atelier-dv-codegen` — internalisées le 2026-05-09.
+| Crate | Rôle |
+|---|---|
+| `atelier` | binaire principal (entrypoint, bootstrap, backfill control-plane) |
+| `atelier-api` | serveur HTTP Axum (routes, WebSocket, MCP, path-proxy, agent) |
+| `atelier-apps` | supervisor des apps (lifecycle systemd, ports, adoption d'unités) |
+| `atelier-dataverse` | moteur Postgres + passerelle gateway-only + audit |
+| `atelier-dvexpr` | dialecte d'expressions de filtre dataverse |
+| `atelier-dv-codegen` | génération de code/contexte depuis le schéma dataverse |
+| `atelier-docs` | système de docs per-app (index Postgres `doc_entries`) |
+| `atelier-git` | bare repos + introspection (log/diff/activity) |
+| `atelier-watcher` | surveillance IA (driver Codex, 3 scans, git_watcher) |
+| `atelier-backup` | backup restic + rclone + scheduler |
+| `atelier-logging` | pipeline de logs structurés (ingest, buffer, broadcast → `atelier_logs`) |
+| `atelier-common` | types/utilitaires partagés + bootstrap pool control-plane (`atelier_meta`) |
+| `atelier-ipc` | IPC socket Unix (`/run/atelier.sock`) |
+| `atelier-logging-shipper` | crate **hors workspace** (`exclude`), path-dep absolu des apps pour shipper leurs logs vers Atelier — déployée en **source** dans `/opt/atelier/crates/` |
 
-Les 4 crates `hr-flow*` ont été supprimées le 2026-05-26. Les crates `atelier-db` (moteur SQLite legacy) et `atelier-dataverse-migrate` (outil de migration SQLite→Postgres, one-shot) ont été supprimées le 2026-05-30 une fois les 6 apps passées sur postgres-dataverse (cf. « Migration postgres-dataverse finalisée » ci-dessous). Atelier ne lit plus rien dans `/nvme/homeroute/` : éditer/refondre ces crates ne nécessite plus de garder homeroute compilable.
+Crates supprimées : 4 `hr-flow*` (2026-05-26), `atelier-db` (SQLite legacy) + `atelier-dataverse-migrate` (migration one-shot) (2026-05-30).
 
 ## Service naming + autonomie
 
-Atelier est **autonome** : ses services portent le préfixe `atelier-app-` et ne partagent ni nom ni path avec hr-orchestrator (qui continue à tourner sur Medion pour la partie network/registry).
+Atelier est **autonome** : préfixe `atelier-app-`, ne partage ni nom ni path avec hr-orchestrator (qui tourne toujours pour la partie network/registry).
 
 | Concept | hr-orchestrator (Medion) | Atelier (Medion) |
 |---|---|---|
@@ -159,15 +283,15 @@ Atelier est **autonome** : ses services portent le préfixe `atelier-app-` et ne
 | Apps spawn | (legacy, désactivé) | `atelier-app-{slug}.service` |
 | Slice | `hr-apps.slice` (legacy) | `atelier-apps.slice` |
 | Apps runtime root | `/opt/homeroute/apps/` (legacy) | `/var/lib/atelier/apps/` |
-| Registry | `/opt/homeroute/data/apps.json` | `/opt/atelier/data/apps.json` |
+| Control-plane | `/opt/homeroute/data/apps.json` | Postgres `atelier_meta` |
 
-Override possible via env vars `ATELIER_APP_UNIT_PREFIX` / `ATELIER_APP_SLICE` / `ATELIER_APPS_RUNTIME_ROOT` (utilisé pendant la fenêtre de transition CM→Medion).
+Override possible via `ATELIER_APP_UNIT_PREFIX` / `ATELIER_APP_SLICE` / `ATELIER_APPS_RUNTIME_ROOT`.
 
 ## Workflow d'agent
 
 À chaque fois que tu travailles dans Atelier :
 
 1. Lire `MEMORY.md` global (auto-chargé) et les rules dans `.claude/rules/`.
-2. Si la tâche concerne une app HomeRoute existante (`/var/lib/atelier/apps/{slug}/src/` sur Medion, éditée via Studio), suivre la doctrine **DOC-FIRST** : `mcp__studio__docs_overview` d'abord.
-3. Pour toute fonctionnalité ajoutée à Atelier : doc + tests e2e + logging structuré.
-4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier (`https://app.mynetwk.biz/api/...` ou, en local sur Medion, `sudo journalctl -u atelier...`).
+2. Si la tâche concerne une app HomeRoute existante (`/var/lib/atelier/apps/{slug}/src/`, éditée via Studio), suivre la doctrine **DOC-FIRST** : `mcp__studio__docs_overview` d'abord. L'agent Studio ne charge que le workspace (`settingSources=['project']`) — garder CLAUDE.md + `.claude/rules/` à jour pour son raisonnement.
+3. Pour toute fonctionnalité ajoutée à Atelier : doc/commentaires WHY + tests e2e + logging structuré.
+4. **Pour toute action runtime** (statut, logs, restart) : passer par l'API Atelier. En local sur Medion : `sudo journalctl -u atelier...` ou `http://127.0.0.1:4100/api/...` ; en externe : `https://atelier.mynetwk.biz/api/...` (⚠️ **pas** `app.mynetwk.biz` — plus de route edge).

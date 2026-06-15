@@ -14,7 +14,7 @@ Pour toute tâche dans une app HomeRoute existante (sources sur Medion à `/var/
 8. **`mcp__studio__docs_diagram_set`** — régénère le mermaid si le flux a changé.
 9. **`mcp__studio__docs_completeness`** — vérifie qu'il ne manque ni summary ni diagramme.
 
-> Le MCP `studio` (servi par Atelier sur Medion, port 4001) est exposé dans chaque workspace code-server via `.mcp.json` ; les tools `mcp__studio__docs_*` sont auto-approuvés en lecture.
+> Le MCP `studio` (servi par Atelier sur Medion à `http://127.0.0.1:4100/mcp`, scope par app via `?project={slug}`) est exposé dans chaque workspace code-server via `.mcp.json` ; les tools `mcp__studio__docs_*` sont auto-approuvés en lecture. (Le port 4001 est une référence legacy hr-orchestrator morte ; aucun serveur n'écoute dessus.)
 
 ## Pour les nouvelles features Atelier elles-mêmes
 

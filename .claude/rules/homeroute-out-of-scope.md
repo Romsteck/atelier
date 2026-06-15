@@ -1,6 +1,6 @@
 # Homeroute :4000 — hors périmètre apps
 
-> Depuis le rapatriement (2026-05-09), **toute la partie applicative est servie par Atelier sur port 4100** (apps lifecycle, dataverse, flows, docs, MCP `app.*` / `dv.*` / `docs.*` / `flow.*`). Homeroute (`hr-api`, port 4000) ne sert plus que la partie network (DNS, DHCP, ACME, dashboard, routes edge).
+> Depuis le rapatriement (2026-05-09), **toute la partie applicative est servie par Atelier sur port 4100** (apps lifecycle, dataverse, docs, git, MCP `app.*` / `dv.*` / `docs.*` / `git.*` / `scan.*`). Homeroute (`hr-api`, port 4000) ne sert plus que la partie network (DNS, DHCP, ACME, dashboard, routes edge). (Le système de flux `hr-flow` a été éradiqué le 2026-05-26 : plus de routes/MCP `flow.*` nulle part.)
 
 ## Symptôme typique du mauvais port
 
@@ -19,13 +19,13 @@ $ curl -i -X POST http://10.0.0.254:4100/api/apps/www/ship -d '{}'
 HTTP/1.1 200 OK
 ```
 
-Ou, depuis l'extérieur : `https://app.mynetwk.biz/api/...`.
+Ou, depuis l'extérieur : `https://atelier.mynetwk.biz/api/...` (⚠️ **pas** `app.mynetwk.biz` — cette route edge n'existe plus).
 
 ## Règles
 
-1. **Ne pas wirer côté homeroute** les routes `/api/apps/*`, `/api/dv/*`, `/api/flows/*`, `/api/docs/*`, `/api/git/*`. Elles vivent côté Atelier exclusivement.
+1. **Ne pas wirer côté homeroute** les routes `/api/apps/*`, `/api/dv/*`, `/api/docs/*`, `/api/git/*`, `/api/backup/*`, `/api/surveillance/*`, `/api/agent/*`. Elles vivent côté Atelier exclusivement.
 2. **Si un skill / script appelle `:4000` pour une API apps**, c'est un bug à corriger côté skill (pointer vers `:4100`). Pas côté homeroute.
-3. **Le MCP** côté agent : `mcp__atelier__*` (port 4100) pour tout ce qui touche aux apps / dataverse / flows / docs. Le legacy `mcp__homeroute__*` (port 4000) doit progressivement disparaître à mesure que les Studios se reconfigurent.
+3. **Le MCP** côté agent : `mcp__atelier__*` / `mcp__studio__*` (port 4100, `http://127.0.0.1:4100/mcp`) pour tout ce qui touche aux apps / dataverse / docs. Le legacy `mcp__homeroute__*` (port 4000) doit progressivement disparaître à mesure que les Studios se reconfigurent.
 
 ## Pourquoi cette règle existe
 
