@@ -7,22 +7,7 @@ import MarkdownView from './docs/MarkdownView';
 import { getSdkVersion, updateSdk } from '../api/client';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, formatToolResult, splitPath, diffLines, editsOf } from '../lib/toolDisplay';
-
-// Modèles sélectionnables. Opus 4.8 par défaut = on N'ENVOIE PAS de model → le CLI
-// résout le défaut de l'abonnement, soit `claude-opus-4-8[1m]` (contexte 1M).
-// `efforts` = niveaux supportés (xhigh/max = Opus ; Haiku n'a aucun param effort).
-const MODELS = [
-  { id: 'opus-4-8', label: 'Opus 4.8', model: null, efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { id: 'opus-4-7', label: 'Opus 4.7', model: 'claude-opus-4-7', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { id: 'sonnet-4-6', label: 'Sonnet 4.6', model: 'claude-sonnet-4-6', efforts: ['low', 'medium', 'high'] },
-  { id: 'haiku-4-5', label: 'Haiku 4.5', model: 'claude-haiku-4-5', efforts: [] },
-];
-// Deux modes seulement (cf. runner.js) : Plan = lecture seule (explore + planifie),
-// Bypass = pleine capacité (édite/exécute, relu via l'onglet Git).
-const MODES = [
-  { id: 'plan', label: 'Plan', pm: 'plan', title: 'Lecture seule : explore et planifie, n’écrit rien.' },
-  { id: 'bypass', label: 'Bypass', pm: 'bypassPermissions', title: 'Pleine capacité : édite les fichiers, exécute, MCP. À relire dans l’onglet Git.' },
-];
+import { MODELS, MODES, buildSettings } from '../lib/agentModels';
 
 // Estimation client-side du nombre de tokens d'un texte. Le flux thinking ne porte
 // pas le compte réel → heuristique ≈ caractères / 4 (ordre de grandeur usuel). Sert
@@ -409,12 +394,7 @@ export default function AgentPanel({ panelKey }) {
   const send = useCallback(() => {
     const prompt = input.trim();
     if (!prompt || running) return;
-    const permission_mode = MODES.find((m) => m.id === mode)?.pm || 'plan';
-    const sm = MODELS.find((m) => m.id === modelId) || MODELS[0];
-    const settings = { permission_mode };
-    if (sm.model) settings.model = sm.model; // Opus 4.8 (model:null) → défaut [1m] conservé
-    if (sm.efforts.length) settings.effort = effort; // Haiku → pas de param effort
-    sendMessage(panelKey, prompt, settings);
+    sendMessage(panelKey, prompt, buildSettings({ modelId, effort, mode }));
     setInput('');
   }, [input, running, mode, modelId, effort, panelKey, sendMessage]);
 

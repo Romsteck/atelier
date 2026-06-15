@@ -18,7 +18,7 @@ const PANELS = [
   { id: 'history', label: 'Conversations', Icon: MessagesSquare },
 ];
 
-export default function AgentWorkspace({ slug }) {
+export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
   const [panel, setPanel] = useState(null); // null = sidebar repliée
   const [opened, setOpened] = useState(() => new Set()); // panneaux déjà montés
   const [dragging, setDragging] = useState(false);
@@ -56,7 +56,7 @@ export default function AgentWorkspace({ slug }) {
   }, [dragging]);
 
   return (
-    <AgentConversationsProvider slug={slug}>
+    <AgentConversationsProvider slug={slug} launch={launch} onLaunchConsumed={onLaunchConsumed}>
       <div ref={rootRef} className="flex h-full min-h-0 bg-gray-900 relative">
         {/* Barre d'activité */}
         <div className="w-11 shrink-0 border-r border-gray-800 flex flex-col items-center py-2 gap-1">

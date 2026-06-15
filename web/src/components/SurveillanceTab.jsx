@@ -1,12 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  RefreshCw, Play, Square, Terminal, X, Check, Clock, FileText,
+  RefreshCw, Play, Square, Terminal, X, Clock, FileText, Wrench,
   ShieldCheck, AlertOctagon, Activity,
 } from 'lucide-react';
 import {
   getAppFindings,
-  dismissFinding,
-  resolveFinding,
   runSurveillance,
   cancelSurveillanceRun,
   getSurveillanceTranscript,
@@ -80,7 +78,7 @@ function timeSince(iso) {
 
 // An issue row: title + présentation (summary) only. Clicking opens the side
 // drawer with the full resolution-plan document (the annex).
-function FindingCard({ finding, active, onSelect, onDismiss, onResolve }) {
+function FindingCard({ finding, active, onSelect, onResolve }) {
   const sev = sevMeta(finding.severity);
   return (
     <div
@@ -105,8 +103,7 @@ function FindingCard({ finding, active, onSelect, onDismiss, onResolve }) {
         </div>
         {finding.status === 'open' && (
           <div className="flex gap-1 shrink-0">
-            <button onClick={(e) => { e.stopPropagation(); onDismiss(finding); }} className="px-2 py-1 text-xs text-gray-300 hover:text-gray-50 hover:bg-gray-700 rounded-sm flex items-center gap-1"><X className="w-3 h-3" /> Dismiss</button>
-            <button onClick={(e) => { e.stopPropagation(); onResolve(finding); }} className="px-2 py-1 text-xs text-emerald-300 hover:text-emerald-200 hover:bg-emerald-900/30 rounded-sm flex items-center gap-1"><Check className="w-3 h-3" /> Résolu</button>
+            <button onClick={(e) => { e.stopPropagation(); onResolve(finding); }} title="Confier ce finding à l'agent (nouvelle conversation)" className="px-2 py-1 text-xs text-blue-300 hover:text-blue-200 hover:bg-blue-900/30 border border-blue-500/30 rounded-sm flex items-center gap-1"><Wrench className="w-3 h-3" /> Résoudre</button>
           </div>
         )}
       </div>
@@ -115,7 +112,7 @@ function FindingCard({ finding, active, onSelect, onDismiss, onResolve }) {
 }
 
 // Side drawer: the resolution-plan document (annex) for the selected issue.
-function AnnexDrawer({ finding, onClose, onDismiss, onResolve }) {
+function AnnexDrawer({ finding, onClose, onResolve }) {
   const sev = sevMeta(finding.severity);
   return (
     <div className="w-[28rem] shrink-0 border-l border-gray-700 bg-gray-950/60 flex flex-col min-w-0">
@@ -148,8 +145,7 @@ function AnnexDrawer({ finding, onClose, onDismiss, onResolve }) {
       </div>
       {finding.status === 'open' && (
         <div className="px-3 py-2 border-t border-gray-700 flex gap-2">
-          <button onClick={() => onDismiss(finding)} className="flex-1 px-2 py-1 text-xs text-gray-300 hover:text-gray-50 border border-gray-700 hover:bg-gray-700 rounded-sm flex items-center justify-center gap-1"><X className="w-3 h-3" /> Dismiss</button>
-          <button onClick={() => onResolve(finding)} className="flex-1 px-2 py-1 text-xs text-emerald-300 hover:text-emerald-200 border border-emerald-500/30 hover:bg-emerald-900/30 rounded-sm flex items-center justify-center gap-1"><Check className="w-3 h-3" /> Résolu</button>
+          <button onClick={() => onResolve(finding)} className="flex-1 px-2 py-1 text-xs text-blue-300 hover:text-blue-200 border border-blue-500/30 hover:bg-blue-900/30 rounded-sm flex items-center justify-center gap-1"><Wrench className="w-3 h-3" /> Résoudre avec l'agent</button>
         </div>
       )}
     </div>
@@ -265,7 +261,28 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
 
 const VALID_KINDS = ['security', 'code_review', 'business'];
 
-export default function SurveillanceTab({ slug, initialKind }) {
+// Prompt préparé envoyé à l'agent quand on clique « Résoudre » sur un finding. Démarre en
+// lecture seule (l'auto-envoi force le mode Plan) ; l'agent valide le diagnostic, propose un
+// plan, puis (après approbation) corrige, déploie et clôt le finding via `findings_resolve`.
+function buildResolvePrompt(finding, slug, kind) {
+  const kindLabel = KINDS.find((k) => k.id === kind)?.label || kind;
+  return `Tu travailles sur l'app **${slug}**. Un scan de surveillance (**${kindLabel}**) a relevé le finding suivant. Investigue, confirme la cause racine, puis corrige proprement et définitivement (pas de contournement).
+
+## ${finding.title}
+**Sévérité :** ${finding.severity} · **Catégorie :** ${finding.category} · **Finding #${finding.id}**
+
+### Présentation
+${finding.summary || '(aucune)'}
+
+### Plan de résolution proposé par le scan
+${finding.plan || '(aucun)'}
+
+---
+
+Commence en lecture seule : explore le code concerné, valide (ou corrige) le diagnostic ci-dessus, puis propose ton plan. Après approbation, applique le correctif, déploie (\`make deploy-app SLUG=${slug}\`), vérifie de bout en bout, puis marque le finding #${finding.id} comme résolu (tool \`findings_resolve\`).`;
+}
+
+export default function SurveillanceTab({ slug, initialKind, onResolve }) {
   const [activeKind, setActiveKind] = useState(
     VALID_KINDS.includes(initialKind) ? initialKind : 'security'
   );
@@ -406,17 +423,11 @@ export default function SurveillanceTab({ slug, initialKind }) {
     }
   };
 
-  const handleDismiss = async (f) => {
-    const reason = window.prompt('Raison du dismiss (optionnel) :', '');
-    if (reason === null) return;
-    try { await dismissFinding(slug, f.id, reason || undefined); setSelected(null); reload(); }
-    catch (e) { alert('Dismiss a échoué : ' + (e.response?.data?.error || e.message)); }
-  };
-
-  const handleResolve = async (f) => {
-    if (!window.confirm(`Marquer "${f.title}" comme résolue ?`)) return;
-    try { await resolveFinding(slug, f.id); setSelected(null); reload(); }
-    catch (e) { alert('Resolve a échoué : ' + (e.response?.data?.error || e.message)); }
+  // « Résoudre » → ouvre une nouvelle conversation agent (Studio.openAgentWithPrompt) avec un
+  // prompt préparé à partir du finding. Plus de clôture manuelle : l'agent s'en charge.
+  const handleResolve = (f) => {
+    onResolve?.(buildResolvePrompt(f, slug, activeKind));
+    setSelected(null);
   };
 
   const atCap = openCount >= MAX_OPEN_FINDINGS;
@@ -517,7 +528,7 @@ export default function SurveillanceTab({ slug, initialKind }) {
                 <div className="flex-1 h-px bg-gray-700/50" />
               </div>
               {items.map((f) => (
-                <FindingCard key={f.id} finding={f} active={selected?.id === f.id} onSelect={setSelected} onDismiss={handleDismiss} onResolve={handleResolve} />
+                <FindingCard key={f.id} finding={f} active={selected?.id === f.id} onSelect={setSelected} onResolve={handleResolve} />
               ))}
             </div>
           ))}
@@ -526,7 +537,7 @@ export default function SurveillanceTab({ slug, initialKind }) {
         {/* Right side: the annex drawer (selected issue) takes priority; otherwise
             the live Codex console while a run is in progress. */}
         {selected ? (
-          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onDismiss={handleDismiss} onResolve={handleResolve} />
+          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onResolve={handleResolve} />
         ) : (activeRun || transcript.length > 0) ? (
           <LiveScanPanel
             lines={transcript}

@@ -437,6 +437,11 @@ export default function Studio() {
   // preview/browser reste visible à droite. 'editor' | 'agent'.
   const [codeView, setCodeView] = useState(() => localStorage.getItem('studio:codeView') || 'editor');
 
+  // Lancement d'une conversation agent depuis un autre onglet (ex. bouton « Résoudre » de la
+  // surveillance) : { prompt, mode, nonce }. Relayé à AgentWorkspace → provider, qui crée+envoie.
+  const [agentLaunch, setAgentLaunch] = useState(null);
+  const nonceRef = useRef(0);
+
   // ── Fetch apps list ──
   const fetchApps = useCallback(async () => {
     try {
@@ -557,6 +562,16 @@ export default function Studio() {
     });
   }
 
+  // Ouvre l'agent (comme toggleAgent forcé sur 'agent') et y lance une nouvelle conversation
+  // pré-remplie du `prompt`. Le `nonce` permet de rejouer même si l'agent est déjà ouvert.
+  function openAgentWithPrompt(prompt) {
+    if (!prompt) return;
+    setAgentLaunch({ prompt, mode: 'plan', nonce: ++nonceRef.current });
+    setCodeView('agent');
+    if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
+    if (selectedSlug) setOpenedCode(p => p.has(selectedSlug) ? p : new Set(p).add(selectedSlug));
+  }
+
   const handleControl = useCallback(async (slugOrAction, actionOpt) => {
     const slug = actionOpt ? slugOrAction : selectedSlug;
     const action = actionOpt || slugOrAction;
@@ -597,7 +612,7 @@ export default function Studio() {
       case 'db':           return currentApp?.has_db ? <DbExplorer appSlug={selectedSlug} embedded /> : null;
       case 'logs':         return <LogsTab slug={selectedSlug} />;
       case 'docs':         return <DocsTab slug={selectedSlug} />;
-      case 'surveillance': return <SurveillanceTab slug={selectedSlug} initialKind={searchParams.get('kind')} />;
+      case 'surveillance': return <SurveillanceTab slug={selectedSlug} initialKind={searchParams.get('kind')} onResolve={openAgentWithPrompt} />;
       case 'env':          return <EnvTab slug={selectedSlug} />;
       case 'settings':     return <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />;
       default:             return null;
@@ -686,7 +701,7 @@ export default function Studio() {
                 style={effectiveMode === 'split'
                   ? { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${leftPct}%`, zIndex: 1 }
                   : { position: 'absolute', inset: 0, zIndex: 1 }}>
-                <AgentWorkspace key={selectedSlug} slug={selectedSlug} />
+                <AgentWorkspace key={selectedSlug} slug={selectedSlug} launch={agentLaunch} onLaunchConsumed={() => setAgentLaunch(null)} />
               </div>
             )}
 

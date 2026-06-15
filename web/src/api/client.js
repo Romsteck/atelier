@@ -238,10 +238,6 @@ export const getDocsCompleteness = (appId) => api.get(`/docs/${appId}/completene
 export const getSurveillanceOverview = () => api.get('/surveillance/overview');
 export const getAppFindings = (slug, params = {}) =>
   api.get(`/apps/${slug}/findings`, { params });
-export const dismissFinding = (slug, id, reason) =>
-  api.post(`/apps/${slug}/findings/${id}/dismiss`, { reason });
-export const resolveFinding = (slug, id, commit_sha) =>
-  api.post(`/apps/${slug}/findings/${id}/resolve`, { commit_sha });
 // Run one of the app's three scans (kind: security | code_review | business).
 export const runSurveillance = (slug, kind, trigger) =>
   api.post(`/apps/${slug}/surveillance/run`, { kind, ...(trigger ? { trigger } : {}) });

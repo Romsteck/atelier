@@ -1,6 +1,7 @@
 import { createContext, useContext, useReducer, useRef, useEffect, useState, useCallback } from 'react';
 import useWebSocket from '../hooks/useWebSocket';
 import { appendEvent } from '../lib/agentEvents';
+import { buildSettings } from '../lib/agentModels';
 import {
   startAgentQuery,
   resumeAgentQuery,
@@ -62,6 +63,7 @@ const emptyConvo = (key, sid) => ({
   error: null,
   activeModel: null,
   activeMode: null, // mode courant ('plan'|'bypass') reflété par le backend (approbation/set_mode)
+  autoSend: null, // {prompt, settings} à envoyer une fois le panneau commit (lancement depuis surveillance)
 });
 
 function reducer(state, a) {
@@ -78,7 +80,9 @@ function reducer(state, a) {
       return { order, convos };
     }
     case 'NEW_PANEL': {
-      return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: emptyConvo(a.key, null) } };
+      const c = emptyConvo(a.key, null);
+      if (a.autoSend) c.autoSend = a.autoSend;
+      return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c } };
     }
     case 'OPEN_PANEL': {
       if (state.convos[a.key]) return state;
@@ -221,7 +225,7 @@ function reducer(state, a) {
   }
 }
 
-export function AgentConversationsProvider({ slug, children }) {
+export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, children }) {
   const [state, dispatch] = useReducer(reducer, { order: [], convos: {} });
   const [allConvos, setAllConvos] = useState([]);
   const stateRef = useRef(state);
@@ -321,6 +325,36 @@ export function AgentConversationsProvider({ slug, children }) {
     },
     [slug],
   );
+
+  // Lancement externe (bouton « Résoudre » de la surveillance) : on crée une conversation
+  // pré-chargée d'un `autoSend`. Garde par `nonce` → un même `launch` n'est traité qu'une fois,
+  // y compris quand le provider reste monté (re-clic sans remonter AgentWorkspace).
+  const launchNonce = useRef(null);
+  useEffect(() => {
+    if (!launch || launch.nonce === launchNonce.current) return;
+    launchNonce.current = launch.nonce;
+    const settings = buildSettings({
+      modelId: localStorage.getItem('agent:model') || 'opus-4-8',
+      effort: localStorage.getItem('agent:effort') || 'max',
+      mode: launch.mode || 'plan',
+    });
+    dispatch({ type: 'NEW_PANEL', key: newKey(), autoSend: { prompt: launch.prompt, settings } });
+    onLaunchConsumed?.();
+  }, [launch, onLaunchConsumed]);
+
+  // Envoi différé du tour `autoSend` : `sendMessage` lit `stateRef.current.convos[key]`, pas
+  // encore commit juste après le dispatch NEW_PANEL → on attend que le panneau soit dans l'état.
+  // `autoSent` (ref) empêche tout double-envoi sur les re-rendus suivants.
+  const autoSent = useRef(new Set());
+  useEffect(() => {
+    for (const key of state.order) {
+      const c = state.convos[key];
+      if (c?.autoSend && !autoSent.current.has(key)) {
+        autoSent.current.add(key);
+        sendMessage(key, c.autoSend.prompt, c.autoSend.settings);
+      }
+    }
+  }, [state.order, state.convos, sendMessage]);
 
   const answer = useCallback(
     async (key, request_id, payload) => {
