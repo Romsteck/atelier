@@ -67,21 +67,13 @@ impl McpState {
         if token.is_empty() {
             return None;
         }
-        // Gestion des routes hr-edge non câblée ici (`edge: None`) ; les call
-        // sites set/remove route s'auto-skip avec un warn. À reprendre : le
-        // socket hr-edge est désormais local (même hôte), donc atteignable.
-        let edge = None;
-        let (app_build_tx, _) = tokio::sync::broadcast::channel(256);
-        let apps_ctx = crate::mcp::apps_ops::AppsContext {
-            supervisor: (*state.supervisor).clone(),
-            dataverse_manager: state.dv.clone(),
-            context_generator: state.context_generator.clone(),
-            edge,
-            git: state.git.clone(),
-            base_domain: state.context_generator.base_domain.clone(),
-            build_locks: state.build_locks.clone(),
-            app_build_tx,
-        };
+        // Gestion des routes hr-edge non câblée ici (`edge: None` dans
+        // AppsContext::from_api_state) ; les call sites set/remove route s'auto-skip
+        // avec un warn. À reprendre : le socket hr-edge est désormais local.
+        // Canal de build = le canal PARTAGÉ (state.events.app_build) relayé par le
+        // WebSocket, pas un canal jetable — sinon les AppBuildEvent du MCP `app.build`
+        // partiraient dans le vide (badge mort).
+        let apps_ctx = crate::mcp::apps_ops::AppsContext::from_api_state(state);
         Some(Self {
             token: Arc::new(token),
             git: state.git.clone(),

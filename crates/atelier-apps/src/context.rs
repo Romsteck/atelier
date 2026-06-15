@@ -489,7 +489,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - **No GraphQL, no raw SQL.** See `.claude/rules/db.md`.\n\
          \n\
          ## Build\n\
-         Pour builder cette app, utilise la skill **0-build** (lazy-loaded). Elle appelle l'endpoint HTTP bloquant via Bash.\n\
+         Pour builder cette app, utilise la skill **0-build** (lazy-loaded). Elle compile **en local sur Medion** (toolchain locale) via Bash et notifie le badge de build du Studio.\n\
          \n\
 ",
         name = app.name,
@@ -743,11 +743,13 @@ echo "Pour livrer en prod : bash .claude/skills/0-deploy/deploy.sh"
 /// Skill `0-deploy` : pousse les artefacts pre-buildés vers Medion + restart.
 fn render_app_deploy_script(app: &Application) -> String {
     let template = r#"#!/usr/bin/env bash
-# Deploy de l'app `__SLUG__` : envoie les artefacts pre-buildés vers Medion + restart.
+# Deploy de l'app `__SLUG__` : recharge le process supervisé (stop+restart) pour
+# reprendre l'artefact compilé en place par 0-build. Local sur Medion (pas de copie
+# distante sauf si ATELIER_BUILD_HOST est défini).
 # Pré-requis : avoir lancé `bash .claude/skills/0-build/build.sh` au préalable.
 # Géré par Atelier — ne pas éditer.
 set -euo pipefail
-API_BASE="${API_BASE:-http://10.0.0.254:4100}"
+API_BASE="${API_BASE:-http://127.0.0.1:4100}"
 TIMEOUT_SECS="${1:-900}"
 curl -sS --max-time "$TIMEOUT_SECS" -X POST \
   "$API_BASE/api/apps/__SLUG__/ship" \
@@ -767,7 +769,7 @@ fn render_app_deploy_skill(app: &Application) -> String {
          \n\
          # Deploy de l'app `{slug}`\n\
          \n\
-         Cette skill **livre** les artefacts (déjà compilés localement par `0-build`) vers Medion (10.0.0.254), puis redémarre le process supervisé. Pas de compile ici.\n\
+         Cette skill **recharge** le process supervisé (stop → restart) pour qu'il reprenne les artefacts déjà compilés en place par `0-build`. **Pas de compile, pas de copie distante** : tout est local sur Medion (un rsync depuis un build host n'a lieu que si `ATELIER_BUILD_HOST` est défini, ce qui n'est pas le cas par défaut).\n\
          \n\
          ## Pré-requis\n\
          \n\
@@ -788,12 +790,12 @@ fn render_app_deploy_skill(app: &Application) -> String {
          \n\
          ## Retour\n\
          \n\
-         JSON `{{ ok, stages, summary, duration_ms }}`. Étapes émises au Studio : `stop` → `rsync-back` → `restart`.\n\
+         JSON `{{ ok, stages, summary, duration_ms }}`. Étapes émises au badge Studio : `stop` → `restart` (un `rsync-back` ne s'intercale que si un build host distant est configuré).\n\
          \n\
          ## Workflow type\n\
          \n\
          1. `bash .claude/skills/0-build/build.sh`  (build local sur Medion, voir output cargo)\n\
-         2. `bash .claude/skills/0-deploy/deploy.sh`  (livre + restart sur Medion)\n\
+         2. `bash .claude/skills/0-deploy/deploy.sh`  (stop + restart sur Medion)\n\
          3. Vérifier dans le panel Studio que l'app est `running`.\n\
          \n\
          ## Erreur HTTP 409 — BUILD_BUSY\n\
@@ -852,7 +854,7 @@ fn render_app_build_skill(app: &Application) -> String {
          Cette skill compile l'app **directement** sur Medion (où vivent sources et toolchain). \
          L'output (cargo, pnpm, etc.) est visible en live dans ton terminal. Le Studio est notifié en parallèle via `/api/apps/{slug}/build-event` pour afficher l'état dans le panel per-app.\n\
          \n\
-         **Important** : ce build NE LIVRE PAS l'artefact à Medion. Pour livrer + restart en prod, enchaîne ensuite avec :\n\
+         **Important** : ce build compile **en place** mais ne RECHARGE PAS le process en cours (qui tourne encore sur l'ancien artefact). Pour reprendre le nouvel artefact en prod (stop + restart), enchaîne ensuite avec :\n\
          \n\
          ```bash\n\
          bash .claude/skills/0-deploy/deploy.sh\n\
@@ -872,13 +874,13 @@ fn render_app_build_skill(app: &Application) -> String {
          \n\
          ## Workflow type\n\
          \n\
-         1. `bash .claude/skills/0-build/build.sh`  (compile local, voir l'output)\n\
+         1. `bash .claude/skills/0-build/build.sh`  (compile en place, voir l'output cargo/pnpm)\n\
          2. Itérer si besoin (fix erreurs, re-build)\n\
-         3. `bash .claude/skills/0-deploy/deploy.sh`  (livre + restart prod)\n\
+         3. `bash .claude/skills/0-deploy/deploy.sh`  (stop + restart pour reprendre l'artefact)\n\
          \n\
          ## Interdits\n\
          \n\
-         - **JAMAIS** appeler les anciens endpoints `/api/apps/{slug}/build` ou `/api/apps/{slug}/deploy` à la main : ils refont l'aller-retour SSH inutile.\n\
+         - **JAMAIS** rebuilder à la main hors de cette skill : le PATH toolchain et les events Studio sont déjà gérés par `build.sh`.\n\
          \n\
          {stack_section}",
         slug = app.slug,

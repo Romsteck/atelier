@@ -2164,3 +2164,47 @@ pub(crate) async fn bind_git_remote_for_slug(slug: &str) -> anyhow::Result<()> {
     info!(slug, origin = %origin_url, "git origin bound");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Régression : un AppBuildEvent émis sur un `Sender` est livré à un
+    /// `subscribe()` du MÊME canal. C'est exactement ce qui était cassé — les
+    /// AppsContext étaient construits avec un canal JETABLE (zéro abonné), donc
+    /// le badge ne s'allumait jamais. `from_api_state` câble désormais
+    /// `state.events.app_build.clone()` (même canal que le relais WebSocket).
+    #[tokio::test]
+    async fn emit_build_event_reaches_subscriber_of_same_channel() {
+        let (tx, mut rx) = broadcast::channel::<AppBuildEvent>(8);
+        emit_build_event(
+            &tx,
+            "trader",
+            "started",
+            None,
+            None,
+            Some("compile".to_string()),
+            Some("local build".to_string()),
+            None,
+            None,
+        );
+        let ev = rx.try_recv().expect("event delivered to subscriber");
+        assert_eq!(ev.slug, "trader");
+        assert_eq!(ev.status, "started");
+        assert_eq!(ev.phase.as_deref(), Some("compile"));
+    }
+
+    /// Un Sender CLONÉ partage le canal (le pattern de `from_api_state`) : un
+    /// event émis via le clone atteint l'abonné de l'original.
+    #[tokio::test]
+    async fn cloned_sender_shares_channel() {
+        let (tx, mut rx) = broadcast::channel::<AppBuildEvent>(8);
+        let cloned = tx.clone();
+        assert!(cloned.same_channel(&tx));
+        emit_build_event(&cloned, "home", "finished", None, None, None, None, Some(1234), None);
+        let ev = rx.try_recv().expect("event from clone delivered");
+        assert_eq!(ev.slug, "home");
+        assert_eq!(ev.status, "finished");
+        assert_eq!(ev.duration_ms, Some(1234));
+    }
+}

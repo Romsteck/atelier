@@ -2,12 +2,13 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   LogOut, User, Code2, Database, Hammer,
   GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
-  Play, Square, Archive,
+  Play, Square, Archive, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useStudio } from '../context/StudioContext';
 import { statusDot } from '../pages/Studio';
 import { useEffect } from 'react';
+import useBuildingApps from '../hooks/useBuildingApps';
 import InstallButton from './InstallButton';
 
 const navGroups = [
@@ -36,6 +37,7 @@ function Sidebar({ onClose, collapsed }) {
   const location = useLocation();
   const navigate = useNavigate();
   const { recentApps, selectedSlug, activeTab, onControl } = useStudio();
+  const buildingApps = useBuildingApps();
 
   useEffect(() => {
     onClose?.();
@@ -124,6 +126,7 @@ function Sidebar({ onClose, collapsed }) {
                           {recentApps.map((app) => {
                             const state = (app.state || '').toLowerCase();
                             const isRunning = state === 'running';
+                            const isBuilding = buildingApps.has(app.slug);
                             const sel = app.slug === selectedSlug;
                             return (
                               <div
@@ -135,7 +138,11 @@ function Sidebar({ onClose, collapsed }) {
                                     : 'border-transparent text-gray-400 hover:bg-gray-700/30'
                                 }`}
                               >
-                                <span className={`w-[7px] h-[7px] rounded-full shrink-0 ${statusDot(state)}`} />
+                                {isBuilding ? (
+                                  <Loader2 className="w-[11px] h-[11px] shrink-0 text-blue-400 animate-spin" title="Build en cours" />
+                                ) : (
+                                  <span className={`w-[7px] h-[7px] rounded-full shrink-0 ${statusDot(state)}`} />
+                                )}
                                 <span className="flex-1 truncate">{app.name}</span>
                                 <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
                                   {isRunning ? (

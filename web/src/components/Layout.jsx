@@ -19,6 +19,10 @@ function BuildBadge({ build, onDismiss }) {
   const phase = build.phase;
 
   if (status === 'started' || status === 'step') {
+    // Les builds locaux (skill 0-build) n'émettent pas de compteur d'étapes —
+    // seuls les builds MCP distants ont step/total. Sans compteur, on affiche
+    // juste « Build · {phase} » au lieu d'un trompeur « Build …/5 ».
+    const hasCounter = step != null || build.total_steps != null;
     return (
       <div
         role="status"
@@ -26,7 +30,7 @@ function BuildBadge({ build, onDismiss }) {
         className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-blue-500/15 border border-blue-500/30 text-blue-300 shrink-0"
       >
         <Loader2 className="w-3 h-3 animate-spin" />
-        <span>Build {step ?? '…'}/{total}</span>
+        <span>Build{hasCounter ? ` ${step ?? '…'}/${total}` : ''}</span>
         {phase && <span className="opacity-70">· {phase}</span>}
       </div>
     );

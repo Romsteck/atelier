@@ -41,6 +41,18 @@ Sous le capot ([scripts/deploy-app.sh](../../scripts/deploy-app.sh)) :
 3. POST `/api/apps/<slug>/control` action=restart
 4. Healthcheck via le **path-proxy local** `http://127.0.0.1:4100/apps/<slug><health_path>` (commit `bf1e3a8`, 2026-06-13 — exerce le proxy Atelier + le listener TCP de l'app ; les hostnames `<slug>.mynetwk.biz` sont morts). Un `3xx` est accepté car les apps `auth_required: true` redirigent les anonymes vers `/login`.
 
+### Chemin de build de l'agent Studio (skills générées)
+
+`make deploy-app` est le chemin **CLI** (lancé par `romain`). L'**agent Claude du Studio** (qui tourne en `hr-studio`), lui, build via deux skills **générées par app** ([crates/atelier-apps/src/context.rs](../../crates/atelier-apps/src/context.rs), écrites dans `/var/lib/atelier/apps/<slug>/src/.claude/skills/`) :
+
+- **`0-build`** (`build.sh`) — compile **en place sur Medion** (`build_command` du registre). Émet `started`/`finished`/`error` vers `POST /api/apps/<slug>/build-event` → canal WS `app:build` → **badge de build** du Studio.
+- **`0-deploy`** (`deploy.sh`) — `POST /api/apps/<slug>/ship` = **stop + restart** du process supervisé pour reprendre l'artefact (rsync distant **uniquement** si `ATELIER_BUILD_HOST` est défini ; non par défaut).
+
+Invariants à NE PAS casser :
+- **Toolchain sur PATH** : l'agent est spawné via `sudo -H -u hr-studio` qui réinitialise l'env (secure_path) → `cargo` (`~/.cargo/bin`) en est absent. Le PATH est rajouté à deux niveaux : le runner ([runner/src/runner.js](../../runner/src/runner.js), prepend de `process.env.PATH`) **et** chaque `build.sh` généré (`export PATH=…/.cargo/bin`). Sans ça, le build Rust meurt en `cargo: command not found`.
+- **Canal de build partagé** : tout `AppsContext` doit être construit via `AppsContext::from_api_state` (canal `state.events.app_build`, relayé par le WS). Un canal `broadcast::channel` jetable = events dans le vide = badge mort.
+- Après modif des templates de `context.rs`, **régénérer** le contexte des apps (MCP `app.regenerate_context`) **après** `make deploy` (le générateur est in-process : binaire stale = ancien template).
+
 ## Règles absolues
 
 - **JAMAIS** `cargo run` en local — toujours `make deploy` (install dans `/opt/atelier`).

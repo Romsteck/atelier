@@ -37,6 +37,7 @@ pub fn router() -> Router<ApiState> {
         .route("/{slug}/control", post(control_app))
         .route("/{slug}/status", get(app_status))
         .route("/{slug}/ship", post(ship_app))
+        .route("/{slug}/build-event", post(build_event))
 }
 
 fn validate_slug(slug: &str) -> Result<(), axum::response::Response> {
@@ -189,17 +190,10 @@ async fn ship_app(
     let timeout_secs = body.and_then(|Json(b)| b.timeout_secs);
     info!(slug = %slug, timeout_secs = ?timeout_secs, "AppShip");
 
-    let (app_build_tx, _) = tokio::sync::broadcast::channel(256);
-    let ctx = AppsContext {
-        supervisor: (*state.supervisor).clone(),
-        dataverse_manager: state.dv.clone(),
-        context_generator: state.context_generator.clone(),
-        edge: None,
-        git: state.git.clone(),
-        base_domain: state.context_generator.base_domain.clone(),
-        build_locks: state.build_locks.clone(),
-        app_build_tx,
-    };
+    // `from_api_state` câble le canal de build PARTAGÉ (state.events.app_build)
+    // relayé par le WebSocket — pas un canal jetable, sinon les étapes du ship
+    // (stop/restart) ne s'afficheraient pas dans le badge Studio.
+    let ctx = AppsContext::from_api_state(&state);
 
     let resp = ctx.ship(slug.clone(), timeout_secs).await;
     // ship()'s pipeline returns ok_data even on a pipeline failure (rsync /
@@ -232,6 +226,66 @@ async fn ship_app(
         };
         warn!(slug = %slug, error = %err_msg, "AppShip failed");
         (status, Json(json!({"success": false, "error": err_msg}))).into_response()
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct BuildEventBody {
+    /// "started" | "step" | "finished" | "error"
+    status: String,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    step: Option<u32>,
+    #[serde(default)]
+    total_steps: Option<u32>,
+}
+
+/// `POST /api/apps/{slug}/build-event`
+///
+/// Relais des étapes de build émises par la skill `0-build` (qui tourne en local
+/// sur Medion) vers le canal `app:build` du WebSocket → le badge per-app du Studio.
+/// Sans secret, payload purement cosmétique (allume/éteint un badge) ; non
+/// authentifié comme les routes `/api/apps/*` sœurs (confiance LAN, bind 0.0.0.0).
+async fn build_event(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    body: Option<Json<BuildEventBody>>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let Json(b) = body.unwrap_or_default();
+    info!(slug = %slug, status = %b.status, phase = ?b.phase, "AppBuildEvent (external)");
+
+    let ctx = AppsContext::from_api_state(&state);
+    let resp = ctx
+        .emit_external_build_event(
+            slug.clone(),
+            b.status,
+            b.phase,
+            b.message,
+            b.duration_ms,
+            b.error,
+            b.step,
+            b.total_steps,
+        )
+        .await;
+    if resp.ok {
+        Json(json!({"success": true, "data": {"ok": true}})).into_response()
+    } else {
+        let err_msg = resp.error.unwrap_or_else(|| "build-event failed".to_string());
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": err_msg})),
+        )
+            .into_response()
     }
 }
 
