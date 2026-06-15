@@ -96,6 +96,9 @@ deploy-local: atelier web runner
 	sudo rsync -a --delete $(RUNNER_LOCAL)/src/ $(RUNNER_DST)/src/
 	sudo rsync -a --delete $(RUNNER_LOCAL)/node_modules/ $(RUNNER_DST)/node_modules/
 	sudo rsync -a $(RUNNER_LOCAL)/package.json $(RUNNER_LOCAL)/package-lock.json $(RUNNER_LOCAL)/.npmrc $(RUNNER_DST)/
+	@echo "→ sync systemd unit → /etc/systemd/system/atelier.service (le repo est la source de vérité)"
+	sudo install -o root -g root -m 0644 systemd/atelier.service /etc/systemd/system/atelier.service
+	sudo systemctl daemon-reload
 	@echo "→ restart atelier.service"
 	sudo systemctl restart atelier.service
 	@echo "→ healthcheck (poll $(ATELIER_API)/api/health)"

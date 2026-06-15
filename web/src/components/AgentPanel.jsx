@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
 import { getSdkVersion, updateSdk } from '../api/client';
+import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, formatToolResult, splitPath, diffLines, editsOf } from '../lib/toolDisplay';
 import { MODELS, MODES, buildSettings } from '../lib/agentModels';
@@ -329,6 +330,8 @@ export default function AgentPanel({ panelKey }) {
   const [effort, setEffort] = useState(() => localStorage.getItem('agent:effort') || 'max');
   const [mode, setMode] = useState(() => localStorage.getItem('agent:mode') || 'plan');
   const [sdk, setSdk] = useState(null);
+  const [updatingSdk, setUpdatingSdk] = useState(false);
+  const [sdkMsg, setSdkMsg] = useState(null); // { ok: bool, text } — retour de la MAJ SDK
   const bodyRef = useRef(null);
 
   // Choix mémorisés → défauts des prochaines conversations.
@@ -403,7 +406,20 @@ export default function AgentPanel({ panelKey }) {
   const decide = useCallback((request_id, approved, feedback) => decidePlan(panelKey, request_id, approved, feedback), [decidePlan, panelKey]);
 
   const onUpdateSdk = useCallback(async () => {
-    try { await updateSdk(); } catch { /* 501 en Phase 1 */ }
+    setUpdatingSdk(true);
+    setSdkMsg(null);
+    try {
+      const r = await updateSdk();
+      // Re-lecture de la version live sur disque → update_available repasse à false
+      // (le bouton disparaît) et l'UI reflète l'état réel post-install.
+      const v = await getSdkVersion();
+      setSdk(v.data);
+      setSdkMsg({ ok: true, text: `SDK à jour (${r.data?.installed ?? v.data?.installed ?? ''})` });
+    } catch (e) {
+      setSdkMsg({ ok: false, text: apiErr(e, 'MAJ SDK échouée') });
+    } finally {
+      setUpdatingSdk(false);
+    }
   }, []);
 
   const onKeyDown = (e) => {
@@ -426,11 +442,18 @@ export default function AgentPanel({ panelKey }) {
         </span>
         {convo.loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-600" />}
         <div className="ml-auto flex items-center gap-2">
+          {sdkMsg && (
+            <span className={`text-[11px] max-w-[160px] truncate ${sdkMsg.ok ? 'text-emerald-400' : 'text-red-400'}`}
+              title={sdkMsg.text}>
+              {sdkMsg.text}
+            </span>
+          )}
           {sdk?.update_available && (
-            <button onClick={onUpdateSdk}
-              className="px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
-              title={`MAJ Agent SDK disponible : ${sdk.installed} → ${sdk.latest}`}>
-              MAJ {sdk.latest}
+            <button onClick={onUpdateSdk} disabled={updatingSdk}
+              className="px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+              title={`MAJ Agent SDK : ${sdk.installed} → ${sdk.latest}`}>
+              {updatingSdk && <Loader2 className="w-3 h-3 animate-spin" />}
+              {updatingSdk ? 'MAJ…' : `MAJ ${sdk.latest}`}
             </button>
           )}
           <button onClick={() => closeConversation(panelKey)} title="Fermer (la conversation reste dans l'historique)"

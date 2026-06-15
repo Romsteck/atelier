@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -53,6 +54,10 @@ struct RunState {
 
 static RUNS: LazyLock<Mutex<HashMap<String, RunState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static SID_RUN: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Verrou single-flight de la MAJ SDK : `npm install` n'est pas transactionnel, deux MAJ
+/// concurrentes corrompraient le snapshot/rollback. Posé/levé par [`sdk_update`] (garde RAII).
+static SDK_UPDATING: AtomicBool = AtomicBool::new(false);
 
 /// Écrit une ligne NDJSON sur le stdin du runner d'un run. `false` si inconnu/terminé.
 fn send_input(run_id: &str, line: String) -> bool {
@@ -158,6 +163,22 @@ pub fn global_router() -> Router<ApiState> {
 
 fn node_bin() -> String {
     std::env::var("ATELIER_AGENT_NODE_BIN").unwrap_or_else(|_| "/usr/bin/node".into())
+}
+fn npm_bin() -> String {
+    std::env::var("ATELIER_NPM_BIN").unwrap_or_else(|_| "/usr/bin/npm".into())
+}
+/// Budget d'un `npm install` (MAJ SDK). Au-delà on tue + rollback.
+fn npm_timeout() -> Duration {
+    let secs = std::env::var("ATELIER_NPM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(180u64);
+    Duration::from_secs(secs)
+}
+/// Racine du runner installé (= parent de `src/`), où vivent `node_modules` + manifests npm.
+/// `.../runner/src/runner.js` → `.../runner`. Source unique partagée par la MAJ et le check de version.
+fn runner_dir() -> Option<PathBuf> {
+    FsPath::new(&runner_script()).parent()?.parent().map(|p| p.to_path_buf())
 }
 fn runner_script() -> String {
     std::env::var("ATELIER_AGENT_RUNNER").unwrap_or_else(|_| "/opt/atelier/runner/src/runner.js".into())
@@ -1125,13 +1146,99 @@ async fn fetch_latest_sdk() -> Option<String> {
 }
 
 fn installed_sdk_version() -> Option<String> {
-    let runner = runner_script();
-    // .../runner/src/runner.js → .../runner
-    let runner_dir = FsPath::new(&runner).parent()?.parent()?;
-    let pkg = runner_dir.join("node_modules/@anthropic-ai/claude-agent-sdk/package.json");
+    let pkg = runner_dir()?.join("node_modules/@anthropic-ai/claude-agent-sdk/package.json");
     let s = std::fs::read_to_string(pkg).ok()?;
     let v: Value = serde_json::from_str(&s).ok()?;
     v.get("version").and_then(|x| x.as_str()).map(String::from)
+}
+
+/// Le paquet SDK et sa dep native optionnelle (linux-x64), relatifs à `node_modules`.
+const SDK_PKG: &str = "@anthropic-ai/claude-agent-sdk";
+const SDK_NATIVE: &str = "@anthropic-ai/claude-agent-sdk-linux-x64";
+
+/// Tronque un log à ses `n` derniers caractères (sûr UTF-8), pour le renvoyer en cas d'échec.
+fn tail(s: &str, n: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= n {
+        return s.to_string();
+    }
+    format!("…{}", chars[chars.len() - n..].iter().collect::<String>())
+}
+
+/// Purge un éventuel reliquat de backup `*.sdk-bak` (run précédent interrompu, ou nettoyage post-succès).
+fn cleanup_sdk_bak(dir: &FsPath) {
+    let nm = dir.join("node_modules");
+    let _ = std::fs::remove_dir_all(nm.join(format!("{SDK_PKG}.sdk-bak")));
+    let _ = std::fs::remove_dir_all(nm.join(format!("{SDK_NATIVE}.sdk-bak")));
+    let _ = std::fs::remove_file(dir.join("package.json.sdk-bak"));
+    let _ = std::fs::remove_file(dir.join("package-lock.json.sdk-bak"));
+}
+
+/// Snapshot des artefacts SDK avant install, pour rollback : manifests copiés, dossiers SDK
+/// `rename`és de côté (atomique, même FS → npm les réinstalle frais). Best-effort sur l'absent.
+fn snapshot_sdk(dir: &FsPath) -> std::io::Result<()> {
+    cleanup_sdk_bak(dir);
+    let nm = dir.join("node_modules");
+    std::fs::copy(dir.join("package.json"), dir.join("package.json.sdk-bak"))?;
+    let lock = dir.join("package-lock.json");
+    if lock.exists() {
+        std::fs::copy(&lock, dir.join("package-lock.json.sdk-bak"))?;
+    }
+    std::fs::rename(nm.join(SDK_PKG), nm.join(format!("{SDK_PKG}.sdk-bak")))?;
+    let native = nm.join(SDK_NATIVE);
+    if native.exists() {
+        std::fs::rename(&native, nm.join(format!("{SDK_NATIVE}.sdk-bak")))?;
+    }
+    Ok(())
+}
+
+/// Rollback : dégage les dossiers fraîchement (mal) installés et remet le snapshot + les manifests.
+/// Best-effort — on ne peut rien faire de plus utile que de loguer si une étape échoue.
+fn restore_sdk(dir: &FsPath) {
+    let nm = dir.join("node_modules");
+    let _ = std::fs::remove_dir_all(nm.join(SDK_PKG));
+    let _ = std::fs::rename(nm.join(format!("{SDK_PKG}.sdk-bak")), nm.join(SDK_PKG));
+    let _ = std::fs::remove_dir_all(nm.join(SDK_NATIVE));
+    let _ = std::fs::rename(nm.join(format!("{SDK_NATIVE}.sdk-bak")), nm.join(SDK_NATIVE));
+    let pkg_bak = dir.join("package.json.sdk-bak");
+    if pkg_bak.exists() {
+        let _ = std::fs::rename(&pkg_bak, dir.join("package.json"));
+    }
+    let lock_bak = dir.join("package-lock.json.sdk-bak");
+    if lock_bak.exists() {
+        let _ = std::fs::rename(&lock_bak, dir.join("package-lock.json"));
+    }
+}
+
+/// `npm install <spec>` dans le runner. Retourne le log combiné (Ok) ou un message d'échec (Err).
+/// WHY env : sous `ProtectSystem=strict` `/root` est read-only → on force HOME/cache npm vers `/tmp`
+/// (writable). `--omit=dev` (jamais `--omit=optional` : la dep native linux-x64 est requise au runtime).
+async fn run_npm_install(dir: &FsPath, spec: &str) -> Result<String, String> {
+    let mut cmd = Command::new(npm_bin());
+    cmd.arg("install")
+        .arg(spec)
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--save-exact")
+        .arg("--omit=dev")
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .env("HOME", "/tmp")
+        .env("npm_config_cache", "/tmp/.npm-atelier")
+        .env("CI", "true")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = tokio::time::timeout(npm_timeout(), cmd.output())
+        .await
+        .map_err(|_| format!("npm install: timeout ({}s)", npm_timeout().as_secs()))?
+        .map_err(|e| format!("npm install: spawn impossible: {e}"))?;
+    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
+    log.push_str(&String::from_utf8_lossy(&out.stderr));
+    if out.status.success() {
+        Ok(log)
+    } else {
+        Err(format!("npm install: {}\n{log}", out.status))
+    }
 }
 
 #[instrument]
@@ -1146,13 +1253,108 @@ async fn sdk_version() -> impl IntoResponse {
     }))
 }
 
-/// MAJ auto du SDK : différée (Phase 1b). Le check de version est livré ; la
-/// mise à jour orchestrée (npm install en `romain` + smoke-test + rollback +
-/// rsync vers /opt) est encore à implémenter — on ne mute pas la prod à moitié.
-#[instrument]
-async fn sdk_update() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "MAJ SDK non encore implémentée (Phase 1b) — utiliser `make deploy` pour l'instant"})),
-    )
+#[derive(Debug, Deserialize)]
+struct SdkUpdateBody {
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// MAJ in-place (ÉPHÉMÈRE) du Claude Agent SDK dans le runner installé : snapshot → `npm install`
+/// → vérif (version cible + dep native) → smoke-test (`op:list`, charge le SDK sous l'exec réel
+/// hr-studio) → rollback si échec. L'effet porte sur la PROCHAINE session agent (runner spawné
+/// frais) — pas de restart. Annulé au prochain `make deploy` (resync depuis le pin source) ;
+/// `sdk_version` lisant la version live sur disque, l'UI reste cohérente.
+#[instrument(skip(body))]
+async fn sdk_update(body: Option<Json<SdkUpdateBody>>) -> axum::response::Response {
+    if SDK_UPDATING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return err(StatusCode::CONFLICT, "MAJ SDK déjà en cours");
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SDK_UPDATING.store(false, Ordering::Release);
+        }
+    }
+    let _guard = Guard;
+
+    let dir = match runner_dir() {
+        Some(d) if d.join("node_modules").is_dir() => d,
+        _ => return err(StatusCode::INTERNAL_SERVER_ERROR, "runner introuvable"),
+    };
+
+    // Cible : version explicite (body) sinon la dernière publiée au registry npm.
+    let target = match body.and_then(|b| b.0.version).filter(|v| !v.trim().is_empty()) {
+        Some(v) => v.trim().to_string(),
+        None => match fetch_latest_sdk().await {
+            Some(v) => v,
+            None => return err(StatusCode::BAD_GATEWAY, "registry npm injoignable"),
+        },
+    };
+
+    let installed = installed_sdk_version();
+    if installed.as_deref() == Some(target.as_str()) {
+        info!(version = %target, "MAJ SDK : déjà à jour");
+        return (
+            StatusCode::OK,
+            Json(json!({ "installed": installed, "latest": target, "updated": false, "note": "déjà à jour" })),
+        )
+            .into_response();
+    }
+
+    info!(target = %target, dir = %dir.display(), from = ?installed, "MAJ SDK : début");
+
+    if let Err(e) = snapshot_sdk(&dir) {
+        error!(error = %e, "MAJ SDK : snapshot impossible");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("snapshot impossible: {e}"));
+    }
+
+    let spec = format!("{SDK_PKG}@{target}");
+    let outcome: Result<(), String> = match run_npm_install(&dir, &spec).await {
+        Err(log) => Err(log),
+        Ok(_) => {
+            let now = installed_sdk_version();
+            if now.as_deref() != Some(target.as_str()) {
+                Err(format!("version post-install inattendue: {now:?} (attendu {target})"))
+            } else if !dir.join("node_modules").join(SDK_NATIVE).is_dir() {
+                Err(format!("dep native {SDK_NATIVE} absente après install"))
+            } else {
+                // Smoke-test : op:list importe le SDK et tourne sous l'exec réel hr-studio.
+                let init = json!({ "op": "list", "cwd": dir.to_string_lossy() }).to_string();
+                match run_runner_op(&dir, init).await {
+                    Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("sessions") => Ok(()),
+                    Ok(v) => Err(format!("smoke-test op:list inattendu: {v}")),
+                    Err(e) => Err(format!("smoke-test op:list échoué: {e}")),
+                }
+            }
+        }
+    };
+
+    match outcome {
+        Ok(()) => {
+            cleanup_sdk_bak(&dir);
+            info!(version = %target, "MAJ SDK : succès");
+            (
+                StatusCode::OK,
+                Json(json!({ "installed": target, "latest": target, "updated": true })),
+            )
+                .into_response()
+        }
+        Err(log) => {
+            restore_sdk(&dir);
+            let restored = installed_sdk_version();
+            warn!(error = %tail(&log, 500), restored = ?restored, "MAJ SDK : rollback");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "MAJ SDK échouée (rollback effectué)",
+                    "installed": restored,
+                    "log": tail(&log, 4000),
+                })),
+            )
+                .into_response()
+        }
+    }
 }

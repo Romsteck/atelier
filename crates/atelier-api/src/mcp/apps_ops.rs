@@ -108,6 +108,27 @@ pub struct AppsContext {
 }
 
 impl AppsContext {
+    /// Build an `AppsContext` wired to the SHARED build-event channel
+    /// (`state.events.app_build`), the one the WebSocket relay subscribes to
+    /// (`routes/ws.rs`). WHY: the HTTP `ship` route and the MCP entrypoint each
+    /// used to construct an `AppsContext` with a THROWAWAY `broadcast::channel`,
+    /// so every emitted `AppBuildEvent` went to a sender with no subscriber and
+    /// the Studio's BuildBadge never lit up. Always use this constructor so the
+    /// three call sites can't drift back into that bug.
+    pub fn from_api_state(state: &crate::state::ApiState) -> Self {
+        Self {
+            supervisor: (*state.supervisor).clone(),
+            dataverse_manager: state.dv.clone(),
+            context_generator: state.context_generator.clone(),
+            // Câblage edge non repris ici (cf. McpState::from_api_state).
+            edge: None,
+            git: state.git.clone(),
+            base_domain: state.context_generator.base_domain.clone(),
+            build_locks: state.build_locks.clone(),
+            app_build_tx: state.events.app_build.clone(),
+        }
+    }
+
     /// Resolve the postgres-dataverse engine for `slug`. Maps any
     /// configuration / connectivity error into a ready-to-return
     /// [`IpcResponse`] so call sites stay compact.

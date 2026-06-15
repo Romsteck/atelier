@@ -49,6 +49,15 @@ if (!existsSync(join(configDir, '.credentials.json'))) {
   fail(`Credentials OAuth introuvables sous ${configDir}/.credentials.json — le runner doit tourner en hr-studio (login claude déjà présent).`);
 }
 
+// Toolchain sur PATH (WHY) : le runner est spawné via `sudo -H -u hr-studio` qui
+// réinitialise l'env vers son secure_path — `~/.cargo/bin` (cargo) et `~/.local/bin`
+// en sont absents. L'outil Bash du SDK hérite de ce process.env, donc les builds
+// d'app (cargo) et les appels cargo ad-hoc de l'agent échouaient en "command not found".
+// On les rajoute ici, au plus tôt, pour tous les chemins d'exécution (idempotent).
+if (process.env.HOME) {
+  process.env.PATH = `${process.env.HOME}/.cargo/bin:${process.env.HOME}/.local/bin:${process.env.PATH || ''}`;
+}
+
 // stdin = canal d'entrée NDJSON : 1re ligne = init JSON ; lignes suivantes = tours
 // (`user_message`), réponses (`answer`) ou contrôle (`end`/`interrupt`). Les tours
 // sont poussés dans une FILE consommée par le générateur d'entrée de `query()` ;

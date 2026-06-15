@@ -697,11 +697,15 @@ fn render_app_build_script(app: &Application) -> String {
         .as_deref()
         .unwrap_or("echo 'no build_command configured'; exit 1");
     let template = r#"#!/usr/bin/env bash
-# Build local de l'app `__SLUG__` (sources et toolchain sur Medion).
-# Émet des events au Studio (panel per-app live) via /api/apps/__SLUG__/build-event.
+# Build local de l'app `__SLUG__` : compile en place sur Medion (sources + toolchain locales).
+# Émet des events au Studio (badge per-app live) via /api/apps/__SLUG__/build-event.
 # Géré par Atelier — ne pas éditer (régénéré à chaque AppUpdate).
 set -euo pipefail
-API_BASE="${API_BASE:-http://10.0.0.254:4100}"
+# Toolchain sur PATH : l'agent tourne sous `sudo -u hr-studio` qui réinitialise l'env
+# vers son secure_path, donc `cargo` (~/.cargo/bin) en est absent. On le rajoute ici
+# pour que `cargo build` aboutisse (idempotent ; sans effet si déjà présent).
+export PATH="${HOME:-/var/lib/hr-studio}/.cargo/bin:${HOME:-/var/lib/hr-studio}/.local/bin:$PATH"
+API_BASE="${API_BASE:-http://127.0.0.1:4100}"
 SLUG="__SLUG__"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 

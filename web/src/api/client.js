@@ -291,9 +291,11 @@ export const renameConversation = (slug, sid, title) =>
   api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
 export const deleteConversation = (slug, sid) =>
   api.delete(`/apps/${slug}/agent/conversations/${sid}`);
-// Version SDK installée vs dernière (npm) + bouton MAJ (501 en Phase 1).
+// Version SDK installée vs dernière (npm) + MAJ in-place (éphémère) du runner.
 export const getSdkVersion = () => api.get('/agent/sdk/version');
-export const updateSdk = (version) => api.post('/agent/sdk/update', version ? { version } : {});
+// timeout long : `npm install` côté serveur peut dépasser les 30 s par défaut du client.
+export const updateSdk = (version) =>
+  api.post('/agent/sdk/update', version ? { version } : {}, { timeout: 200000 });
 
 // ========== Source (explorateur fichiers + git du working tree — Studio) ==========
 // Lit l'arbre de travail réel `…/{slug}/src` (≠ /git/repos qui sert les bare repos).
