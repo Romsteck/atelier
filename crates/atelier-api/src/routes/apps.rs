@@ -158,6 +158,8 @@ async fn app_status(State(state): State<ApiState>, Path(slug): Path<String>) -> 
                     "port": status.port,
                     "uptime_secs": status.uptime_secs,
                     "restart_count": status.restart_count,
+                    "exe_path": status.exe_path,
+                    "exe_mtime": status.exe_mtime,
                 }
             }))
             .into_response()

@@ -54,6 +54,23 @@ fn unit_name(slug: &str) -> String {
     format!("{}-{slug}.service", unit_prefix())
 }
 
+/// Resolve the running binary's path + mtime from `/proc/{pid}/exe`.
+/// `read_link` yields the path (with a trailing " (deleted)" if the on-disk
+/// file was replaced since start — a useful "needs restart" signal); the
+/// metadata follow targets the inode the process is actually running.
+fn exe_identity(pid: u32) -> (Option<String>, Option<u64>) {
+    let proc_exe = format!("/proc/{pid}/exe");
+    let path = std::fs::read_link(&proc_exe)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let mtime = std::fs::metadata(&proc_exe)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    (path, mtime)
+}
+
 /// Status snapshot of a supervised app process.
 #[derive(Debug, Clone)]
 pub struct ProcessStatus {
@@ -62,6 +79,15 @@ pub struct ProcessStatus {
     pub port: u16,
     pub uptime_secs: u64,
     pub restart_count: u32,
+    /// Path of the binary the process is actually executing (from
+    /// `/proc/{pid}/exe`). Lets a deployer confirm the running code, instead of
+    /// the failed `readlink /proc/<pid>/exe` workaround (the app process is
+    /// often a different user; the supervisor runs privileged so this resolves).
+    pub exe_path: Option<String>,
+    /// mtime (unix secs) of the *running* binary inode (stat of `/proc/{pid}/exe`,
+    /// which follows to the actual executable even after an in-place rebuild).
+    /// Compare to a fresh build time to confirm a restart picked up new code.
+    pub exe_mtime: Option<u64>,
 }
 
 /// Internal record for one supervised process.
@@ -104,12 +130,15 @@ impl SupervisedProcess {
 
     fn status(&self) -> ProcessStatus {
         let uptime_secs = self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let (exe_path, exe_mtime) = self.pid.map(exe_identity).unwrap_or((None, None));
         ProcessStatus {
             pid: self.pid,
             state: self.state,
             port: self.port,
             uptime_secs,
             restart_count: self.restart_count,
+            exe_path,
+            exe_mtime,
         }
     }
 }

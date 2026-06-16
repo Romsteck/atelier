@@ -577,6 +577,8 @@ impl AppsContext {
                     port,
                     uptime_secs: 0,
                     restart_count: 0,
+                    exe_path: None,
+                    exe_mtime: None,
                 })
             }
         }
@@ -592,7 +594,14 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         let n = limit.unwrap_or(200).min(5000);
-        let unit = format!("hr-app-{slug}.service");
+        // The unit prefix moved from the legacy hr-orchestrator name (`hr-app-`) to
+        // `atelier-app-` during the 2026-05 rapatriement (overridable via
+        // ATELIER_APP_UNIT_PREFIX, mirroring the supervisor's default). Hardcoding the
+        // old prefix made journalctl read a dead unit → logs frozen at the
+        // pre-migration buffer (the documented "stuck on May 9" symptom).
+        let unit_prefix =
+            std::env::var("ATELIER_APP_UNIT_PREFIX").unwrap_or_else(|_| "atelier-app".to_string());
+        let unit = format!("{unit_prefix}-{slug}.service");
         let output = tokio::process::Command::new("journalctl")
             .args([
                 "-u",
@@ -816,9 +825,10 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         IpcResponse::err(
-            "raw SQL is not supported on the postgres-dataverse backend — \
-             use MCP `dv_list`/`dv_get`/`dv_insert`/`dv_update`/... or the \
-             REST gateway at /api/dv/{slug}/{table}",
+            "raw SQL writes are not supported on the postgres-dataverse backend — \
+             for reads use the SELECT-only `db_query` tool; for writes use \
+             `dv_insert`/`dv_update`/`dv_delete` (or the REST gateway at \
+             /api/dv/{slug}/{table})",
         )
     }
 
@@ -832,8 +842,9 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         IpcResponse::err(
-            "raw SQL is not supported on the postgres-dataverse backend — \
-             use db.insert / db.update / db.delete or a GraphQL mutation",
+            "raw SQL mutations are not supported on the postgres-dataverse backend — \
+             use the `dv_insert`/`dv_update`/`dv_delete` MCP tools (or the REST \
+             gateway at /api/dv/{slug}/{table})",
         )
     }
 
@@ -2112,6 +2123,8 @@ fn process_status_to_dto(slug: &str, s: &ProcessStatus) -> AppStatusData {
         port: s.port,
         uptime_secs: s.uptime_secs,
         restart_count: s.restart_count,
+        exe_path: s.exe_path.clone(),
+        exe_mtime: s.exe_mtime,
     }
 }
 

@@ -429,8 +429,9 @@ pub async fn dv_audit_list(
 /// INSERT/UPDATE/DELETE/MERGE and data-modifying CTEs inside a sub-SELECT, so
 /// even a guard miss cannot mutate. `statement_timeout` is inherited from the
 /// pool's session defaults. Rows come back schema-less as JSON (`to_jsonb`), so
-/// arbitrary projections decode without per-type handling. NOT exposed to app
-/// (`?project=`) contexts — surveillance MCP tool set only.
+/// arbitrary projections decode without per-type handling. Exposed to the
+/// surveillance scope as `pm_query`, and reused as the backend of the project
+/// scope's `db_query` (the app agent's read path — same SELECT-only guarantee).
 pub async fn pm_query(ctx: &AppsContext, slug: String, sql: String, limit: u32) -> IpcResponse {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if trimmed.is_empty() {

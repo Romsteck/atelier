@@ -58,6 +58,13 @@ pub struct AppStatusData {
     pub port: u16,
     pub uptime_secs: u64,
     pub restart_count: u32,
+    /// Path of the running binary (`/proc/{pid}/exe`); confirms which code is live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_path: Option<String>,
+    /// mtime (unix secs) of the running binary — compare to a build time to
+    /// confirm a restart picked up freshly-built code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_mtime: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

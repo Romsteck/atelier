@@ -529,6 +529,8 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "db_get_schema" | "db_sync_schema"
             | "db_create_table" | "db_drop_table"
             | "db_add_column" | "db_remove_column" | "db_create_relation"
+            | "dv_schema" | "dv_list" | "dv_get" | "dv_insert" | "dv_update"
+            | "dv_soft_delete" | "dv_restore" | "dv_audit_list"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
@@ -554,6 +556,8 @@ fn is_dispatched_project_tool(name: &str) -> bool {
             | "db_get_schema" | "db_sync_schema"
             | "db_create_table" | "db_drop_table"
             | "db_add_column" | "db_remove_column" | "db_create_relation"
+            | "dv_schema" | "dv_list" | "dv_get" | "dv_insert" | "dv_update"
+            | "dv_soft_delete" | "dv_restore" | "dv_audit_list"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
@@ -576,8 +580,8 @@ fn tool_definitions_project() -> Value {
         // ── Database ──
         { "name": "db_tables", "description": "List all tables in the application's postgres-dataverse database.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
-        { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
-        { "name": "db_exec", "description": "Raw SQL mutations are not supported on the postgres-dataverse backend — use REST `/api/dv/{slug}/{table}` or MCP `dv_*` tools.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_query", "description": "Run a read-only SELECT against the app's database. SELECT/WITH only (runs as a wrapped sub-query; mutations are rejected). JOINs, aggregates, temporal windows and `_dv_audit` are allowed — ideal for forensics. For writes use dv_insert/dv_update/dv_delete.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string", "description": "A single SELECT (or read-only WITH) statement." }, "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 1000 } }, "required": ["sql"] } },
+        { "name": "db_exec", "description": "Raw SQL mutations are not supported on postgres-dataverse. Use the structured tools instead: dv_insert / dv_update / dv_delete (or the REST gateway /api/dv/{slug}/{table}).", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_overview", "description": "Compact overview of the database: table list with column count + row count for each.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_count_rows", "description": "Count rows in a single table.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_get_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON. Read-only.", "inputSchema": { "type": "object", "properties": {} } },
@@ -588,6 +592,15 @@ fn tool_definitions_project() -> Value {
         { "name": "db_add_column", "description": "Add a column to an existing dataverse-managed table. Reserved/audit names (created_by, updated_by, version, etc.) are rejected.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "object", "description": "ColumnDefinition — { name, field_type, required?, unique?, default_value? }" } }, "required": ["table", "column"] } },
         { "name": "db_remove_column", "description": "Drop a user-defined column from a dataverse-managed table. Refuses to drop audit/reserved columns.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "string" } }, "required": ["table", "column"] } },
         { "name": "db_create_relation", "description": "Declare a Lookup foreign-key relation between two dataverse-managed tables.", "inputSchema": { "type": "object", "properties": { "from_table": { "type": "string" }, "from_column": { "type": "string" }, "to_table": { "type": "string" } }, "required": ["from_table", "from_column", "to_table"] } },
+        // ── Data rows (gateway CRUD, audited; system identity) ──
+        { "name": "dv_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "dv_list", "description": "List rows of a table (audited gateway path). `query` mirrors OData: { filter?, select?, orderby?, top?, skip?, include_deleted?, count? } — `filter` uses the dvexpr dialect (no temporal comparisons; see .claude/rules/db.md). For ad-hoc JOINs/aggregates prefer db_query.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "query": { "type": "object", "description": "{ filter?: string, select?: string[], orderby?: [{column,direction}], top?: int, skip?: int, include_deleted?: bool, count?: bool }" } }, "required": ["table"] } },
+        { "name": "dv_get", "description": "Fetch a single row by id (int or uuid).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "id": { "description": "Row id (integer or string/uuid)" }, "include_deleted": { "type": "boolean", "default": false } }, "required": ["table", "id"] } },
+        { "name": "dv_insert", "description": "Insert a row (audited; audit columns id/created_at/updated_at/version/is_deleted/*_by are set implicitly — do NOT pass them). Returns the created row.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "values": { "type": "object", "description": "column → value map (user columns only)" } }, "required": ["table", "values"] } },
+        { "name": "dv_update", "description": "Update a row by id (audited, optimistic-locked). `version` must equal the row's current version (read it via dv_get/db_query first) or the call fails with precondition_failed. Returns the updated row.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "id": { "description": "Row id (integer or string/uuid)" }, "version": { "type": "integer", "description": "Current row version (optimistic lock)" }, "values": { "type": "object", "description": "column → new value map (user columns only)" } }, "required": ["table", "id", "version", "values"] } },
+        { "name": "dv_soft_delete", "description": "Soft-delete a row by id (sets is_deleted; recoverable via dv_restore). Optimistic-locked: `version` must match the row's current version. Returns the deleted row.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "id": { "description": "Row id (integer or string/uuid)" }, "version": { "type": "integer", "description": "Current row version (optimistic lock)" } }, "required": ["table", "id", "version"] } },
+        { "name": "dv_restore", "description": "Restore a soft-deleted row by id (clears is_deleted). Optimistic-locked: `version` must match the row's current version.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "id": { "description": "Row id (integer or string/uuid)" }, "version": { "type": "integer", "description": "Current row version (optimistic lock)" } }, "required": ["table", "id", "version"] } },
+        { "name": "dv_audit_list", "description": "Read the `_dv_audit` trail (who changed what/when, before/after diff) — ideal for forensics. All filters optional.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "row_id": { "type": "string" }, "op": { "type": "string", "description": "insert|update|delete|restore" }, "since": { "type": "string", "description": "ISO timestamp lower bound" }, "top": { "type": "integer" }, "skip": { "type": "integer" } } } },
         // ── Documentation (DOC-FIRST OBLIGATOIRE — voir .claude/rules/docs.md) ──
         { "name": "docs_overview", "description": "DOC-FIRST OBLIGATOIRE. Premier appel à faire avant toute exploration de code. Renvoie l'overview, l'index compact (écrans/features/composants avec titre+résumé 1 ligne) et les stats de l'app courante.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "docs_list_entries", "description": "Liste compacte des entrées de doc, filtrable par type. Préférer docs_search si on a un mot-clé.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["screen", "feature", "component"] } } } },
@@ -741,6 +754,14 @@ async fn handle_tools_call(
         "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
         "db_overview" => tool_db_overview(id, &arguments, state).await,
         "db_count_rows" => tool_db_count_rows(id, &arguments, state).await,
+        "dv_schema" => tool_dv_schema(id, &arguments, state).await,
+        "dv_list" => tool_dv_list(id, &arguments, state).await,
+        "dv_get" => tool_dv_get(id, &arguments, state).await,
+        "dv_insert" => tool_dv_insert(id, &arguments, state).await,
+        "dv_update" => tool_dv_update(id, &arguments, state).await,
+        "dv_soft_delete" => tool_dv_soft_delete(id, &arguments, state).await,
+        "dv_restore" => tool_dv_restore(id, &arguments, state).await,
+        "dv_audit_list" => tool_dv_audit_list(id, &arguments, state).await,
         "docs_overview" => tool_docs_overview(id, &arguments, state).await,
         "docs_list_entries" => tool_docs_list_entries(id, &arguments, state).await,
         "docs_get" => tool_docs_get(id, &arguments, state).await,
@@ -1516,7 +1537,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "db.query",
-            "description": "Raw SQL is not supported on postgres-dataverse — use `dv_list` or REST `/api/dv/{slug}/{table}`.",
+            "description": "Read-only SELECT against the app's database (SELECT/WITH only; runs as a wrapped sub-query so it cannot mutate). For writes use the dv_insert/dv_update/dv_delete tools or REST `/api/dv/{slug}/{table}`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1529,7 +1550,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "db.execute",
-            "description": "Raw SQL mutations are not supported on postgres-dataverse — use db.insert/db.update/db.delete or `dv_*` tools.",
+            "description": "Raw SQL mutations are not supported on postgres-dataverse — use the dv_insert/dv_update/dv_delete tools or the REST gateway `/api/dv/{slug}/{table}`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1923,15 +1944,15 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing sql".into());
     };
-    let params: Vec<Value> = args
-        .get("params")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // The postgres-dataverse backend has no raw-SQL *write* path, but a read
+    // SELECT is legitimate and was the single biggest gap for the app agent:
+    // it was advertised as "Run a SELECT query" yet hard-rejected. Route it to
+    // the same SELECT-only engine as `pm_query` (wrapped FROM-subquery — a guard
+    // miss still cannot mutate). For mutations the agent uses dv_insert/update/delete.
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
     ipc_resp_to_mcp(
         id,
-        ctx.db_query(slug.to_string(), sql.to_string(), params)
-            .await,
+        crate::mcp::dv_ops::pm_query(ctx, slug.to_string(), sql.to_string(), limit).await,
     )
 }
 
@@ -1954,6 +1975,260 @@ async fn tool_pm_query(id: Value, args: &Value, state: &McpState) -> Value {
     ipc_resp_to_mcp(
         id,
         crate::mcp::dv_ops::pm_query(ctx, slug.to_string(), sql.to_string(), limit).await,
+    )
+}
+
+// ── Dataverse gateway CRUD (project scope) ─────────────────────────────
+// The structured read/write surface the app agent previously lacked: error
+// messages pointed at `dv_*` MCP tools that did not exist, leaving no audited
+// mutation path (the agent had to add an app HTTP endpoint just to correct
+// data). These wrap the same `dv_ops` backend the REST gateway uses, acting as
+// `Identity::System` (the agent operates the platform). Reads are also covered
+// by `db_query` (SELECT); these add filtered list/get + audited insert/update/delete.
+
+/// Parse the `values` argument into an ordered column→value map for insert/update.
+fn dv_values_arg(args: &Value) -> Result<std::collections::BTreeMap<String, Value>, String> {
+    match args.get("values") {
+        Some(Value::Object(o)) => Ok(o.clone().into_iter().collect()),
+        _ => Err("Missing/invalid 'values' (must be a JSON object of column→value)".into()),
+    }
+}
+
+async fn tool_dv_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    // `query` mirrors the gateway ListQuery: { filter?, select?, orderby?, top?,
+    // skip?, include_deleted?, count? }. Absent → defaults (all columns, top 50).
+    let query = args.get("query").cloned().unwrap_or_else(|| json!({}));
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_list(
+            ctx,
+            slug.to_string(),
+            table.to_string(),
+            query,
+            atelier_common::Identity::system(),
+        )
+        .await,
+    )
+}
+
+async fn tool_dv_get(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let Some(id_val) = args.get("id").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    let include_deleted = args
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_get(
+            ctx,
+            slug.to_string(),
+            table.to_string(),
+            id_val,
+            include_deleted,
+            atelier_common::Identity::system(),
+        )
+        .await,
+    )
+}
+
+async fn tool_dv_insert(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let values = match dv_values_arg(args) {
+        Ok(v) => v,
+        Err(e) => return error_response(id, INVALID_PARAMS, e),
+    };
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_insert(
+            ctx,
+            slug.to_string(),
+            table.to_string(),
+            values,
+            atelier_common::Identity::system(),
+        )
+        .await,
+    )
+}
+
+async fn tool_dv_update(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let Some(id_val) = args.get("id").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    // Optimistic-lock guard, same as the gateway's If-Match. Read it first
+    // (db_query/dv_get expose `version`) and pass it here.
+    let Some(version) = args.get("version").and_then(|v| v.as_i64()) else {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            "Missing 'version' (current row version, for optimistic locking)".into(),
+        );
+    };
+    let values = match dv_values_arg(args) {
+        Ok(v) => v,
+        Err(e) => return error_response(id, INVALID_PARAMS, e),
+    };
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_update(
+            ctx,
+            slug.to_string(),
+            table.to_string(),
+            id_val,
+            version as i32,
+            values,
+            atelier_common::Identity::system(),
+        )
+        .await,
+    )
+}
+
+async fn tool_dv_soft_delete(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let Some(id_val) = args.get("id").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    let Some(version) = args.get("version").and_then(|v| v.as_i64()) else {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            "Missing 'version' (current row version, for optimistic locking)".into(),
+        );
+    };
+    // Soft delete (sets is_deleted), matching the gateway DELETE — recoverable via dv_restore.
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_soft_delete(
+            ctx,
+            slug.to_string(),
+            table.to_string(),
+            id_val,
+            version as i32,
+            atelier_common::Identity::system(),
+        )
+        .await,
+    )
+}
+
+async fn tool_dv_restore(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let Some(id_val) = args.get("id").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    let Some(version) = args.get("version").and_then(|v| v.as_i64()) else {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            "Missing 'version' (current row version, for optimistic locking)".into(),
+        );
+    };
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_restore(
+            ctx,
+            slug.to_string(),
+            table.to_string(),
+            id_val,
+            version as i32,
+            atelier_common::Identity::system(),
+        )
+        .await,
+    )
+}
+
+async fn tool_dv_schema(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, crate::mcp::dv_ops::dv_schema(ctx, slug.to_string()).await)
+}
+
+async fn tool_dv_audit_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+    let u = |k: &str| args.get(k).and_then(|v| v.as_u64()).map(|x| x as u32);
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_ops::dv_audit_list(
+            ctx,
+            slug.to_string(),
+            s("table"),
+            s("row_id"),
+            s("op"),
+            s("since"),
+            u("top"),
+            u("skip"),
+            atelier_common::Identity::system(),
+        )
+        .await,
     )
 }
 

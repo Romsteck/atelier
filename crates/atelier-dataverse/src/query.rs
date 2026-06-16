@@ -29,7 +29,12 @@ use crate::migration::{is_base_column, quote_ident};
 use crate::schema::{FieldType, IdStrategy, TableDefinition};
 
 /// Parsed list-query parameters.
+// `#[serde(default)]`: a partial query object (e.g. just `{"top":1}`) deserializes
+// with every other field at its Default — empty `select`/`orderby` mean "all
+// columns / no order", which is the natural query. Without this, callers that
+// build a partial map (the dv_list MCP tool) hit "missing field `select`".
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ListQuery {
     /// Source for the `$filter=…` query string. Parsed via [`atelier_dvexpr`];
     /// the same expression language used for computed columns.

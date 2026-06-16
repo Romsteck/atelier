@@ -1627,7 +1627,10 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          \n\
          - **Pas de GraphQL.** L'ancienne surface `db_graphql` / `db_introspect`\n\
            a été supprimée. Utilise REST (app) ou MCP `dv_*` (agent).\n\
-         - **Pas de SQL brut** (`db_query` / `db_exec`) — n'existent pas.\n\
+         - **Pas d'écriture SQL brute.** `db_exec` est refusé (utilise\n\
+           `dv_insert`/`dv_update`/`dv_soft_delete`). En revanche `db_query` **fonctionne**\n\
+           pour la **lecture** : c'est un SELECT-only (JOIN/agrégats/`_dv_audit` OK,\n\
+           toute mutation rejetée) — idéal pour les diagnostics.\n\
          - **Pas d'ouverture directe d'un fichier `.db`** — il n'y en a plus.\n\
          \n\
          ## 🧹 Nettoyage post-migration\n\
