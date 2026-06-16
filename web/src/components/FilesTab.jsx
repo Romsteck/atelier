@@ -1,22 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Folder, FolderOpen, File as FileIcon, ChevronRight, ChevronDown,
-  Loader2, RefreshCw, FileWarning, X,
+  Loader2, RefreshCw,
 } from 'lucide-react';
-import { getSourceTree, getSourceFile } from '../api/client';
+import { getSourceTree } from '../api/client';
+import { useAgentConversations } from '../context/AgentConversationsContext';
 
 // Explorateur du working tree de l'app (`…/{slug}/src`) — lecture seule, lazy
-// (un niveau chargé par expansion). Disposition VERTICALE (pensée pour la sidebar) :
-// l'arbre occupe le haut ; à l'ouverture d'un fichier, un viewer apparaît en bas.
+// (un niveau chargé par expansion). L'ouverture d'un fichier ne s'affiche plus dans
+// la sidebar (trop étroit) : elle ouvre un onglet « fichier » dans le split central
+// (cf. openFile du provider), façon éditeur VS Code.
 
-function humanSize(n) {
-  if (n == null) return '';
-  if (n < 1024) return `${n} o`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} Ko`;
-  return `${(n / 1024 / 1024).toFixed(1)} Mo`;
-}
-
-function TreeNode({ slug, entry, depth, onOpenFile, selectedPath }) {
+function TreeNode({ slug, entry, depth, onOpenFile, openPaths }) {
   const [open, setOpen] = useState(false);
   const [children, setChildren] = useState(null); // null = pas encore chargé
   const [loading, setLoading] = useState(false);
@@ -41,7 +36,7 @@ function TreeNode({ slug, entry, depth, onOpenFile, selectedPath }) {
     }
   }, [entry, open, children, slug, onOpenFile]);
 
-  const selected = !entry.is_dir && selectedPath === entry.path;
+  const opened = !entry.is_dir && openPaths.has(entry.path);
   return (
     <div>
       <button
@@ -49,7 +44,7 @@ function TreeNode({ slug, entry, depth, onOpenFile, selectedPath }) {
         title={entry.path}
         style={{ paddingLeft: depth * 12 + 8 }}
         className={`w-full flex items-center gap-1 py-[3px] pr-2 text-[13px] text-left rounded-sm ${
-          selected ? 'bg-blue-500/20 text-blue-200' : 'text-gray-300 hover:bg-gray-700/40'
+          opened ? 'bg-blue-500/20 text-blue-200' : 'text-gray-300 hover:bg-gray-700/40'
         }`}>
         {entry.is_dir ? (
           open ? <ChevronDown className="w-3.5 h-3.5 shrink-0 text-gray-500" />
@@ -73,7 +68,7 @@ function TreeNode({ slug, entry, depth, onOpenFile, selectedPath }) {
         ) : (
           (children || []).map((c) => (
             <TreeNode key={c.path} slug={slug} entry={c} depth={depth + 1}
-              onOpenFile={onOpenFile} selectedPath={selectedPath} />
+              onOpenFile={onOpenFile} openPaths={openPaths} />
           ))
         )
       )}
@@ -82,13 +77,16 @@ function TreeNode({ slug, entry, depth, onOpenFile, selectedPath }) {
 }
 
 export default function FilesTab({ slug, active = true }) {
+  const { order, convos, openFile } = useAgentConversations();
   const [root, setRoot] = useState([]);
   const [rootLoading, setRootLoading] = useState(true);
-  const [selected, setSelected] = useState(null); // entry
-  const [file, setFile] = useState(null); // { content, size, binary, truncated }
-  const [fileLoading, setFileLoading] = useState(false);
   const [treeKey, setTreeKey] = useState(0); // bump → reload racine (refresh)
-  const [wrap, setWrap] = useState(false);
+
+  // Fichiers actuellement ouverts en onglet → surlignés dans l'arbre.
+  const openPaths = useMemo(
+    () => new Set(order.filter((k) => convos[k]?.type === 'file').map((k) => convos[k].path)),
+    [order, convos],
+  );
 
   const loadRoot = useCallback(() => {
     setRootLoading(true);
@@ -101,16 +99,6 @@ export default function FilesTab({ slug, active = true }) {
   // Charge à l'ouverture, au refresh (treeKey) et à chaque réactivation du pane.
   useEffect(() => { if (active) loadRoot(); }, [active, loadRoot, treeKey]);
 
-  const openFile = useCallback((entry) => {
-    setSelected(entry);
-    setFile(null);
-    setFileLoading(true);
-    getSourceFile(slug, entry.path)
-      .then((r) => setFile(r.data))
-      .catch((e) => setFile({ error: e.response?.data?.error || 'Erreur de lecture' }))
-      .finally(() => setFileLoading(false));
-  }, [slug]);
-
   return (
     <div className="flex flex-col h-full min-h-0 bg-gray-900">
       {/* En-tête explorateur */}
@@ -122,8 +110,8 @@ export default function FilesTab({ slug, active = true }) {
         </button>
       </div>
 
-      {/* Arbre — plein si aucun fichier ouvert, sinon partagé avec le viewer */}
-      <div className={`overflow-auto py-1 ${selected ? 'shrink-0 max-h-[45%]' : 'flex-1 min-h-0'}`}>
+      {/* Arbre — pleine hauteur (le contenu des fichiers s'ouvre dans le split central) */}
+      <div className="flex-1 min-h-0 overflow-auto py-1">
         {rootLoading ? (
           <div className="flex items-center justify-center py-6 text-gray-600"><Loader2 className="w-4 h-4 animate-spin" /></div>
         ) : root.length === 0 ? (
@@ -132,51 +120,11 @@ export default function FilesTab({ slug, active = true }) {
           <div key={treeKey}>
             {root.map((e) => (
               <TreeNode key={e.path} slug={slug} entry={e} depth={0}
-                onOpenFile={openFile} selectedPath={selected?.path} />
+                onOpenFile={openFile} openPaths={openPaths} />
             ))}
           </div>
         )}
       </div>
-
-      {/* Viewer (apparaît à l'ouverture d'un fichier) */}
-      {selected && (
-        <div className="flex-1 min-h-0 flex flex-col border-t border-gray-800">
-          <div className="flex items-center gap-2 h-[30px] shrink-0 px-3 border-b border-gray-800 text-[12px]">
-            <span className="font-mono text-gray-300 truncate">{selected.name}</span>
-            {file && !file.binary && <span className="text-gray-600 shrink-0">{humanSize(file.size)}</span>}
-            <button onClick={() => setWrap((w) => !w)}
-              className={`ml-auto shrink-0 px-1.5 py-0.5 rounded-sm text-[11px] ${wrap ? 'bg-blue-500/20 text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
-              wrap
-            </button>
-            <button onClick={() => { setSelected(null); setFile(null); }} title="Fermer"
-              className="shrink-0 p-0.5 rounded-sm text-gray-500 hover:text-gray-200 hover:bg-gray-800">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          <div className="flex-1 overflow-auto min-h-0">
-            {fileLoading ? (
-              <div className="flex items-center justify-center py-8 text-gray-600"><Loader2 className="w-5 h-5 animate-spin" /></div>
-            ) : file?.error ? (
-              <div className="p-4 text-[13px] text-red-400">{file.error}</div>
-            ) : file?.binary ? (
-              <div className="p-6 text-[13px] text-gray-500 flex items-center gap-2">
-                <FileWarning className="w-4 h-4" /> Fichier binaire — non affiché ({humanSize(file.size)}).
-              </div>
-            ) : (
-              <>
-                {file?.truncated && (
-                  <div className="text-[11px] text-yellow-400 bg-yellow-900/20 border-b border-yellow-800 px-3 py-1.5">
-                    Fichier tronqué (256 premiers Ko).
-                  </div>
-                )}
-                <pre className={`text-[12px] font-mono text-gray-200 leading-5 px-3 py-2 ${wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'}`}>
-                  {file?.content || ''}
-                </pre>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

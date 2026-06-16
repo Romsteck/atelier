@@ -5,6 +5,7 @@ import GitTab from './GitTab';
 import ConversationsSplit from './agent/ConversationsSplit';
 import ConversationsHistoryPanel from './agent/ConversationsHistoryPanel';
 import { AgentConversationsProvider } from '../context/AgentConversationsContext';
+import useSourceGit from '../hooks/useSourceGit';
 
 // « Notre code-server » en disposition VS Code :
 //   [barre d'activité] [sidebar repliable : Explorateur / Git / Conversations] [split au centre]
@@ -22,13 +23,16 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
   const [panel, setPanel] = useState(null); // null = sidebar repliée
   const [opened, setOpened] = useState(() => new Set()); // panneaux déjà montés
   const [dragging, setDragging] = useState(false);
+  // Largeur par défaut réduite (~30% de moins qu'avant) ; clé localStorage versionnée
+  // (`…W2`) pour repartir de ce défaut même si une ancienne valeur (340) est stockée.
   const [width, setWidth] = useState(() => {
-    const v = parseInt(localStorage.getItem('agent:sidebarW'), 10);
-    return Number.isFinite(v) && v >= 220 && v <= 760 ? v : 340;
+    const v = parseInt(localStorage.getItem('agent:sidebarW2'), 10);
+    return Number.isFinite(v) && v >= 220 && v <= 760 ? v : 238;
   });
   const rootRef = useRef(null);
+  const git = useSourceGit(slug); // status partagé : badge barre d'activité + onglet Git
 
-  useEffect(() => { localStorage.setItem('agent:sidebarW', String(width)); }, [width]);
+  useEffect(() => { localStorage.setItem('agent:sidebarW2', String(width)); }, [width]);
 
   const toggle = useCallback((id) => {
     setPanel((cur) => (cur === id ? null : id));
@@ -42,8 +46,8 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
     function onMove(e) {
       if (!rootRef.current) return;
       const rect = rootRef.current.getBoundingClientRect();
-      const maxW = Math.max(260, rect.width - 44 - 260); // garde ≥260px au chat
-      const w = e.clientX - rect.left - 44; // - barre d'activité
+      const maxW = Math.max(260, rect.width - 48 - 260); // garde ≥260px au chat
+      const w = e.clientX - rect.left - 48; // - barre d'activité (rail 48px)
       setWidth(Math.max(220, Math.min(maxW, w)));
     }
     function onUp() { setDragging(false); }
@@ -58,15 +62,31 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
   return (
     <AgentConversationsProvider slug={slug} launch={launch} onLaunchConsumed={onLaunchConsumed}>
       <div ref={rootRef} className="flex h-full min-h-0 bg-gray-900 relative">
-        {/* Barre d'activité */}
-        <div className="w-11 shrink-0 border-r border-gray-800 flex flex-col items-center py-2 gap-1">
+        {/* Barre d'activité — icônes flush (carrées, sans gap), taille VS Code
+            (glyphe 24px dans un rail de 48px). Hover/actif alignés sur la nav
+            principale (border-l-3 amber + bg-gray-700/…, transition instantanée
+            à l'entrée). Tooltip maison au survol (titre seul) : même timing que
+            le bg — instantané à l'entrée (group-hover:duration-0), fondu de
+            300ms à la sortie — la couleur suit l'échelle de gris (theme-aware). */}
+        <div className="w-12 shrink-0 border-r border-gray-800 flex flex-col">
           {PANELS.map(({ id, label, Icon }) => (
-            <button key={id} onClick={() => toggle(id)} title={label}
-              className={`relative w-9 h-9 flex items-center justify-center rounded-md transition-colors ${
-                panel === id ? 'text-blue-400 bg-gray-700/60' : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800'
+            <button key={id} onClick={() => toggle(id)} aria-label={label}
+              className={`group/act relative w-full h-12 flex items-center justify-center border-l-3 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${
+                panel === id
+                  ? 'border-amber-400 bg-gray-700/50 text-gray-50'
+                  : 'border-transparent text-gray-400 hover:bg-gray-700/30 hover:text-gray-100'
               }`}>
-              {panel === id && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-blue-400" />}
-              <Icon className="w-5 h-5" />
+              <Icon className="w-6 h-6" />
+              {id === 'git' && git.count > 0 && (
+                <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 rounded-full bg-sky-500 text-white text-[10px] font-semibold leading-4 text-center shadow"
+                  aria-label={`${git.count} changement(s) en attente`}>
+                  {git.count > 99 ? '99+' : git.count}
+                </span>
+              )}
+              <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-gray-950 px-2 py-1 text-xs font-medium text-gray-100 shadow-lg ring-1 ring-gray-700/80 opacity-0 transition-opacity duration-300 ease-out group-hover/act:opacity-100 group-hover/act:duration-0">
+                {label}
+                <span className="absolute left-0 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-gray-950" />
+              </span>
             </button>
           ))}
         </div>
@@ -81,7 +101,7 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
             )}
             {opened.has('git') && (
               <div className={panel === 'git' ? 'h-full' : 'hidden'}>
-                <GitTab slug={slug} active={panel === 'git'} />
+                <GitTab slug={slug} active={panel === 'git'} status={git.status} statusLoading={git.loading} onRefresh={git.refresh} />
               </div>
             )}
             {opened.has('history') && (

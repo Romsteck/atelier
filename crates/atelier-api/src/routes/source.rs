@@ -4,7 +4,9 @@
 //! l'arbre de travail réel que code-server édite et que l'agent (Bypass) modifie,
 //! pour pouvoir relire en direct ce qui a changé.
 //!
-//! Lecture seule (aucune mutation). Tout `git` tourne avec `-c safe.directory=*`
+//! Majoritairement en lecture ; deux mutations restreintes au working tree :
+//! `git commit` (stage-all + commit) et `git push` (vers l'upstream). Tout `git`
+//! tourne avec `-c safe.directory=*`
 //! car le process Atelier est root alors que `src/` appartient à `romain:hr-studio`
 //! (sinon « detected dubious ownership »). Les chemins fournis par le client sont
 //! sanitisés (pas de `..`, pas d'absolu, pas de symlink hors-src) et passés à git
@@ -17,12 +19,12 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::state::ApiState;
 
@@ -37,6 +39,8 @@ const BINARY_SNIFF: usize = 8000; // octets inspectés pour détecter un binaire
 ///   GET /api/apps/{slug}/source/git/diff?path=
 ///   GET /api/apps/{slug}/source/git/log?limit=
 ///   GET /api/apps/{slug}/source/git/show?sha=
+///   POST /api/apps/{slug}/source/git/commit  {message}
+///   POST /api/apps/{slug}/source/git/push
 pub fn app_router() -> Router<ApiState> {
     Router::new()
         .route("/{slug}/source/tree", get(tree))
@@ -45,6 +49,8 @@ pub fn app_router() -> Router<ApiState> {
         .route("/{slug}/source/git/diff", get(git_diff))
         .route("/{slug}/source/git/log", get(git_log))
         .route("/{slug}/source/git/show", get(git_show))
+        .route("/{slug}/source/git/commit", post(git_commit))
+        .route("/{slug}/source/git/push", post(git_push))
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
@@ -220,12 +226,40 @@ async fn git_capture(src: &FsPath, args: &[&str]) -> Result<(bool, String, Strin
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Jamais d'invite interactive (credentials / host key) : un `git push` qui en
+    // attendrait une bloquerait le handler indéfiniment. Échec rapide à la place.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     let out = cmd.output().await.map_err(|e| format!("git spawn: {e}"))?;
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// Somme des lignes ajoutées/supprimées + nb de fichiers depuis la sortie
+/// `git ... --numstat` ("add\tdel\tpath" par ligne ; "-" pour les binaires).
+fn parse_numstat(out: &str) -> (u64, u64, u64) {
+    let mut add = 0u64;
+    let mut del = 0u64;
+    let mut files = 0u64;
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let a = it.next().unwrap_or("");
+        let d = it.next().unwrap_or("");
+        if it.next().is_none() {
+            continue; // pas un enregistrement numstat valide
+        }
+        files += 1;
+        add += a.parse::<u64>().unwrap_or(0); // "-" (binaire) → 0
+        del += d.parse::<u64>().unwrap_or(0);
+    }
+    (add, del, files)
 }
 
 fn cap_diff(mut patch: String) -> (String, bool) {
@@ -432,8 +466,11 @@ async fn git_show(
     if !valid {
         return err(StatusCode::BAD_REQUEST, "sha invalide");
     }
+    // Métadonnées + patch en un appel : champs séparés par 0x1f, un 0x1e sépare
+    // l'entête du diff (robuste face aux retours-ligne dans le sujet/corps).
+    let fmt = "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%s%x1f%b%x1e";
     let (ok, stdout, stderr) =
-        match git_capture(&src, &["show", "--no-color", "--format=fuller", &q.sha]).await {
+        match git_capture(&src, &["show", "--no-color", "--patch", fmt, &q.sha]).await {
             Ok(v) => v,
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
         };
@@ -445,6 +482,131 @@ async fn git_show(
         };
         return err(st, format!("git show: {stderr}"));
     }
-    let (patch, truncated) = cap_diff(stdout);
-    Json(json!({ "sha": q.sha, "patch": patch, "truncated": truncated })).into_response()
+    let (meta, diff_raw) = stdout.split_once('\u{1e}').unwrap_or((stdout.as_str(), ""));
+    let f: Vec<&str> = meta.split('\u{1f}').collect();
+    let g = |i: usize| f.get(i).map(|s| s.trim()).unwrap_or("");
+    let (patch, truncated) = cap_diff(diff_raw.trim_start_matches('\n').to_string());
+
+    // Totaux exacts via --numstat (indépendant de la troncature du patch).
+    let (additions, deletions, files_changed) =
+        match git_capture(&src, &["show", "--numstat", "--format=", &q.sha]).await {
+            Ok((true, out, _)) => parse_numstat(&out),
+            _ => (0u64, 0u64, 0u64),
+        };
+
+    Json(json!({
+        "sha": g(0),
+        "short": g(1),
+        "author": g(2),
+        "email": g(3),
+        "author_date": g(4),
+        "commit_date": g(5),
+        "subject": g(6),
+        "body": g(7),
+        "additions": additions,
+        "deletions": deletions,
+        "files_changed": files_changed,
+        "patch": patch,
+        "truncated": truncated,
+    }))
+    .into_response()
+}
+
+// ── Mutations git (working tree) ────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CommitBody {
+    message: String,
+}
+
+/// Identité git du commit. On NE surcharge JAMAIS une identité déjà configurée
+/// (repo/local) ; on n'en injecte une neutre que si elle manque — le process
+/// Atelier tourne en root sans `user.name`/`user.email` global, et `git commit`
+/// échouerait alors avec « empty ident name ».
+async fn commit_identity(src: &FsPath) -> Vec<String> {
+    let configured = |r: Result<(bool, String, String), String>| {
+        matches!(r, Ok((ok, v, _)) if ok && !v.trim().is_empty())
+    };
+    let has_name = configured(git_capture(src, &["config", "user.name"]).await);
+    let has_email = configured(git_capture(src, &["config", "user.email"]).await);
+    if has_name && has_email {
+        Vec::new()
+    } else {
+        vec![
+            "-c".into(),
+            "user.name=Atelier Studio".into(),
+            "-c".into(),
+            "user.email=studio@atelier.local".into(),
+        ]
+    }
+}
+
+/// Stage tout le working tree puis commit. Renvoie le sha créé.
+#[instrument(skip(state, body), fields(slug = %slug))]
+async fn git_commit(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(body): Json<CommitBody>,
+) -> impl IntoResponse {
+    let src = match resolve_src(&state, &slug) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let msg = body.message.trim().to_string();
+    if msg.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "message de commit requis");
+    }
+    // `git add -A` : suivis + non-suivis + suppressions → index complet.
+    match git_capture(&src, &["add", "-A"]).await {
+        Ok((true, _, _)) => {}
+        Ok((false, _, e)) => {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git add: {}", e.trim()));
+        }
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+    // `-m` prend le message en un seul argv (pas de shell) → aucune injection.
+    let mut args = commit_identity(&src).await;
+    args.extend(["commit".into(), "-m".into(), msg]);
+    let argref: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (ok, out, e) = match git_capture(&src, &argref).await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    if !ok {
+        if out.contains("nothing to commit") || e.contains("nothing to commit") {
+            return err(StatusCode::BAD_REQUEST, "rien à committer");
+        }
+        let detail = if e.trim().is_empty() { out.trim() } else { e.trim() };
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git commit: {detail}"));
+    }
+    let sha = match git_capture(&src, &["rev-parse", "HEAD"]).await {
+        Ok((true, s, _)) => s.trim().to_string(),
+        _ => String::new(),
+    };
+    let short: String = sha.chars().take(7).collect();
+    info!(slug = %slug, sha = %sha, "git commit (working tree)");
+    Json(json!({ "ok": true, "sha": sha, "short": short })).into_response()
+}
+
+/// Pousse la branche courante vers son upstream. L'origin du working tree est le
+/// bare repo local (`/var/lib/atelier/git/{slug}.git`) → pas de credentials.
+#[instrument(skip(state), fields(slug = %slug))]
+async fn git_push(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
+    let src = match resolve_src(&state, &slug) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let (ok, out, e) = match git_capture(&src, &["push"]).await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    if !ok {
+        // Échec « attendu » (pas d'upstream, non-fast-forward, creds) : 409 + message git.
+        warn!(slug = %slug, "git push failed");
+        return err(StatusCode::CONFLICT, format!("git push: {}", e.trim()));
+    }
+    info!(slug = %slug, "git push (working tree)");
+    // git push écrit son compte-rendu sur stderr → on le renvoie tel quel.
+    let output = format!("{} {}", e.trim(), out.trim());
+    Json(json!({ "ok": true, "output": output.trim() })).into_response()
 }

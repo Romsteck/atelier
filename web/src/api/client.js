@@ -310,3 +310,8 @@ export const getSourceGitLog = (slug, limit = 50) =>
   api.get(`/apps/${slug}/source/git/log`, { params: { limit } });
 export const getSourceGitShow = (slug, sha) =>
   api.get(`/apps/${slug}/source/git/show`, { params: { sha } });
+// Mutations du working tree : commit (stage-all + commit) et push vers l'upstream.
+export const commitSource = (slug, message) =>
+  api.post(`/apps/${slug}/source/git/commit`, { message });
+export const pushSource = (slug) =>
+  api.post(`/apps/${slug}/source/git/push`, {}, { timeout: 60000 });

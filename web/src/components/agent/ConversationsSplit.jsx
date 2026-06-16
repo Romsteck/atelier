@@ -1,6 +1,9 @@
 import { useRef, useState, useEffect } from 'react';
-import { Plus, MessageSquarePlus, X } from 'lucide-react';
+import { Plus, MessageSquarePlus, X, FileCode2, GitCommit, FileDiff } from 'lucide-react';
 import AgentPanel from '../AgentPanel';
+import FileViewerPanel from './FileViewerPanel';
+import CommitViewerPanel from './CommitViewerPanel';
+import WorkingDiffPanel from './WorkingDiffPanel';
 import { useAgentConversations } from '../../context/AgentConversationsContext';
 
 // Vue des conversations ouvertes. Défaut = panneaux côte à côte de taille égale (CSS
@@ -10,11 +13,25 @@ import { useAgentConversations } from '../../context/AgentConversationsContext';
 const MIN_PANEL_W = 340;
 const MAX_SPLIT = 3;
 
+const activeKey = (slug) => `agent:activeTab:${slug}`;
+
 export default function ConversationsSplit() {
-  const { order, convos, newConversation, closeConversation } = useAgentConversations();
+  const { order, convos, newConversation, closeConversation, focusReq, slug } = useAgentConversations();
   const ref = useRef(null);
   const [width, setWidth] = useState(0);
-  const [active, setActive] = useState(null);
+  // Onglet actif restauré au rechargement / changement de page (validé contre `order`).
+  const [active, setActive] = useState(() => {
+    try { return localStorage.getItem(activeKey(slug)) || null; } catch { return null; }
+  });
+
+  const typeOf = (key) => convos[key]?.type; // 'file' | 'commit' | 'diff' | undefined(=conversation)
+  const renderPanel = (key) => {
+    const t = typeOf(key);
+    if (t === 'file') return <FileViewerPanel panelKey={key} />;
+    if (t === 'commit') return <CommitViewerPanel panelKey={key} />;
+    if (t === 'diff') return <WorkingDiffPanel panelKey={key} />;
+    return <AgentPanel panelKey={key} />;
+  };
 
   useEffect(() => {
     const el = ref.current;
@@ -27,9 +44,25 @@ export default function ConversationsSplit() {
   }, []);
 
   useEffect(() => {
-    if (!order.length) { setActive(null); return; }
+    // Pendant la restauration `order` est momentanément vide : NE PAS réinitialiser
+    // l'actif (sinon on perdrait l'onglet persisté avant que les onglets reviennent).
+    if (!order.length) return;
     if (!active || !order.includes(active)) setActive(order[order.length - 1]);
   }, [order, active]);
+
+  // Persiste l'onglet actif.
+  useEffect(() => {
+    if (active) { try { localStorage.setItem(activeKey(slug), active); } catch { /* ignore */ } }
+  }, [active, slug]);
+
+  // Ouverture d'un fichier (nouvel onglet OU onglet déjà ouvert) → premier plan.
+  // Dépend UNIQUEMENT de focusReq (son nonce change à chaque openFile) : sinon un
+  // simple changement d'`order` (ex. « + nouvelle conversation ») redonnerait le
+  // focus au dernier fichier. `order` est à jour dans la closure de ce rendu.
+  useEffect(() => {
+    if (focusReq && order.includes(focusReq.key)) setActive(focusReq.key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReq]);
 
   if (!order.length) {
     return (
@@ -45,7 +78,13 @@ export default function ConversationsSplit() {
   }
 
   const tabbed = order.length > MAX_SPLIT || (width > 0 && width / order.length < MIN_PANEL_W);
-  const title = (key) => convos[key]?.title || 'Conversation';
+  const title = (key) => {
+    const c = convos[key];
+    if (c?.type === 'file') return c.name || 'Fichier';
+    if (c?.type === 'commit') return c.subject || c.short || 'Commit';
+    if (c?.type === 'diff') return (c.path || '').split('/').pop() || 'Diff';
+    return c?.title || 'Conversation';
+  };
 
   return (
     <div ref={ref} className="h-full min-h-0 flex flex-col bg-gray-900">
@@ -57,7 +96,13 @@ export default function ConversationsSplit() {
               className={`group flex items-center gap-1.5 px-3 text-[12px] whitespace-nowrap border-r border-gray-800 ${
                 active === key ? 'bg-gray-800 text-gray-100' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
               }`}>
-              {convos[key]?.running && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+              {typeOf(key) === 'file'
+                ? <FileCode2 className="w-3 h-3 shrink-0 text-gray-500" />
+                : typeOf(key) === 'commit'
+                ? <GitCommit className="w-3 h-3 shrink-0 text-gray-500" />
+                : typeOf(key) === 'diff'
+                ? <FileDiff className="w-3 h-3 shrink-0 text-gray-500" />
+                : convos[key]?.running && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
               <span className="truncate max-w-[140px]">{title(key)}</span>
               <X className="w-3 h-3 opacity-0 group-hover:opacity-60 hover:!opacity-100"
                 onClick={(e) => { e.stopPropagation(); closeConversation(key); }} />
@@ -76,7 +121,7 @@ export default function ConversationsSplit() {
         <div className="flex-1 min-h-0 relative">
           {order.map((key) => (
             <div key={key} className={`absolute inset-0 ${active === key ? '' : 'hidden'}`}>
-              <AgentPanel panelKey={key} />
+              {renderPanel(key)}
             </div>
           ))}
         </div>
@@ -84,7 +129,7 @@ export default function ConversationsSplit() {
         <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: `repeat(${order.length}, minmax(0, 1fr))` }}>
           {order.map((key) => (
             <div key={key} className="min-w-0 min-h-0 overflow-hidden border-r border-gray-800 last:border-r-0">
-              <AgentPanel panelKey={key} />
+              {renderPanel(key)}
             </div>
           ))}
         </div>

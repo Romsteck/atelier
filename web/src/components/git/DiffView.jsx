@@ -24,7 +24,9 @@ function lineClass(line) {
   return 'text-gray-300';
 }
 
-export default function DiffView({ patch, truncated = false }) {
+// `wrap` (défaut) : retour à la ligne → pas de scroll horizontal. wrap=false →
+// rendu pré-formaté avec scroll horizontal (pour relire l'alignement exact).
+export default function DiffView({ patch, truncated = false, wrap = true }) {
   const text = patch || '';
   if (!text.trim()) {
     return (
@@ -40,9 +42,9 @@ export default function DiffView({ patch, truncated = false }) {
 
   return (
     <div>
-      <div className="border border-gray-700 bg-gray-900 overflow-x-auto text-xs font-mono leading-5">
+      <div className={`border border-gray-700 bg-gray-900 text-xs font-mono leading-5 ${wrap ? '' : 'overflow-x-auto'}`}>
         {lines.map((ln, i) => (
-          <div key={i} className={`px-3 whitespace-pre ${lineClass(ln)}`}>
+          <div key={i} className={`px-3 ${wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'} ${lineClass(ln)}`}>
             {ln || ' '}
           </div>
         ))}

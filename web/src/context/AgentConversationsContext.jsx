@@ -26,7 +26,8 @@ export const useAgentConversations = () => useContext(Ctx);
 
 let _kc = 0;
 const newKey = () => `c${Date.now().toString(36)}_${_kc++}`;
-const openSidsKey = (slug) => `agent:openSids:${slug}`;
+const openSidsKey = (slug) => `agent:openSids:${slug}`; // legacy (lecture seule, migration)
+const openTabsKey = (slug) => `agent:openTabs:${slug}`;
 
 function loadOpenSids(slug) {
   try {
@@ -35,6 +36,19 @@ function loadOpenSids(slug) {
   } catch {
     return [];
   }
+}
+
+// Descripteurs d'onglets persistés (ordre préservé) : conversation `{t:'c',sid}`,
+// fichier `{t:'f',path,name}`, commit `{t:'g',sha,short,subject}`. Migration depuis
+// l'ancien format (liste de sids) si la nouvelle clé est absente.
+function loadTabs(slug) {
+  try {
+    const v = JSON.parse(localStorage.getItem(openTabsKey(slug)));
+    if (Array.isArray(v)) return v.filter((x) => x && typeof x === 'object');
+  } catch {
+    /* ignore */
+  }
+  return loadOpenSids(slug).map((sid) => ({ t: 'c', sid }));
 }
 
 // Réponse AskUserQuestion d'une conversation FERMÉE → tour en clair (miroir de
@@ -68,14 +82,31 @@ const emptyConvo = (key, sid) => ({
 
 function reducer(state, a) {
   switch (a.type) {
-    case 'RESTORE': {
+    // Restaure TOUS les onglets (conversations + fichiers + commits) dans l'ordre.
+    case 'RESTORE_TABS': {
       const convos = {};
       const order = [];
-      for (const sid of a.sids) {
-        const c = emptyConvo(sid, sid);
-        c.loading = true;
-        convos[sid] = c;
-        order.push(sid);
+      for (const t of a.tabs) {
+        let key = null;
+        let c = null;
+        if (t.t === 'c' && t.sid) {
+          key = t.sid;
+          c = emptyConvo(t.sid, t.sid);
+          c.loading = true;
+        } else if (t.t === 'f' && t.path) {
+          key = `file:${t.path}`;
+          c = { key, type: 'file', path: t.path, name: t.name };
+        } else if (t.t === 'g' && t.sha) {
+          key = `commit:${t.sha}`;
+          c = { key, type: 'commit', sha: t.sha, short: t.short, subject: t.subject };
+        } else if (t.t === 'd' && t.path) {
+          key = `diff:${t.path}`;
+          c = { key, type: 'diff', path: t.path, status: t.status };
+        }
+        if (key && !convos[key]) {
+          convos[key] = c;
+          order.push(key);
+        }
       }
       return { order, convos };
     }
@@ -95,6 +126,28 @@ function reducer(state, a) {
       const convos = { ...state.convos };
       delete convos[a.key];
       return { order: state.order.filter((k) => k !== a.key), convos };
+    }
+    // Onglet « fichier » (visionneuse), à côté des conversations dans le même split.
+    // Clé dérivée du chemin → ré-ouvrir le même fichier ne duplique pas l'onglet.
+    case 'OPEN_FILE': {
+      const key = `file:${a.path}`;
+      if (state.convos[key]) return state; // déjà ouvert → le focus est demandé à part
+      const c = { key, type: 'file', path: a.path, name: a.name };
+      return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
+    }
+    // Onglet « commit » (diff plein écran d'un commit), même mécanique que les fichiers.
+    case 'OPEN_COMMIT': {
+      const key = `commit:${a.sha}`;
+      if (state.convos[key]) return state;
+      const c = { key, type: 'commit', sha: a.sha, short: a.short, subject: a.subject };
+      return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
+    }
+    // Onglet « diff » (diff plein écran d'un fichier MODIFIÉ du working tree).
+    case 'OPEN_DIFF': {
+      const key = `diff:${a.path}`;
+      if (state.convos[key]) return state;
+      const c = { key, type: 'diff', path: a.path, status: a.status };
+      return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
     }
     case 'SNAPSHOT_OK': {
       const c = state.convos[a.key];
@@ -228,34 +281,54 @@ function reducer(state, a) {
 export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, children }) {
   const [state, dispatch] = useReducer(reducer, { order: [], convos: {} });
   const [allConvos, setAllConvos] = useState([]);
+  // Demande de mise au premier plan d'un onglet (ouverture de fichier) : {key, n}.
+  // ConversationsSplit l'observe pour activer l'onglet (utile en mode replié/onglets).
+  const [focusReq, setFocusReq] = useState(null);
+  const focusNonce = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
 
   // UN seul WebSocket pour tout le workspace ; le reducer route par session_id/run_id.
   useWebSocket({ 'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); } });
 
-  // Restauration au montage (par slug) : recharge les conversations ouvertes.
+  // Restauration au montage (par slug) : recharge TOUS les onglets (conversations,
+  // fichiers, commits) dans leur ordre. Les conversations re-fetchent leur snapshot ;
+  // fichiers/commits re-fetchent leur contenu à leur propre montage.
   useEffect(() => {
-    const sids = loadOpenSids(slug);
-    if (!sids.length) return;
-    dispatch({ type: 'RESTORE', sids });
-    for (const sid of sids) {
-      getConversation(slug, sid)
+    const tabs = loadTabs(slug);
+    if (!tabs.length) return;
+    dispatch({ type: 'RESTORE_TABS', tabs });
+    for (const t of tabs) {
+      if (t.t !== 'c' || !t.sid) continue;
+      getConversation(slug, t.sid)
         .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
+          dispatch({ type: 'SNAPSHOT_OK', key: t.sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
         )
         .catch((e) => {
-          if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
-          else dispatch({ type: 'SNAPSHOT_ERR', key: sid, error: e.message });
+          if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: t.sid });
+          else dispatch({ type: 'SNAPSHOT_ERR', key: t.sid, error: e.message });
         });
     }
   }, [slug]);
 
-  // Persiste l'ensemble des sids ouverts — uniquement quand il change (pas à chaque delta).
-  const openSidsStr = state.order.map((k) => state.convos[k]?.sid).filter(Boolean).join(',');
+  // Persiste l'ensemble des onglets ouverts (ordre + type) — recalculé seulement
+  // quand la description change (pas à chaque delta de conversation). Une conversation
+  // neuve sans sid n'est pas encore persistable (rien à restaurer côté serveur).
+  const tabsStr = JSON.stringify(
+    state.order
+      .map((k) => {
+        const c = state.convos[k];
+        if (!c) return null;
+        if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
+        if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
+        if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
+        return c.sid ? { t: 'c', sid: c.sid } : null;
+      })
+      .filter(Boolean),
+  );
   useEffect(() => {
-    localStorage.setItem(openSidsKey(slug), JSON.stringify(openSidsStr ? openSidsStr.split(',') : []));
-  }, [openSidsStr, slug]);
+    localStorage.setItem(openTabsKey(slug), tabsStr);
+  }, [tabsStr, slug]);
 
   const refreshAll = useCallback(() => {
     listConversations(slug)
@@ -285,7 +358,35 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   const closeConversation = useCallback((key) => {
     // Ferme le panneau SANS couper le run : la conversation continue côté serveur si
     // elle est vivante, et reste sur disque sinon. Ré-ouvrable depuis l'historique.
+    // (Sert aussi à fermer un onglet « fichier ».)
     dispatch({ type: 'CLOSE_PANEL', key });
+  }, []);
+
+  // Ouvre un fichier comme onglet dans le split central (façon éditeur VS Code) et
+  // demande sa mise au premier plan (nouvel onglet OU onglet déjà ouvert).
+  const openFile = useCallback((entry) => {
+    if (!entry?.path) return;
+    dispatch({ type: 'OPEN_FILE', path: entry.path, name: entry.name });
+    focusNonce.current += 1;
+    setFocusReq({ key: `file:${entry.path}`, n: focusNonce.current });
+  }, []);
+
+  // Idem pour un commit : onglet central plein écran (diff du commit) au lieu d'un
+  // aperçu condensé. `commit` = { sha, short, subject }.
+  const openCommit = useCallback((commit) => {
+    if (!commit?.sha) return;
+    dispatch({ type: 'OPEN_COMMIT', sha: commit.sha, short: commit.short, subject: commit.subject });
+    focusNonce.current += 1;
+    setFocusReq({ key: `commit:${commit.sha}`, n: focusNonce.current });
+  }, []);
+
+  // Idem pour un fichier modifié du working tree : onglet central (diff vs HEAD) au
+  // lieu de l'aperçu condensé. `file` = { path, status }.
+  const openDiff = useCallback((file) => {
+    if (!file?.path) return;
+    dispatch({ type: 'OPEN_DIFF', path: file.path, status: file.status });
+    focusNonce.current += 1;
+    setFocusReq({ key: `diff:${file.path}`, n: focusNonce.current });
   }, []);
 
   const sendMessage = useCallback(
@@ -475,6 +576,10 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     newConversation,
     openConversation,
     closeConversation,
+    openFile,
+    openCommit,
+    openDiff,
+    focusReq,
     sendMessage,
     answer,
     cancel,

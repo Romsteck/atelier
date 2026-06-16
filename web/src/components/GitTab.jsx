@@ -1,30 +1,21 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Loader2, RefreshCw, GitBranch, GitCommit, ArrowUp, ArrowDown, X } from 'lucide-react';
-import DiffView from './git/DiffView';
-import {
-  getSourceGitStatus, getSourceGitDiff, getSourceGitLog, getSourceGitShow,
-} from '../api/client';
+import { useEffect, useCallback, useMemo, useState } from 'react';
+import { Loader2, GitBranch, GitCommit, ArrowUp, ArrowDown } from 'lucide-react';
+import FileStatusBadge from './git/FileStatusBadge';
+import { getSourceGitLog, pushSource } from '../api/client';
+import { useAgentConversations } from '../context/AgentConversationsContext';
 
 // Contrôle de source du working tree (`…/{slug}/src`) — façon onglet « Source
-// Control » de code-server. Disposition VERTICALE (sidebar) : liste en haut, diff
-// en bas. Deux vues : Modifs (working tree vs HEAD) et Historique. Sert surtout à
-// relire ce que l'agent (mode Bypass) vient de modifier. Lecture seule.
+// Control » de code-server. Disposition VERTICALE empilée : modifs en haut,
+// historique en dessous. Cliquer un fichier modifié OU un commit ouvre son diff en
+// onglet central plein écran (plus d'aperçu condensé). Le status vient du parent
+// (hook useSourceGit, auto-rafraîchi). On peut POUSSER ici ; le commit se fait via
+// l'agent / code-server.
 
-const STATUS_STYLE = {
-  A: 'text-green-400 bg-green-900/30',
-  M: 'text-yellow-400 bg-yellow-900/30',
-  D: 'text-red-400 bg-red-900/30',
-  R: 'text-blue-400 bg-blue-900/30',
-  C: 'text-cyan-400 bg-cyan-900/30',
-  T: 'text-purple-400 bg-purple-900/30',
-  U: 'text-orange-400 bg-orange-900/30',
-};
-function FileStatusBadge({ status }) {
-  const s = (status || 'X').toUpperCase().charAt(0);
+function SectionHeader({ children }) {
   return (
-    <span className={`w-5 text-center text-[11px] font-mono font-bold shrink-0 rounded-sm ${STATUS_STYLE[s] || 'text-gray-400 bg-gray-700/40'}`}>
-      {s}
-    </span>
+    <div className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+      {children}
+    </div>
   );
 }
 
@@ -41,164 +32,130 @@ function ago(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
-export default function GitTab({ slug, active = true }) {
-  const [view, setView] = useState('changes'); // 'changes' | 'history'
-
-  const [status, setStatus] = useState(null);
-  const [statusLoading, setStatusLoading] = useState(true);
-  const [selChange, setSelChange] = useState(null);
-  const [diff, setDiff] = useState(null);
-  const [diffLoading, setDiffLoading] = useState(false);
+export default function GitTab({ slug, active = true, status, statusLoading = false, onRefresh }) {
+  // Modifs et commits s'ouvrent en onglet central plein écran (façon fichier).
+  const { openCommit, openDiff, order, convos } = useAgentConversations();
+  const openShas = useMemo(
+    () => new Set(order.filter((k) => convos[k]?.type === 'commit').map((k) => convos[k].sha)),
+    [order, convos],
+  );
+  const openDiffPaths = useMemo(
+    () => new Set(order.filter((k) => convos[k]?.type === 'diff').map((k) => convos[k].path)),
+    [order, convos],
+  );
 
   const [commits, setCommits] = useState(null);
-  const [commitsLoading, setCommitsLoading] = useState(false);
-  const [selSha, setSelSha] = useState(null);
-  const [show, setShow] = useState(null);
-  const [showLoading, setShowLoading] = useState(false);
-
-  const loadStatus = useCallback(() => {
-    setStatusLoading(true);
-    setSelChange(null);
-    setDiff(null);
-    getSourceGitStatus(slug)
-      .then((r) => setStatus(r.data))
-      .catch((e) => setStatus({ error: e.response?.data?.error || 'Erreur git status' }))
-      .finally(() => setStatusLoading(false));
-  }, [slug]);
+  const [pushing, setPushing] = useState(false);
+  const [actionError, setActionError] = useState(null);
 
   const loadCommits = useCallback(() => {
-    setCommitsLoading(true);
     getSourceGitLog(slug, 100)
       .then((r) => setCommits(r.data?.commits || []))
-      .catch(() => setCommits([]))
-      .finally(() => setCommitsLoading(false));
+      .catch(() => setCommits([]));
   }, [slug]);
 
-  // Rafraîchit le status à l'ouverture et à chaque réactivation du pane (pour
-  // relire ce que l'agent vient de modifier sans cliquer sur Rafraîchir).
-  useEffect(() => { if (active) loadStatus(); }, [active, loadStatus]);
-  useEffect(() => { if (view === 'history' && commits === null) loadCommits(); }, [view, commits, loadCommits]);
+  // Resynchronise le status (parent) à l'ouverture / réactivation du pane.
+  useEffect(() => { if (active) onRefresh?.(); }, [active, onRefresh]);
 
-  const openChange = useCallback((path) => {
-    setSelChange(path);
-    setDiff(null);
-    setDiffLoading(true);
-    getSourceGitDiff(slug, path)
-      .then((r) => setDiff(r.data))
-      .catch((e) => setDiff({ error: e.response?.data?.error || 'Erreur diff' }))
-      .finally(() => setDiffLoading(false));
-  }, [slug]);
+  // L'historique suit le status : rechargé à chaque rafraîchissement (fin de tour
+  // agent / focus) → nouveaux commits + marquage « non poussé ». Silencieux après le 1er.
+  useEffect(() => {
+    loadCommits();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
-  const openCommit = useCallback((sha) => {
-    setSelSha(sha);
-    setShow(null);
-    setShowLoading(true);
-    getSourceGitShow(slug, sha)
-      .then((r) => setShow(r.data))
-      .catch((e) => setShow({ error: e.response?.data?.error || 'Erreur show' }))
-      .finally(() => setShowLoading(false));
-  }, [slug]);
+  const doPush = useCallback(() => {
+    if (pushing) return;
+    setActionError(null);
+    setPushing(true);
+    pushSource(slug)
+      .then(() => onRefresh?.())
+      .catch((e) => setActionError(e.response?.data?.error || 'Échec du push'))
+      .finally(() => setPushing(false));
+  }, [slug, pushing, onRefresh]);
 
-  const hasDetail = view === 'changes' ? !!selChange : !!selSha;
-  const closeDetail = () => { setSelChange(null); setSelSha(null); setDiff(null); setShow(null); };
+  const fileCount = status?.files?.length || 0;
+  const ahead = status?.ahead || 0;
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-gray-900">
-      {/* Barre : vue + branche + refresh */}
+      {/* Barre : branche + behind + bouton Push (bleu, façon VS Code) */}
       <div className="flex items-center gap-2 h-[34px] shrink-0 px-3 border-b border-gray-800 text-[12px]">
-        <button onClick={() => setView('changes')}
-          className={`px-2 py-0.5 rounded-sm ${view === 'changes' ? 'bg-gray-700 text-gray-100' : 'text-gray-500 hover:text-gray-300'}`}>
-          Modifs{status?.files?.length ? ` (${status.files.length})` : ''}
-        </button>
-        <button onClick={() => setView('history')}
-          className={`px-2 py-0.5 rounded-sm ${view === 'history' ? 'bg-gray-700 text-gray-100' : 'text-gray-500 hover:text-gray-300'}`}>
-          Historique
-        </button>
+        {status?.branch && (
+          <span className="flex items-center gap-1 truncate text-gray-400" title={`branche : ${status.branch}`}>
+            <GitBranch className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">{status.branch}</span>
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2 text-gray-500">
-          {status?.branch && (
-            <span className="flex items-center gap-1 truncate max-w-[120px]" title={`branche : ${status.branch}`}>
-              <GitBranch className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">{status.branch}</span>
-            </span>
+          {status?.behind > 0 && (
+            <span className="flex items-center text-amber-400" title="en retard sur l'upstream"><ArrowDown className="w-3 h-3" />{status.behind}</span>
           )}
-          {status?.ahead > 0 && <span className="flex items-center text-green-400" title="en avance"><ArrowUp className="w-3 h-3" />{status.ahead}</span>}
-          {status?.behind > 0 && <span className="flex items-center text-amber-400" title="en retard"><ArrowDown className="w-3 h-3" />{status.behind}</span>}
-          <button onClick={() => { loadStatus(); if (view === 'history') loadCommits(); }} title="Rafraîchir"
-            className="p-1 rounded-sm hover:text-gray-200 hover:bg-gray-800">
-            <RefreshCw className="w-3.5 h-3.5" />
-          </button>
+          {ahead > 0 && (
+            <button onClick={doPush} disabled={pushing} title={`Pousser ${ahead} commit(s) vers l'upstream`}
+              className="flex items-center gap-1 px-2 py-0.5 rounded-sm bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 text-[11px] font-medium">
+              {pushing ? <Loader2 className="w-3 h-3 animate-spin" /> : <ArrowUp className="w-3 h-3" />}
+              Push {ahead}
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Liste — pleine hauteur, ou partagée avec le diff quand un item est ouvert */}
-      <div className={`overflow-auto ${hasDetail ? 'shrink-0 max-h-[45%]' : 'flex-1 min-h-0'}`}>
-        {view === 'changes' ? (
-          statusLoading ? (
-            <div className="flex justify-center py-6 text-gray-600"><Loader2 className="w-4 h-4 animate-spin" /></div>
-          ) : status?.error ? (
-            <div className="p-3 text-[12px] text-red-400">{status.error}</div>
-          ) : status?.clean ? (
-            <div className="p-4 text-[12px] text-gray-600 text-center">Working tree propre.</div>
-          ) : (
-            (status?.files || []).map((f) => (
-              <button key={f.path} onClick={() => openChange(f.path)} title={f.path}
-                className={`w-full flex items-center gap-2 px-2 py-1 text-[12px] text-left ${selChange === f.path ? 'bg-blue-500/20' : 'hover:bg-gray-700/40'}`}>
-                <FileStatusBadge status={f.status} />
-                <span className="font-mono text-gray-300 truncate">
-                  {f.old_path ? `${f.old_path} → ${f.path}` : f.path}
-                </span>
-              </button>
-            ))
-          )
+      {/* Erreur d'action (ex. push) */}
+      {actionError && (
+        <div className="shrink-0 border-b border-gray-800 px-3 py-1.5 text-[11px] text-red-400 truncate" title={actionError}>{actionError}</div>
+      )}
+
+      {/* Modifications + Historique empilés (un seul scroll) */}
+      <div className="flex-1 min-h-0 overflow-auto">
+        {/* — Modifications — */}
+        <SectionHeader>Modifications{fileCount ? ` (${fileCount})` : ''}</SectionHeader>
+        {statusLoading && !status ? (
+          <div className="flex justify-center py-4 text-gray-600"><Loader2 className="w-4 h-4 animate-spin" /></div>
+        ) : status?.error ? (
+          <div className="px-3 py-2 text-[12px] text-red-400">{status.error}</div>
+        ) : status?.clean ? (
+          <div className="px-3 py-2 text-[12px] text-gray-600">Working tree propre.</div>
         ) : (
-          commitsLoading ? (
-            <div className="flex justify-center py-6 text-gray-600"><Loader2 className="w-4 h-4 animate-spin" /></div>
-          ) : (commits || []).length === 0 ? (
-            <div className="p-4 text-[12px] text-gray-600 text-center">Aucun commit.</div>
-          ) : (
-            (commits || []).map((c) => (
-              <button key={c.sha} onClick={() => openCommit(c.sha)} title={c.subject}
-                className={`w-full flex flex-col gap-0.5 px-3 py-1.5 text-left border-b border-gray-800/60 ${selSha === c.sha ? 'bg-blue-500/20' : 'hover:bg-gray-700/40'}`}>
-                <span className="text-[12px] text-gray-200 truncate">{c.subject}</span>
+          (status?.files || []).map((f) => (
+            <button key={f.path} onClick={() => openDiff(f)} title={f.path}
+              className={`w-full flex items-center gap-2 px-2 py-1 text-[12px] text-left ${openDiffPaths.has(f.path) ? 'bg-blue-500/20' : 'hover:bg-gray-700/40'}`}>
+              <FileStatusBadge status={f.status} />
+              <span className="font-mono text-gray-300 truncate">
+                {f.old_path ? `${f.old_path} → ${f.path}` : f.path}
+              </span>
+            </button>
+          ))
+        )}
+
+        {/* — Historique — */}
+        <SectionHeader>Historique</SectionHeader>
+        {commits === null ? (
+          <div className="flex justify-center py-4 text-gray-600"><Loader2 className="w-4 h-4 animate-spin" /></div>
+        ) : commits.length === 0 ? (
+          <div className="px-3 py-2 text-[12px] text-gray-600">Aucun commit.</div>
+        ) : (
+          commits.map((c, i) => {
+            const unpushed = i < ahead; // les `ahead` plus récents ne sont pas sur l'upstream
+            return (
+              <button key={c.sha} onClick={() => openCommit(c)} title={unpushed ? `${c.subject}\n(non poussé)` : c.subject}
+                className={`w-full flex flex-col gap-0.5 pl-3 pr-3 py-1.5 text-left border-l-2 border-b border-b-gray-800/60 ${
+                  openShas.has(c.sha) ? 'bg-blue-500/20' : unpushed ? 'bg-green-500/5 hover:bg-green-500/10' : 'hover:bg-gray-700/40'
+                } ${unpushed ? 'border-l-green-500' : 'border-l-transparent'}`}>
+                <span className="text-[12px] text-gray-200 truncate flex items-center gap-1.5">
+                  {unpushed && <ArrowUp className="w-3 h-3 shrink-0 text-green-400" />}
+                  <span className="truncate">{c.subject}</span>
+                </span>
                 <span className="text-[11px] text-gray-500 flex items-center gap-1.5">
                   <GitCommit className="w-3 h-3 shrink-0" />
-                  <span className="font-mono">{c.short}</span>
+                  <span className={`font-mono ${unpushed ? 'text-green-400' : ''}`}>{c.short}</span>
                   <span className="truncate">{c.author}</span>
                   <span className="ml-auto shrink-0">{ago(c.date)}</span>
                 </span>
               </button>
-            ))
-          )
+            );
+          })
         )}
       </div>
-
-      {/* Diff (apparaît quand un fichier/commit est sélectionné) */}
-      {hasDetail && (
-        <div className="flex-1 min-h-0 flex flex-col border-t border-gray-800">
-          <div className="flex items-center gap-2 h-[28px] shrink-0 px-3 text-[11px] text-gray-500 border-b border-gray-800/60">
-            <span className="font-mono truncate">{view === 'changes' ? selChange : (selSha || '').slice(0, 10)}</span>
-            <button onClick={closeDetail} title="Fermer" className="ml-auto shrink-0 p-0.5 rounded-sm hover:text-gray-200 hover:bg-gray-800">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          <div className="flex-1 overflow-auto min-h-0 p-2">
-            {view === 'changes' ? (
-              diffLoading ? (
-                <div className="flex justify-center py-8 text-gray-600"><Loader2 className="w-5 h-5 animate-spin" /></div>
-              ) : diff?.error ? (
-                <div className="text-[13px] text-red-400 p-2">{diff.error}</div>
-              ) : (
-                <DiffView patch={diff?.patch} truncated={diff?.truncated} />
-              )
-            ) : showLoading ? (
-              <div className="flex justify-center py-8 text-gray-600"><Loader2 className="w-5 h-5 animate-spin" /></div>
-            ) : show?.error ? (
-              <div className="text-[13px] text-red-400 p-2">{show.error}</div>
-            ) : (
-              <DiffView patch={show?.patch} truncated={show?.truncated} />
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
