@@ -2,7 +2,7 @@
 
 Atelier (binaire + frontend) **et son code source** vivent sur **Medion**. Le source est à `/home/romain/atelier`, édité via `code-server@romain.service` (127.0.0.1:8081). `make deploy` build **en place** et installe localement dans `/opt/atelier` — plus aucun cross-build/rsync vers un hôte distant. CloudMaster est décommissionné.
 
-Les **sources des 5 apps HomeRoute** (www, home, trader, wallet, myfrigo — `files` décommissionnée le 2026-05-31) vivent sur **Medion** (`/var/lib/atelier/apps/<slug>/src/`) — éditées via le Studio (`atelier-studio.service` sur 127.0.0.1:8443, exposé via `codeserver.mynetwk.biz`). Le `make deploy-app` build directement sur Medion.
+Les **sources des 5 apps HomeRoute** (www, home, trader, wallet, myfrigo — `files` décommissionnée le 2026-05-31) vivent sur **Medion** (`/var/lib/atelier/apps/<slug>/src/`) — éditées via le Studio (UI custom + agent Claude, `https://atelier.mynetwk.biz/` ou `http://127.0.0.1:4100/` ; l'éditeur code-server `atelier-studio.service`/:8443 est décommissionné depuis le 2026-06-17). Le `make deploy-app` build directement sur Medion.
 
 ## Modification du code Atelier (Rust + frontend)
 

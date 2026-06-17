@@ -4,10 +4,10 @@
 //! `crates/atelier-apps/templates/{stack}/`. Files are written
 //! idempotently — anything already present on disk is left untouched.
 //!
-//! # INVARIANT — workspace code-server
+//! # INVARIANT — workspace de l'app (Studio)
 //!
 //! `app.src_dir()` (`{slug}/src/`) est **à la fois** le dossier des sources de
-//! l'app ET le workspace code-server du Studio. Tout fichier qui doit être
+//! l'app ET le workspace ouvert par le Studio (agent Claude Code). Tout fichier qui doit être
 //! édité/lu par l'agent Claude Code (ex : un `README.md` initial, un
 //! `.env.example`) DOIT être placé directement sous `src/`.
 //!

@@ -1,7 +1,7 @@
 //! Watcher inotify des sources d'apps → event WS `source:changed`.
 //!
 //! WHY : l'explorateur de fichiers du Studio doit se rafraîchir tout seul quand
-//! une source change sur le disque (agent Claude, code-server, git, …) au lieu
+//! une source change sur le disque (agent Claude, git, éditeur externe, …) au lieu
 //! d'un bouton refresh manuel. On respecte la convention « live = WebSocket » :
 //! on émet un `SourceChangedEvent { slug }` grossier (le front relit l'arbre),
 //! debouncé pour coalescer les rafales (save-all, `git checkout`, rename-storm

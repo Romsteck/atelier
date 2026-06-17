@@ -3,7 +3,6 @@ import { useSearchParams, useLocation } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
-import StudioIframe from '../components/StudioIframe';
 import PreviewTab from '../components/PreviewTab';
 import SplitDivider from '../components/SplitDivider';
 import DocsTab from '../components/docs/DocsTab';
@@ -13,15 +12,13 @@ import EnvTab from '../components/EnvTab';
 import {
   Code2, BookOpen, Database, ScrollText, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X,
-  ShieldAlert, Monitor, Columns2, Bot, KeyRound,
+  ShieldAlert, Monitor, Columns2, KeyRound,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
   getApp, getAppStatus, getAppLogs, getLogs,
 } from '../api/client';
 import { Link } from 'react-router-dom';
-
-export const CODESERVER_BASE = 'https://codeserver.mynetwk.biz';
 
 const STACKS = [
   { value: 'next-js', label: 'Next.js' },
@@ -49,12 +46,6 @@ export function statusDot(state) {
   if (s === 'crashed' || s === 'failed') return 'bg-red-400';
   if (s === 'starting') return 'bg-yellow-400 animate-pulse';
   return 'bg-gray-500';
-}
-
-// ── Code Tab ──
-
-function CodeTab({ slug }) {
-  return <StudioIframe folder={`/var/lib/atelier/apps/${slug}/src`} title={`Code - ${slug}`} />;
 }
 
 // ── Logs Tab ──
@@ -357,21 +348,13 @@ export default function Studio() {
   const [app, setApp] = useState(null);
   const [status, setStatus] = useState(null);
 
-  // Code-server lazy-load: keep opened iframes alive
-  const [openedCode, setOpenedCode] = useState(() => {
-    const init = new Set();
-    const s = searchParams.get('app');
-    if (s && (searchParams.get('tab') || 'code') === 'code') init.add(s);
-    return init;
-  });
-
   // Recently-opened apps (slugs, most-recent-first) — feeds the nav sub-menu
   const [recentSlugs, setRecentSlugs] = useState(() => {
     try { return JSON.parse(localStorage.getItem('studio:recentApps')) || []; }
     catch { return []; }
   });
 
-  // ── Disposition (mode 'tabs' classique vs 'split' éditeur+onglets) ──
+  // ── Disposition (mode 'tabs' classique vs 'split' agent+onglets) ──
   const contentRef = useRef(null);
   const [layoutMode, setLayoutMode] = useState(() => localStorage.getItem('studio:layoutMode') || 'tabs');
   const [rightTab, setRightTab] = useState(() => localStorage.getItem('studio:rightTab') || 'preview');
@@ -381,10 +364,6 @@ export default function Studio() {
   });
   const [dragging, setDragging] = useState(false);
   const [isNarrow, setIsNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < 900);
-  // Switch éditeur ⇄ agent : l'agent REMPLACE l'iframe code-server dans le même
-  // emplacement ("code slot"). En split, l'agent occupe le pane gauche → le
-  // preview/browser reste visible à droite. 'editor' | 'agent'.
-  const [codeView, setCodeView] = useState(() => localStorage.getItem('studio:codeView') || 'editor');
 
   // Lancement d'une conversation agent depuis un autre onglet (ex. bouton « Résoudre » de la
   // surveillance) : { prompt, mode, nonce }. Relayé à AgentWorkspace → provider, qui crée+envoie.
@@ -418,7 +397,6 @@ export default function Studio() {
   useEffect(() => { localStorage.setItem('studio:layoutMode', layoutMode); }, [layoutMode]);
   useEffect(() => { localStorage.setItem('studio:rightTab', rightTab); }, [rightTab]);
   useEffect(() => { localStorage.setItem('studio:splitRatio', String(leftPct)); }, [leftPct]);
-  useEffect(() => { localStorage.setItem('studio:codeView', codeView); }, [codeView]);
 
   // ── Détection écran étroit (désactive le split) ──
   useEffect(() => {
@@ -471,13 +449,6 @@ export default function Studio() {
     if (!TABS.some(t => t.id === activeTab)) setActiveTab('code');
   }, [activeTab]);
 
-  // ── Keep the code-server iframe mounted for the selected app ──
-  useEffect(() => {
-    if (activeTab === 'code' && selectedSlug) {
-      setOpenedCode(prev => prev.has(selectedSlug) ? prev : new Set(prev).add(selectedSlug));
-    }
-  }, [activeTab, selectedSlug]);
-
   // ── Handlers ──
   const handleAddApp = useCallback(() => setShowCreate(true), []);
 
@@ -488,44 +459,23 @@ export default function Studio() {
   function handleSelectTab(tab) {
     setActiveTab(tab);
     setSearchParams({ app: selectedSlug, tab });
-    if (tab === 'code' && selectedSlug) {
-      setOpenedCode(prev => { if (prev.has(selectedSlug)) return prev; const n = new Set(prev); n.add(selectedSlug); return n; });
-    }
   }
 
   function handleSetLayoutMode(mode) {
     if (mode === 'split' && isNarrow) return;
     setLayoutMode(mode);
-    // entrer en split impose d'avoir l'éditeur monté (il est épinglé à gauche)
-    if (mode === 'split' && selectedSlug) {
-      setOpenedCode(prev => prev.has(selectedSlug) ? prev : new Set(prev).add(selectedSlug));
-    }
   }
 
   function handleSelectRightTab(tab) { setRightTab(tab); }
 
-  // Bascule éditeur ⇄ agent dans le "code slot". En mode tabs, l'agent vit sur
-  // l'onglet Code → on s'y place pour le rendre visible. Le code-server reste
-  // monté (caché) pour un retour instantané.
-  function toggleAgent() {
-    setCodeView(prev => {
-      const next = prev === 'agent' ? 'editor' : 'agent';
-      if (next === 'agent') {
-        if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
-        if (selectedSlug) setOpenedCode(p => p.has(selectedSlug) ? p : new Set(p).add(selectedSlug));
-      }
-      return next;
-    });
-  }
-
-  // Ouvre l'agent (comme toggleAgent forcé sur 'agent') et y lance une nouvelle conversation
-  // pré-remplie du `prompt`. Le `nonce` permet de rejouer même si l'agent est déjà ouvert.
+  // Lance une nouvelle conversation agent pré-remplie du `prompt` (ex. bouton « Résoudre »
+  // de la surveillance). L'AgentWorkspace occupe le "code slot" → en mode tabs on bascule
+  // sur l'onglet Code pour le rendre visible. Le `nonce` permet de rejouer même si l'agent
+  // est déjà ouvert.
   function openAgentWithPrompt(prompt) {
     if (!prompt) return;
     setAgentLaunch({ prompt, mode: 'plan', nonce: ++nonceRef.current });
-    setCodeView('agent');
     if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
-    if (selectedSlug) setOpenedCode(p => p.has(selectedSlug) ? p : new Set(p).add(selectedSlug));
   }
 
   const handleControl = useCallback(async (slugOrAction, actionOpt) => {
@@ -579,7 +529,7 @@ export default function Studio() {
     <div className="ml-auto flex items-center gap-1 pr-3">
       {[
         { id: 'tabs', Icon: Square, title: 'Onglets' },
-        { id: 'split', Icon: Columns2, title: 'Split — éditeur + onglets' },
+        { id: 'split', Icon: Columns2, title: 'Split — agent + onglets' },
       ].map(({ id, Icon, title }) => (
         <button key={id} onClick={() => handleSetLayoutMode(id)}
           disabled={id === 'split' && isNarrow} title={title}
@@ -587,11 +537,6 @@ export default function Studio() {
           <Icon className="w-5 h-5" />
         </button>
       ))}
-      <span className="w-px h-5 bg-gray-700 mx-0.5" />
-      <button onClick={toggleAgent} title={codeView === 'agent' ? 'Revenir à code-server' : 'Remplacer code-server par l’agent'}
-        className={`p-2 rounded-sm transition-colors ${codeView === 'agent' ? 'bg-gray-700 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
-        <Bot className="w-5 h-5" />
-      </button>
     </div>
   );
 
@@ -631,27 +576,12 @@ export default function Studio() {
           </div>
         )}
 
-        {/* Zone de contenu — l'agent vit DANS le "code slot" (cf. (A')), pas en colonne séparée */}
+        {/* Zone de contenu — l'agent vit DANS le "code slot" (cf. (A)), pas en colonne séparée */}
         <div className="flex-1 min-w-0 overflow-hidden relative" ref={contentRef}>
-          {/* (A) Pool keep-alive code-server — jamais remonté ; masqué (mais gardé
-               monté) quand le slot affiche l'agent (codeView==='agent') → retour instantané. */}
-          {[...openedCode].map(slug => {
-            const isSel = selectedSlug === slug;
-            const slotActive = isSel && (
-              (effectiveMode === 'tabs' && activeTab === 'code') || effectiveMode === 'split'
-            );
-            const codeVisible = slotActive && codeView === 'editor';
-            const vis = { visibility: codeVisible ? 'visible' : 'hidden', zIndex: codeVisible ? 1 : 0, pointerEvents: codeVisible ? 'auto' : 'none' };
-            const style = effectiveMode === 'split' && isSel
-              ? { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${leftPct}%`, ...vis }
-              : { position: 'absolute', inset: 0, ...vis };
-            return <div key={slug} style={style}><CodeTab slug={slug} /></div>;
-          })}
-
-          {/* (A') Agent dans le "code slot" — REMPLACE l'iframe code-server quand le
-               switch (Bot) est sur agent. Plein écran (tabs + onglet Code) ou pane
+          {/* (A) AgentWorkspace dans le "code slot" — seule vue de cet emplacement depuis
+               le retrait de code-server. Plein écran (onglet Code en mode tabs) ou pane
                gauche (split) → le preview/browser reste visible à droite. */}
-          {selectedSlug && codeView === 'agent' &&
+          {selectedSlug &&
             ((effectiveMode === 'tabs' && activeTab === 'code') || effectiveMode === 'split') && (
               <div
                 style={effectiveMode === 'split'

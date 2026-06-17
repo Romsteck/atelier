@@ -2,8 +2,8 @@
 //!
 //! # INVARIANT — workspace per-app
 //!
-//! Le workspace code-server de chaque app est `{apps_path}/{slug}/src/` (voir
-//! `web/src/pages/Studio.jsx` : `?folder=.../{slug}/src`). L'agent Claude Code
+//! Le workspace de chaque app est `{apps_path}/{slug}/src/` (ouvert par le
+//! Studio / l'agent Claude Code). L'agent Claude Code
 //! ne lit **que** ce qui vit sous `src/`. TOUT fichier destiné à l'agent
 //! (CLAUDE.md, .claude/, .mcp.json) DOIT donc être écrit sous `src/` ; les
 //! fichiers au niveau `{apps_path}/{slug}/` (au-dessus de `src/`) sont
@@ -1235,7 +1235,7 @@ fn render_mcp_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> String 
 }
 
 /// Resolve the rules-files group GID (default `hr-studio`, overridable via
-/// `ATELIER_RULES_GROUP`). The code-server runs as `hr-studio`; making
+/// `ATELIER_RULES_GROUP`). The agent runner runs as `hr-studio`; making
 /// regenerated rules group-writable for that gid lets agents edit them
 /// without sudo. Returns `None` if the group doesn't exist on the host
 /// or `getent` is unavailable — callers degrade to a `warn!` and continue.

@@ -1,7 +1,7 @@
 //! Source routes — exploration du **working tree** d'une app (`…/{slug}/src`),
-//! façon explorateur de fichiers + panneau git de code-server. Distinct de
+//! façon explorateur de fichiers + panneau git (UI Studio). Distinct de
 //! [`crate::routes::git`] qui sert les **bare repos** (`{slug}.git`) : ici on lit
-//! l'arbre de travail réel que code-server édite et que l'agent (Bypass) modifie,
+//! l'arbre de travail réel que l'agent (Bypass) modifie,
 //! pour pouvoir relire en direct ce qui a changé.
 //!
 //! Majoritairement en lecture ; deux mutations restreintes au working tree :

@@ -5,11 +5,10 @@ import { Menu, Code2, ExternalLink, Play, Square, RefreshCw, Loader2, Check, Ale
 import { useTheme } from "../context/ThemeContext";
 import TaskBell from "./tasks/TaskBell";
 import TaskDropdown from "./tasks/TaskDropdown";
-import Studio, { CODESERVER_BASE, statusDot } from "../pages/Studio";
+import Studio, { statusDot } from "../pages/Studio";
 import { useStudio } from "../context/StudioContext";
 import { PageHeaderSlotProvider, usePageHeaderSlotRegister } from "../context/PageHeaderSlot";
 import useWebSocket from "../hooks/useWebSocket";
-import useCloudMasterStatus from "../hooks/useCloudMasterStatus";
 
 function BuildBadge({ build, onDismiss }) {
   if (!build) return null;
@@ -75,8 +74,7 @@ function BuildBadge({ build, onDismiss }) {
 }
 
 function StudioHeaderInfo() {
-  const { currentApp, status, selectedSlug, activeTab, busy, onControl } = useStudio();
-  const { status: cmStatus } = useCloudMasterStatus();
+  const { currentApp, status, busy, onControl } = useStudio();
   const [buildState, setBuildState] = useState(null);
 
   useWebSocket({
@@ -128,34 +126,6 @@ function StudioHeaderInfo() {
         <span>Port <span className="text-gray-200 font-mono">{currentApp.port || '-'}</span></span>
         <span>Up <span className="text-gray-200 font-mono">{uptime}</span></span>
       </div>
-      {activeTab === 'code' && selectedSlug && (() => {
-        const cmOnline = cmStatus === 'online';
-        const cmLoading = cmStatus === 'loading';
-        const tooltip = cmOnline
-          ? 'Ouvrir code-server dans un nouvel onglet'
-          : cmLoading
-            ? 'Vérification de CloudMaster…'
-            : 'CloudMaster offline — démarrer depuis le Studio';
-        return cmOnline ? (
-          <a
-            href={`${CODESERVER_BASE}/?folder=/var/lib/atelier/apps/${selectedSlug}/src`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="p-1 text-gray-400 hover:text-gray-50 rounded-sm hover:bg-gray-700 shrink-0"
-            title={tooltip}
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
-        ) : (
-          <span
-            aria-disabled="true"
-            className="p-1 text-gray-400 rounded-sm shrink-0 opacity-50 cursor-not-allowed"
-            title={tooltip}
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-          </span>
-        );
-      })()}
       {onControl && (
         <div className="flex items-center gap-1 shrink-0">
           {!isRunning ? (

@@ -5,11 +5,11 @@ import { getSourceGitLog, pushSource } from '../api/client';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 
 // Contrôle de source du working tree (`…/{slug}/src`) — façon onglet « Source
-// Control » de code-server. Disposition VERTICALE empilée : modifs en haut,
+// Control » de VS Code. Disposition VERTICALE empilée : modifs en haut,
 // historique en dessous. Cliquer un fichier modifié OU un commit ouvre son diff en
 // onglet central plein écran (plus d'aperçu condensé). Le status vient du parent
 // (hook useSourceGit, auto-rafraîchi). On peut POUSSER ici ; le commit se fait via
-// l'agent / code-server.
+// l'agent.
 
 function SectionHeader({ children }) {
   return (

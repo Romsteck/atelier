@@ -270,7 +270,7 @@ impl Application {
         self.app_dir().join(".env")
     }
 
-    /// Path to the source tree for this app **and the code-server workspace
+    /// Path to the source tree for this app **and the Studio workspace
     /// root** — c'est là que l'agent Claude Code lit `CLAUDE.md`, `.claude/`,
     /// `.mcp.json`. Tout fichier de contexte destiné à l'agent DOIT être
     /// écrit sous ce chemin, jamais sous `app_dir()` directement.

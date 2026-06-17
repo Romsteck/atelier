@@ -8,7 +8,7 @@ import useWebSocket from './useWebSocket';
 //   - au montage / changement d'app ;
 //   - à la fin d'un tour de l'agent (qui édite les fichiers) via le canal WS
 //     `agent:event` (debounce pour coalescer les rafales) ;
-//   - au retour de focus / visibilité de la fenêtre (édition via code-server).
+//   - au retour de focus / visibilité de la fenêtre (édition hors-agent).
 // Le spinner (`loading`) ne s'affiche qu'au PREMIER chargement par app : les
 // rafraîchissements de fond échangent les données en place, sans clignotement.
 export default function useSourceGit(slug) {
@@ -48,7 +48,7 @@ export default function useSourceGit(slug) {
     },
   });
 
-  // Édition hors-agent (code-server) : on resynchronise au retour sur l'onglet.
+  // Édition hors-agent (éditeur externe) : on resynchronise au retour sur l'onglet.
   useEffect(() => {
     const onFocus = () => refresh();
     const onVis = () => { if (document.visibilityState === 'visible') refresh(); };

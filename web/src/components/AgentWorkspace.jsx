@@ -7,7 +7,7 @@ import ConversationsHistoryPanel from './agent/ConversationsHistoryPanel';
 import { AgentConversationsProvider } from '../context/AgentConversationsContext';
 import useSourceGit from '../hooks/useSourceGit';
 
-// « Notre code-server » en disposition VS Code :
+// Espace de travail de l'app, disposition VS Code (remplace l'ancien éditeur code-server) :
 //   [barre d'activité] [sidebar repliable : Explorateur / Git / Conversations] [split au centre]
 // Le centre rend plusieurs conversations côte à côte (ConversationsSplit). La sidebar
 // montre l'explorateur, le contrôle de source (working tree local) OU l'historique des
@@ -40,7 +40,7 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
   }, []);
 
   // Redimensionnement de la sidebar (pointer). Overlay plein écran pendant le drag
-  // pour capter le pointeur même au-dessus des iframes (code-server / browser).
+  // pour capter le pointeur même au-dessus des iframes (preview/browser).
   useEffect(() => {
     if (!dragging) return;
     function onMove(e) {

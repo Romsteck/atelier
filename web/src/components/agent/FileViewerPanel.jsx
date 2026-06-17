@@ -8,7 +8,7 @@ import useWebSocket from '../../hooks/useWebSocket';
 // conversations), façon éditeur VS Code. Lecture seule, retour à la ligne TOUJOURS
 // actif (pas de scroll horizontal). Le contenu se rafraîchit AUTOMATIQUEMENT quand
 // un changement local est détecté (fin de tour de l'agent via WebSocket + retour de
-// focus/visibilité pour les éditions code-server) — pas de bouton de rafraîchissement.
+// focus/visibilité pour les éditions hors-agent) — pas de bouton de rafraîchissement.
 
 function humanSize(n) {
   if (n == null) return '';
@@ -47,7 +47,7 @@ export default function FileViewerPanel({ panelKey }) {
 
   // Changement local détecté → recharge et renvoie la MAJ à l'UI :
   //  - l'agent vient d'éditer des fichiers (fin de tour, debounce anti-rafale) ;
-  //  - retour de focus/visibilité de la fenêtre (édition via code-server).
+  //  - retour de focus/visibilité de la fenêtre (édition hors-agent).
   useWebSocket({
     'agent:event': (d) => {
       if (d && (d.kind === 'turn_done' || d.kind === 'done' || d.kind === 'result')) {

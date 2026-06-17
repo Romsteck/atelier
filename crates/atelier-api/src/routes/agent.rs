@@ -305,7 +305,7 @@ async fn query(
     if body.prompt.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "prompt vide");
     }
-    // cwd = la source de l'app (même dossier que code-server édite). Doit exister.
+    // cwd = la source de l'app (le working tree édité par l'agent). Doit exister.
     let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, format!("app source introuvable: {}", cwd.display()));
