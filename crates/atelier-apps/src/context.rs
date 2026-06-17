@@ -13,7 +13,7 @@
 //! Fichiers per-app générés (tous sous `{slug}/src/`) :
 //!   - `src/CLAUDE.md`                         — carnet de bord agent-owned (write-once)
 //!   - `src/.mcp.json`                         — MCP server config (CLI compat)
-//!   - `src/.claude/settings.json`             — MCP server (sans permissions — cf. render_settings_json_with_auth)
+//!   - `src/.claude/settings.json`             — enabledMcpjsonServers only (def serveur dans .mcp.json ; sans permissions — cf. render_settings_json)
 //!   - `src/.claude/rules/app-info.md`         — identité / stack / port / autres apps (régénéré)
 //!   - `src/.claude/rules/mcp-tools.md`        — tools MCP disponibles
 //!   - `src/.claude/rules/workflow.md`         — workflow dev
@@ -134,7 +134,7 @@ impl ContextGenerator {
 
         // Step 3 — Project-scoped MCP config + settings, au seul niveau src/.
         let project_mcp = format!("{}?project={}", self.mcp_endpoint, app.slug);
-        let settings = render_settings_json_with_auth(&project_mcp, self.mcp_token.as_deref());
+        let settings = render_settings_json();
         log_write(&app.slug, &src_claude_dir.join("settings.json"), &settings)?;
         let mcp_json = render_mcp_json_with_auth(&project_mcp, self.mcp_token.as_deref());
         log_write(&app.slug, &src_dir.join(".mcp.json"), &mcp_json)?;
@@ -239,7 +239,7 @@ impl ContextGenerator {
         let claude_md = self.render_root_claude_md(all_apps);
         log_write("<root>", &self.apps_path.join("CLAUDE.md"), &claude_md)?;
 
-        let settings = render_settings_json_with_auth(&self.mcp_endpoint, self.mcp_token.as_deref());
+        let settings = render_settings_json();
         log_write("<root>", &claude_dir.join("settings.json"), &settings)?;
 
         let mcp_json = render_mcp_json_with_auth(&self.mcp_endpoint, self.mcp_token.as_deref());
@@ -1201,7 +1201,14 @@ fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
     entry
 }
 
-fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> String {
+fn render_settings_json() -> String {
+    // settings.json ne porte QUE `enabledMcpjsonServers` : la *définition* du serveur
+    // `studio` (type/url/headers) est déclarée une seule fois dans `.mcp.json` (source de
+    // vérité), settings.json ne fait que la PRÉ-APPROUVER (sinon prompt de trust à la 1re
+    // session, bloquant pour le runner non-interactif). Recopier le bloc `mcpServers` ici
+    // serait redondant (.mcp.json étant déjà la déclaration active) et imposerait de
+    // maintenir url+token à deux endroits.
+    //
     // PAS de bloc `permissions` ici : le runner agent (runner.js) charge ce fichier via
     // settingSources:['project'], et une allow rule court-circuiterait son canUseTool
     // (vérifié : `mcp__studio` en allow exécute `exec` EN ROOT même en mode plan).
@@ -1209,9 +1216,6 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
     // USER de hr-studio (/var/lib/hr-studio/.claude/settings.json), source que le runner
     // ne charge jamais.
     let settings = serde_json::json!({
-        "mcpServers": {
-            "studio": mcp_server_entry(mcp_endpoint, token),
-        },
         "enabledMcpjsonServers": ["studio"],
     });
     serde_json::to_string_pretty(&settings).expect("settings JSON serializes")
@@ -1729,19 +1733,34 @@ mod tests {
                 "trader/.claude/ parent-level doit être supprimé intégralement");
 
         // Les renderers produisent le bon contenu (vérif directe).
-        let settings = render_settings_json_with_auth(
-            "http://127.0.0.1:4001/mcp?project=trader",
-            None,
-        );
+        // settings.json ne porte QUE l'activation — la déclaration du serveur vit dans .mcp.json.
+        let settings = render_settings_json();
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["studio"]["url"].as_str().unwrap(),
-            "http://127.0.0.1:4001/mcp?project=trader"
+            parsed["enabledMcpjsonServers"],
+            serde_json::json!(["studio"]),
         );
+        assert!(parsed.get("mcpServers").is_none(),
+                "settings.json ne doit plus recopier la définition du serveur (source de vérité = .mcp.json)");
         // INVARIANT runner : aucune allow rule dans le settings.json projet (une allow
         // court-circuiterait le canUseTool du runner agent — exec root même en plan).
         assert!(parsed.get("permissions").is_none(),
                 "settings.json projet ne doit plus porter de bloc permissions");
+
+        // La définition du serveur (url + Bearer) est dans .mcp.json — source de vérité unique.
+        let mcp = render_mcp_json_with_auth(
+            "http://127.0.0.1:4001/mcp?project=trader",
+            Some("tok"),
+        );
+        let mcp_parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+        assert_eq!(
+            mcp_parsed["mcpServers"]["studio"]["url"].as_str().unwrap(),
+            "http://127.0.0.1:4001/mcp?project=trader"
+        );
+        assert_eq!(
+            mcp_parsed["mcpServers"]["studio"]["headers"]["Authorization"].as_str().unwrap(),
+            "Bearer tok"
+        );
 
         // app-info.md contient l'identité + autres apps + DB tables.
         let app_info = render_app_info_md(&trader, &all, &Some(vec!["users".into(), "trades".into()]));
