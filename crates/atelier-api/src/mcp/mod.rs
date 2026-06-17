@@ -9,4 +9,5 @@
 pub mod apps_ops;
 pub mod dto;
 pub mod dv_ops;
+pub mod env_ops;
 pub mod scaffold;

@@ -180,55 +180,12 @@ impl AppsContext {
         }
     }
 
-    /// Sync the dataverse-gateway env vars (`HR_DV_BASE_URL`, `HR_DV_TOKEN`,
-    /// `HR_APP_UUID`) into the app's `.env` file. Backfills missing
-    /// gateway credentials in `dataverse-secrets.json` if needed.
-    ///
-    /// The gateway is the apps' SOLE database path: with the postgres-dataverse
-    /// migration finalised (2026-05-30) no app reads a direct `DATABASE_URL`
-    /// anymore, so none is injected and the PG `app_{slug}` roles are NOLOGIN.
-    /// Idempotent — safe to call on every boot.
-    ///
-    /// The base URL is `http://127.0.0.1:4100/api/dv/{slug}` — apps reach the
-    /// gateway via loopback; hr-edge handles external access on
-    /// `dv.<base_domain>/{slug}/...`.
-    pub async fn sync_dv_env(&self, slug: &str) -> anyhow::Result<()> {
-        let Some(mgr) = self.dataverse_manager.as_ref() else {
-            return Ok(());
-        };
-        let app = match self.supervisor.registry.get(slug).await {
-            Some(a) => a,
-            None => return Ok(()),
-        };
-        // Backfill credentials lazily (no-op if already present).
-        let secret = match mgr.ensure_gateway_credentials(slug) {
-            Ok(s) => s,
-            Err(_) => return Ok(()), // app not provisioned — nothing to sync
-        };
-        let base_url = format!("http://127.0.0.1:4100/api/dv/{}", slug);
-        let env_path = app.env_file();
-        if let Some(parent) = env_path.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-        upsert_env_var(&env_path, "HR_DV_BASE_URL", &base_url).await?;
-        upsert_env_var(&env_path, "HR_DV_TOKEN", &secret.gateway_token).await?;
-        upsert_env_var(&env_path, "HR_APP_UUID", &secret.app_uuid.to_string()).await?;
-        info!(slug, "sync_dv_env: HR_DV_* injected (gateway-only, no DATABASE_URL)");
-        Ok(())
-    }
-
-    /// Run [`Self::sync_dv_env`] for every app whose `db_backend` is
-    /// `PostgresDataverse`. Called at orchestrator boot.
-    pub async fn sync_dv_env_all(&self) {
-        let apps = self.supervisor.registry.list().await;
-        for app in apps {
-            if matches!(app.db_backend, atelier_apps::DbBackend::PostgresDataverse) {
-                if let Err(e) = self.sync_dv_env(&app.slug).await {
-                    warn!(slug = %app.slug, error = %e, "sync_dv_env failed");
-                }
-            }
-        }
-    }
+    // Env management (platform-tier injection of `HR_DV_*` / `ATELIER_*`,
+    // user-tier CRUD, `.env` rendering, boot reconcile) lives in
+    // [`super::env_ops`] — `reconcile_app_env` / `reconcile_all_env` /
+    // `env_set_var` / `env_view`. The old `sync_dv_env` (HR_DV_* upsert) and
+    // its dead boot-sweep `sync_dv_env_all` were folded into that single
+    // reconciler (2026-06-16).
 }
 
 impl AppsContext {
@@ -377,6 +334,14 @@ impl AppsContext {
             warn!(error = %e, "AppCreate: root context generation failed (non-fatal)");
         }
 
+        // Render the initial `.env` (PORT + dataverse gateway contract + logging
+        // contract). WHY: the old `sync_dv_env` was never called on create, so
+        // new apps had NO `HR_DV_*` until a manual token rotation — now the
+        // gateway credentials land on disk at creation time.
+        if let Err(e) = self.reconcile_app_env(&slug, false).await {
+            warn!(slug = %slug, error = %e, "AppCreate: env reconcile failed (non-fatal)");
+        }
+
         info!(slug = %slug, port, duration_ms = start.elapsed().as_millis() as u64, "AppCreate ok");
         IpcResponse::ok_data(app_to_dto(&app))
     }
@@ -431,7 +396,23 @@ impl AppsContext {
             app.health_path = hp;
         }
         if let Some(ev) = env_vars {
-            app.env_vars = ev;
+            // Converge the MCP `app.update` env path onto the structured model:
+            // each entry becomes a USER var (secret by name heuristic, runtime
+            // scope), MERGED with existing user vars (not a full replace). The
+            // `.env` is re-rendered by the reconcile at the end of this fn.
+            for (k, v) in ev {
+                if super::env_ops::is_platform_key(&k) || !atelier_apps::valid_env_key(&k) {
+                    continue;
+                }
+                let secret = super::env_ops::looks_secret(&k);
+                app.env_set(atelier_apps::types::EnvVar {
+                    key: k,
+                    value: v,
+                    secret,
+                    scope: atelier_apps::types::EnvScope::Runtime,
+                });
+            }
+            app.env_vars.clear();
         }
         if let Some(new_has_db) = has_db {
             if new_has_db && !app.has_db {
@@ -476,6 +457,11 @@ impl AppsContext {
             .generate_for_app(&app, &all, db_tables)
         {
             warn!(slug = %slug, error = %e, "AppUpdate: context regeneration failed");
+        }
+
+        // Re-render the `.env` (platform + user) after any env / has_db change.
+        if let Err(e) = self.reconcile_app_env(&slug, false).await {
+            warn!(slug = %slug, error = %e, "AppUpdate: env reconcile failed");
         }
 
         info!(slug = %slug, "AppUpdate ok");
@@ -1020,6 +1006,11 @@ impl AppsContext {
             return IpcResponse::err("no artefacts to rsync back (empty build_artefact)");
         }
 
+        // Build-scoped user vars (VITE_*/NEXT_PUBLIC_*…) exported before the
+        // build command. Empty unless the app declares `scope: build|both` vars.
+        let build_env_prefix =
+            super::env_ops::build_env_sh_prefix(&self.render_build_env(&app).await);
+
         // ── Per-slug lock ───────────────────────────────────────────
         let lock = {
             let mut map = self.build_locks.lock().await;
@@ -1193,7 +1184,8 @@ impl AppsContext {
             // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY). NPM_CONFIG_FUND=false
             // réduit le bruit.
             let inner_cmd = format!(
-                "export CI=true NPM_CONFIG_FUND=false && cd {} && {}",
+                "export CI=true NPM_CONFIG_FUND=false && {}cd {} && {}",
+                build_env_prefix,
                 shell_quote(&remote_src),
                 build_command
             );
@@ -2045,68 +2037,19 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
         build_command: app.build_command.clone(),
         build_artefact: app.build_artefact.clone(),
         health_path: app.health_path.clone(),
+        // User var names only, values masked. Sourced from the structured `env`
+        // model (the legacy flat `env_vars` map is now always empty). Platform
+        // vars (PORT/HR_DV_*/ATELIER_*) are intentionally not surfaced here.
         env_vars: app
-            .env_vars
-            .keys()
-            .map(|k| (k.clone(), "***".to_string()))
+            .env
+            .iter()
+            .map(|e| (e.key.clone(), "***".to_string()))
             .collect(),
         state: state_to_str(&app.state).to_string(),
         db_backend: db_backend_to_str(&app.db_backend).to_string(),
         created_at: app.created_at.to_rfc3339(),
         updated_at: app.updated_at.to_rfc3339(),
     }
-}
-
-/// Remove any line matching `KEY=…` (commented-out or not) from a
-/// `.env` file. No-op if the file or the key doesn't exist.
-async fn remove_env_var(path: &std::path::Path, key: &str) -> std::io::Result<()> {
-    let existing = match tokio::fs::read_to_string(path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    let prefix = format!("{}=", key);
-    let commented = format!("#{}=", key);
-    let kept: Vec<&str> = existing
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            !t.starts_with(&prefix) && !t.starts_with(&commented)
-        })
-        .collect();
-    let mut out = kept.join("\n");
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    tokio::fs::write(path, out).await
-}
-
-/// Set / replace a single `KEY=value` line in a `.env` file. Idempotent:
-/// any existing line with the same key (commented-out or not) is dropped
-/// and the new one appended at the end. Creates the file if it doesn't
-/// exist (parent directory must already exist — the supervisor manages
-/// `/var/lib/atelier/apps/{slug}/` lifecycle elsewhere).
-async fn upsert_env_var(path: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
-    let existing = match tokio::fs::read_to_string(path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-    let prefix = format!("{}=", key);
-    let commented = format!("#{}=", key);
-    let kept: Vec<&str> = existing
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            !t.starts_with(&prefix) && !t.starts_with(&commented)
-        })
-        .collect();
-    let mut out = kept.join("\n");
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&format!("{}={}\n", key, value));
-    tokio::fs::write(path, out).await
 }
 
 fn db_backend_to_str(b: &DbBackend) -> &'static str {

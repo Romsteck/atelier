@@ -15,9 +15,10 @@
 //! TODO Phase 9.2 suite : create / update / delete / build / deploy / exec /
 //! env update / regenerate-context / logs.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -28,16 +29,51 @@ use tracing::{info, warn};
 
 use crate::mcp::apps_ops::AppsContext;
 use crate::state::ApiState;
+use atelier_apps::types::EnvScope;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/", get(list_apps))
-        .route("/{slug}", get(get_app))
+        .route("/{slug}", get(get_app).patch(update_app).delete(delete_app))
+        // Env management (structured view + per-variable user CRUD). The `.env`
+        // file is a generated projection — these routes mutate the model and
+        // re-render it; platform vars (PORT/HR_DV_*/ATELIER_*) are read-only.
         .route("/{slug}/env", get(get_app_env))
+        .route(
+            "/{slug}/env/{key}",
+            get(get_app_env_var).put(set_app_env_var).delete(delete_app_env_var),
+        )
+        .route("/{slug}/reconcile-env", post(reconcile_env))
+        .route("/{slug}/build-env", get(get_app_build_env))
         .route("/{slug}/control", post(control_app))
         .route("/{slug}/status", get(app_status))
         .route("/{slug}/ship", post(ship_app))
         .route("/{slug}/build-event", post(build_event))
+}
+
+/// Map an `anyhow` error from the env layer onto an HTTP status by inspecting
+/// its message (the env ops return human-readable, classifiable errors).
+fn env_err(e: anyhow::Error) -> axum::response::Response {
+    let msg = e.to_string();
+    let status = if msg.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if msg.contains("platform-managed")
+        || msg.contains("invalid env key")
+        || msg.contains("cannot contain")
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(json!({"success": false, "error": msg}))).into_response()
+}
+
+fn parse_scope(s: Option<&str>) -> EnvScope {
+    match s {
+        Some("build") => EnvScope::Build,
+        Some("both") => EnvScope::Both,
+        _ => EnvScope::Runtime,
+    }
 }
 
 fn validate_slug(slug: &str) -> Result<(), axum::response::Response> {
@@ -84,17 +120,248 @@ async fn get_app(State(state): State<ApiState>, Path(slug): Path<String>) -> imp
     }
 }
 
-async fn get_app_env(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
+#[derive(Deserialize, Default)]
+struct EnvViewQuery {
+    /// Return secret values in clear instead of masking them. Loopback/LAN
+    /// trust model, same as the sibling `/api/apps/*` routes.
+    #[serde(default)]
+    reveal: bool,
+}
+
+/// `GET /api/apps/{slug}/env` — structured, ownership-aware view of the app's
+/// full environment (platform tier + user tier). Secret values are masked
+/// (omitted) unless `?reveal=1`. Replaces the old flat-map dump.
+async fn get_app_env(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Query(q): Query<EnvViewQuery>,
+) -> impl IntoResponse {
     if let Err(r) = validate_slug(&slug) {
         return r;
     }
-    match state.app_registry.get(&slug).await {
-        Some(app) => Json(json!({"success": true, "data": app.env_vars})).into_response(),
-        None => (
+    let ctx = AppsContext::from_api_state(&state);
+    match ctx.env_view(&slug, q.reveal).await {
+        Ok(vars) => Json(json!({"success": true, "data": vars})).into_response(),
+        Err(e) => env_err(e),
+    }
+}
+
+/// `GET /api/apps/{slug}/env/{key}` — reveal a single variable's plaintext
+/// value (platform or user). Keeps secrets out of the bulk view payload until
+/// explicitly requested (per-row "eye" in the UI).
+async fn get_app_env_var(
+    State(state): State<ApiState>,
+    Path((slug, key)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let ctx = AppsContext::from_api_state(&state);
+    match ctx.env_var_value(&slug, &key).await {
+        Ok(Some(value)) => {
+            Json(json!({"success": true, "data": {"key": key, "value": value}})).into_response()
+        }
+        Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({"success": false, "error": "App not found"})),
+            Json(json!({"success": false, "error": format!("env var not found: {key}")})),
         )
             .into_response(),
+        Err(e) => env_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetEnvBody {
+    value: String,
+    #[serde(default)]
+    secret: bool,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `PUT /api/apps/{slug}/env/{key}` — insert or replace a USER variable. Rejects
+/// platform-managed keys and malformed names. Re-renders the `.env`; the change
+/// applies on the app's next restart (`restart_required: true`).
+async fn set_app_env_var(
+    State(state): State<ApiState>,
+    Path((slug, key)): Path<(String, String)>,
+    Json(body): Json<SetEnvBody>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let scope = parse_scope(body.scope.as_deref());
+    info!(slug = %slug, key = %key, secret = body.secret, scope = scope.as_str(), "AppEnvSet");
+    let ctx = AppsContext::from_api_state(&state);
+    match ctx.env_set_var(&slug, &key, &body.value, body.secret, scope).await {
+        Ok(()) => Json(json!({
+            "success": true,
+            "data": {"key": key, "restart_required": true}
+        }))
+        .into_response(),
+        Err(e) => env_err(e),
+    }
+}
+
+/// `DELETE /api/apps/{slug}/env/{key}` — remove a USER variable.
+async fn delete_app_env_var(
+    State(state): State<ApiState>,
+    Path((slug, key)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    info!(slug = %slug, key = %key, "AppEnvDelete");
+    let ctx = AppsContext::from_api_state(&state);
+    match ctx.env_delete_var(&slug, &key).await {
+        Ok(true) => Json(json!({
+            "success": true,
+            "data": {"key": key, "restart_required": true}
+        }))
+        .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": format!("env var not found: {key}")})),
+        )
+            .into_response(),
+        Err(e) => env_err(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ReconcileQuery {
+    /// Default true: only report the plan, do not write. Set `dry_run=false` to
+    /// actually re-render the `.env`.
+    #[serde(default = "default_true")]
+    dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `POST /api/apps/{slug}/reconcile-env` — admin/debug. Recompute the `.env`
+/// projection (import residual hand-seeded vars, GC dead vars). Dry-run by
+/// default; returns the diff report.
+async fn reconcile_env(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Query(q): Query<ReconcileQuery>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let ctx = AppsContext::from_api_state(&state);
+    match ctx.reconcile_app_env(&slug, q.dry_run).await {
+        Ok(report) => {
+            Json(json!({"success": true, "data": serde_json::to_value(&report).unwrap_or(Value::Null)}))
+                .into_response()
+        }
+        Err(e) => env_err(e),
+    }
+}
+
+/// `GET /api/apps/{slug}/build-env` — `eval`-able `export K='v'` lines for the
+/// app's build-scoped vars. Sourced over loopback by the generated `build.sh`
+/// and `deploy-app.sh` so framework-baked public vars (`VITE_*`/`NEXT_PUBLIC_*`)
+/// reach the build. Empty for apps without build-scoped vars. text/plain.
+async fn get_app_build_env(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let ctx = AppsContext::from_api_state(&state);
+    match ctx.build_env_script(&slug).await {
+        Ok(script) => script.into_response(),
+        Err(e) => env_err(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct UpdateAppBody {
+    name: Option<String>,
+    stack: Option<String>,
+    visibility: Option<String>,
+    run_command: Option<String>,
+    build_command: Option<String>,
+    health_path: Option<String>,
+    env_vars: Option<BTreeMap<String, String>>,
+    has_db: Option<bool>,
+    build_artefact: Option<String>,
+}
+
+/// `PATCH /api/apps/{slug}` — update app settings (name/visibility/commands/
+/// health/env/has_db). Delegates to the same `AppsContext::update` the MCP
+/// `app.update` tool uses, so HTTP and the agent converge on one mutator.
+/// WHY: the Studio Settings save button previously called this route, which did
+/// not exist — the save silently no-op'd.
+async fn update_app(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    body: Option<Json<UpdateAppBody>>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let Json(b) = body.unwrap_or_default();
+    info!(slug = %slug, "AppUpdate (HTTP)");
+    let ctx = AppsContext::from_api_state(&state);
+    let resp = ctx
+        .update(
+            slug.clone(),
+            b.name,
+            b.stack,
+            b.visibility,
+            b.run_command,
+            b.build_command,
+            b.health_path,
+            b.env_vars,
+            b.has_db,
+            b.build_artefact,
+        )
+        .await;
+    ipc_to_http(resp)
+}
+
+#[derive(Deserialize, Default)]
+struct DeleteAppQuery {
+    #[serde(default)]
+    keep_data: bool,
+}
+
+/// `DELETE /api/apps/{slug}` — delete an app (stop, remove route/registry/port,
+/// and rm the data dir unless `?keep_data=1`).
+async fn delete_app(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Query(q): Query<DeleteAppQuery>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    info!(slug = %slug, keep_data = q.keep_data, "AppDelete (HTTP)");
+    let ctx = AppsContext::from_api_state(&state);
+    ipc_to_http(ctx.delete(slug, q.keep_data).await)
+}
+
+/// Map an `IpcResponse` (the MCP-layer result type the `AppsContext` methods
+/// return) onto an HTTP JSON envelope.
+fn ipc_to_http(resp: atelier_ipc::types::IpcResponse) -> axum::response::Response {
+    if resp.ok {
+        Json(json!({"success": true, "data": resp.data.unwrap_or(json!({"ok": true}))}))
+            .into_response()
+    } else {
+        let err = resp.error.unwrap_or_else(|| "operation failed".to_string());
+        let status = if err.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else if err.starts_with("invalid") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, Json(json!({"success": false, "error": err}))).into_response()
     }
 }
 
@@ -290,4 +557,3 @@ async fn build_event(
             .into_response()
     }
 }
-

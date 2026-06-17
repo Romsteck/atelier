@@ -407,13 +407,15 @@ impl ContextGenerator {
              - **Pas de pipelines** : pas de promotion dev→acc→prod.\n\
              \n\
              ## Environment variables\n\
-             The orchestrator injects:\n\
-             - `PORT` — listen on this port. **Never hardcode** a port in the code.\n\
-             - `DATABASE_URL` — Postgres connection string for this app's \
-             postgres-dataverse database (only when `has_db` is true).\n\
-             - `HR_DV_BASE_URL` / `HR_DV_TOKEN` / `HR_APP_UUID` — dataverse gateway \
-             credentials (only when `has_db` is true).\n\
-             - Any custom variables declared on the application (managed via the API).\n\
+             Atelier injects a single `.env` (rendered automatically — **ne pas \
+             l'éditer à la main**, il est régénéré). Tiers :\n\
+             - **Plateforme (calculé)** : `PORT` (jamais hardcoder un port), et — \
+             quand `has_db` — la passerelle dataverse `HR_DV_BASE_URL` / `HR_DV_TOKEN` \
+             / `HR_APP_UUID`, plus `ATELIER_INGEST_URL` / `ATELIER_LOGS_TOKEN` (logs). \
+             **Pas de `DATABASE_URL`** : l'accès DB est gateway-only depuis 2026-05-30.\n\
+             - **Variables applicatives** : config + secrets gérés via l'onglet \
+             *Variables* du Studio (ou l'API `/api/apps/{slug}/env` / MCP `app.update`). \
+             Un `scope` `build` les expose aussi au build (`VITE_*` / `NEXT_PUBLIC_*`).\n\
              \n\
              ## Database\n\
              - Use the MCP `db.*` / `dv_*` tools or the REST gateway \
@@ -729,6 +731,8 @@ echo "=== Build local: $SLUG ==="
 echo "Cwd: $SRC_DIR"
 cd "$SRC_DIR"
 export CI=true NPM_CONFIG_FUND=false
+# Variables build-scoped (VITE_*/NEXT_PUBLIC_*) injectées par Atelier (vide sinon).
+eval "$(curl -sS --max-time 5 "$API_BASE/api/apps/$SLUG/build-env" 2>/dev/null || true)"
 __BUILD_COMMAND__
 ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
 emit "{\"status\":\"finished\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"message\":\"build OK (local)\"}"
@@ -1556,7 +1560,7 @@ fn render_db_section(app: &crate::types::Application, db_tables: &Option<Vec<Str
         DbBackend::PostgresDataverse => format!(
             "PostgreSQL Dataverse (`app_{slug}`).\n\
              {tables}\n\
-             - Connexion : `DATABASE_URL` injecté dans ton env runtime\n\
+             - Connexion : **gateway-only** via `HR_DV_BASE_URL` + `HR_DV_TOKEN` (PAS de `DATABASE_URL`, pas de SQL direct)\n\
              - Surfaces : REST OData `/api/dv/{slug}/<table>` (app), tools MCP `dv_*` (agent)\n\
              - Voir `.claude/rules/db.md` pour les règles d'usage.\n",
             slug = app.slug,
@@ -1577,9 +1581,10 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          \n\
          - **PostgreSQL 18** sur Medion :5432, base dédiée `app_{slug}` (rôle\n\
            `app_{slug}` aux droits limités à cette base)\n\
-         - **Connexion runtime** : `DATABASE_URL` est injectée dans l'env du\n\
-           process par `atelier-apps`. Tu peux utiliser sqlx, tokio-postgres, prisma,\n\
-           etc. selon la stack de l'app.\n\
+         - **Connexion runtime** : **gateway-only**. L'app n'a PAS de `DATABASE_URL`\n\
+           ni d'accès SQL direct (pas de sqlx/prisma/tokio-postgres) — toute lecture/\n\
+           écriture passe par la passerelle REST `/api/dv/{slug}` avec\n\
+           `HR_DV_BASE_URL` + `HR_DV_TOKEN` (injectés dans l'env).\n\
          \n\
          Deux surfaces officielles pour parler à la base, selon le contexte :\n\
          **REST OData-style** (app runtime) et **MCP `dv_*`** (agent / debug).\n\

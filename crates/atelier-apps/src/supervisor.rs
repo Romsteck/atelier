@@ -722,10 +722,14 @@ async fn systemd_run_app(app: &Application) -> Result<()> {
     cmd.arg("--no-block");
     cmd.arg(format!("--working-directory={}", src_dir.display()));
     cmd.arg(format!("--description=Atelier app {}", app.slug));
+    // PORT first (belt-and-suspenders: the rendered `.env` also carries it as a
+    // platform var, so the later --setenv from the file wins with the same value
+    // even if the file write ever lagged). The `.env` is the SINGLE delivery
+    // channel: it is a deterministic projection of (platform-computed + user)
+    // env written by atelier-api's reconciler — NOT a hand-maintained blob.
+    // The legacy `app.env_vars` map is no longer injected (it has been folded
+    // into the structured `env` model, which renders into this same file).
     cmd.arg(format!("--setenv=PORT={}", app.port));
-    for (k, v) in &app.env_vars {
-        cmd.arg(format!("--setenv={k}={v}"));
-    }
     if env_file.exists() {
         match load_env_file(&env_file).await {
             Ok(vars) => {

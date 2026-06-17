@@ -108,6 +108,72 @@ pub fn valid_slug(slug: &str) -> bool {
         && !slug.ends_with('-')
 }
 
+/// Validate an environment-variable name: must start with a letter or `_`
+/// and contain only letters, digits and `_` (POSIX `name` + the common
+/// `VITE_*` / `NEXT_PUBLIC_*` conventions). Rejects empty, spaces, `=`, etc.
+pub fn valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Where a variable must be injected. Runtime → the supervised process env
+/// (works identically for Node `process.env` and Rust `std::env`). Build →
+/// exported before the build command (needed for framework-baked public vars
+/// like `VITE_*` / `NEXT_PUBLIC_*`). Both → exported at build AND runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EnvScope {
+    #[default]
+    Runtime,
+    Build,
+    Both,
+}
+
+impl EnvScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Build => "build",
+            Self::Both => "both",
+        }
+    }
+    /// Injected into the running process env.
+    pub fn in_runtime(&self) -> bool {
+        matches!(self, Self::Runtime | Self::Both)
+    }
+    /// Exported into the build command env.
+    pub fn in_build(&self) -> bool {
+        matches!(self, Self::Build | Self::Both)
+    }
+}
+
+/// A single user-owned environment variable, the canonical store for app
+/// config. Platform-managed vars (`PORT`, `HR_DV_*`, `ATELIER_*`) are NOT
+/// stored here — they are recomputed at render time (see
+/// `atelier-api`'s env reconciliation).
+///
+/// `value` is the literal value (config or secret). The `secret` flag drives
+/// UI masking + per-row reveal only — the value is stored as-is in JSONB, the
+/// same plaintext exposure as `dataverse-secrets.json`. The supervisor never
+/// reads this field; it consumes the rendered `.env` written by the reconciler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVar {
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub secret: bool,
+    #[serde(default)]
+    pub scope: EnvScope,
+}
+
 /// An application managed by Atelier, running directly on the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
@@ -131,8 +197,17 @@ pub struct Application {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_artefact: Option<String>,
     pub health_path: String,
+    /// Legacy flat user-env map. Superseded by `env` (structured, ownership-
+    /// aware, with secret/scope metadata). Kept `#[serde(default)]` so old
+    /// rows keep deserialising; the env reconciler folds any residual entries
+    /// into `env` and clears this on first write. No longer injected by the
+    /// supervisor.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+    /// Canonical user-owned environment variables (config + secrets). Platform
+    /// vars are recomputed, never stored here. See [`EnvVar`].
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
     #[serde(default)]
     pub state: AppState,
     /// Which managed-DB engine this app uses. Existing apps default to
@@ -172,6 +247,7 @@ impl Application {
             build_artefact: None,
             health_path,
             env_vars: BTreeMap::new(),
+            env: Vec::new(),
             state: AppState::Stopped,
             db_backend: DbBackend::default(),
             flow_callback_url: None,
@@ -203,5 +279,27 @@ impl Application {
     /// `.claude/rules/apps-workspace-layout.md` du repo Atelier.
     pub fn src_dir(&self) -> PathBuf {
         self.app_dir().join("src")
+    }
+
+    /// Find a user env var by key.
+    pub fn env_get(&self, key: &str) -> Option<&EnvVar> {
+        self.env.iter().find(|e| e.key == key)
+    }
+
+    /// Insert or replace a user env var (matched by key), keeping the list
+    /// sorted by key for deterministic rendering/serialisation.
+    pub fn env_set(&mut self, var: EnvVar) {
+        match self.env.iter_mut().find(|e| e.key == var.key) {
+            Some(existing) => *existing = var,
+            None => self.env.push(var),
+        }
+        self.env.sort_by(|a, b| a.key.cmp(&b.key));
+    }
+
+    /// Remove a user env var by key. Returns true if one was removed.
+    pub fn env_remove(&mut self, key: &str) -> bool {
+        let before = self.env.len();
+        self.env.retain(|e| e.key != key);
+        self.env.len() != before
     }
 }

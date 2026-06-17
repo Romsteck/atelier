@@ -169,6 +169,22 @@ async fn main() -> Result<()> {
         "apps_proxy: prefix-preserving (no-strip) slugs"
     );
 
+    // Boot env reconcile sweep. Renders each app's `.env` as a clean projection
+    // of (platform-computed + user) env: injects the dataverse/logging contract,
+    // GCs vestigial vars (HR_FLOW_*, …), imports any residual hand-seeded vars
+    // into the structured model. Replaces the old dead `sync_dv_env_all`.
+    //
+    // Gated DRY-RUN by default (logs the plan, writes nothing) so a migration can
+    // be inspected before it touches the 5 live apps' `.env`. Set
+    // `ATELIER_ENV_RECONCILE_APPLY=1` to actually write. Running apps are already
+    // adopted above and only pick up the new `.env` on their next restart.
+    {
+        let apply = std::env::var("ATELIER_ENV_RECONCILE_APPLY").ok().as_deref() == Some("1");
+        let ctx = atelier_api::mcp::apps_ops::AppsContext::from_api_state(&state);
+        let reports = ctx.reconcile_all_env(!apply).await;
+        info!(apply, apps = reports.len(), "boot env reconcile sweep complete");
+    }
+
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };
     let app = atelier_api::router(state, web_dist_opt);
 

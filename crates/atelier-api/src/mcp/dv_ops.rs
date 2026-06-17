@@ -501,8 +501,10 @@ pub async fn dv_rotate_token(ctx: &AppsContext, slug: String) -> IpcResponse {
         Ok(t) => t,
         Err(e) => return IpcResponse::err(format!("dv_rotate_token: {e}")),
     };
-    if let Err(e) = ctx.sync_dv_env(&slug).await {
-        warn!(slug, error = %e, "rotate_token: env sync failed (token rotated, .env stale)");
+    // Re-render the `.env` so the new platform-tier `HR_DV_TOKEN` lands on disk
+    // for the next restart (the running process keeps the old token until then).
+    if let Err(e) = ctx.reconcile_app_env(&slug, false).await {
+        warn!(slug, error = %e, "rotate_token: env reconcile failed (token rotated, .env stale)");
     }
     IpcResponse::ok_data(json!({"token": token}))
 }

@@ -74,8 +74,15 @@ fi
 # Build.
 if [[ "$BUILD" == "--build" ]]; then
   if [[ -n "$BUILD_CMD" ]]; then
+    # Build-scoped env (VITE_*/NEXT_PUBLIC_*) injected by Atelier (eval-able
+    # `export K='v'` lines; empty for apps without build-scoped vars).
+    BUILD_ENV="$(curl -fsS --max-time 10 "$ATELIER_API/api/apps/$SLUG/build-env" 2>/dev/null || true)"
     echo "→ build: cd $APP_SRC && $BUILD_CMD"
-    if ! run_on_medion "cd '$APP_SRC' && $BUILD_CMD"; then
+    # Multi-line command: cd, then the exports (if any), then the build command —
+    # all in one shell so cwd + exports persist. run_on_medion %q-quotes for SSH.
+    if ! run_on_medion "cd '$APP_SRC'
+${BUILD_ENV}
+${BUILD_CMD}"; then
       echo "error: build_command failed for $SLUG — aborting" >&2
       exit 1
     fi

@@ -196,8 +196,17 @@ export const deleteApp = (slug) => api.delete(`/apps/${slug}`);
 export const controlApp = (slug, action) => api.post(`/apps/${slug}/control`, { action });
 export const getAppStatus = (slug) => api.get(`/apps/${slug}/status`);
 export const getAppLogs = (slug, params) => api.get(`/apps/${slug}/logs`, { params });
-export const getAppEnv = (slug) => api.get(`/apps/${slug}/env`);
-export const updateAppEnv = (slug, env) => api.put(`/apps/${slug}/env`, { env });
+// Env management (structured, ownership-aware). getAppEnv returns the full
+// view (platform + user tiers); secret values are masked unless reveal=true.
+// Per-variable user CRUD via setAppEnvVar / deleteAppEnvVar.
+export const getAppEnv = (slug, reveal = false) =>
+  api.get(`/apps/${slug}/env`, { params: reveal ? { reveal: 1 } : {} });
+export const getAppEnvVar = (slug, key) =>
+  api.get(`/apps/${slug}/env/${encodeURIComponent(key)}`);
+export const setAppEnvVar = (slug, key, body) =>
+  api.put(`/apps/${slug}/env/${encodeURIComponent(key)}`, body);
+export const deleteAppEnvVar = (slug, key) =>
+  api.delete(`/apps/${slug}/env/${encodeURIComponent(key)}`);
 // Apps DB
 export const getAppDbTables = (slug) => api.get(`/apps/${slug}/db/tables`);
 export const getAppDbTable = (slug, table) => api.get(`/apps/${slug}/db/tables/${table}`);

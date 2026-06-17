@@ -9,14 +9,15 @@ import SplitDivider from '../components/SplitDivider';
 import DocsTab from '../components/docs/DocsTab';
 import SurveillanceTab from '../components/SurveillanceTab';
 import AgentWorkspace from '../components/AgentWorkspace';
+import EnvTab from '../components/EnvTab';
 import {
   Code2, BookOpen, Database, ScrollText, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X,
-  Eye, EyeOff, ShieldAlert, Monitor, Columns2, Bot,
+  ShieldAlert, Monitor, Columns2, Bot, KeyRound,
 } from 'lucide-react';
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
-  getApp, getAppStatus, getAppLogs, getAppEnv, updateAppEnv, getLogs,
+  getApp, getAppStatus, getAppLogs, getLogs,
 } from '../api/client';
 import { Link } from 'react-router-dom';
 
@@ -34,6 +35,7 @@ const TABS = [
   { id: 'db', label: 'DB', icon: Database, requiresDb: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'docs', label: 'Docs', icon: BookOpen },
+  { id: 'env', label: 'Variables', icon: KeyRound },
   { id: 'surveillance', label: 'Surveillance', icon: ShieldAlert },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -149,70 +151,6 @@ function LogsTab({ slug }) {
   );
 }
 
-// ── Env Section (intégrée dans Settings) ──
-
-// Section autonome (état + fetch propres) rendue à l'intérieur de SettingsTab :
-// pas de wrapper plein-écran/scroll (le parent fournit le conteneur scrollable).
-function EnvSection({ slug }) {
-  const [envText, setEnvText] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [showValues, setShowValues] = useState(false);
-
-  useEffect(() => {
-    setLoading(true);
-    getAppEnv(slug).then(res => {
-      const d = res.data?.data || res.data;
-      if (typeof d === 'object' && !Array.isArray(d)) {
-        setEnvText(Object.entries(d).map(([k, v]) => `${k}=${v}`).join('\n'));
-      } else {
-        setEnvText('');
-      }
-    }).catch(() => {}).finally(() => setLoading(false));
-  }, [slug]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const vars = {};
-      envText.split('\n').filter(l => l.trim() && !l.startsWith('#')).forEach(l => {
-        const [k, ...rest] = l.split('=');
-        if (k) vars[k.trim()] = rest.join('=').trim();
-      });
-      await updateAppEnv(slug, vars);
-    } catch {}
-    setSaving(false);
-  };
-
-  return (
-    <div className="pt-6 border-t border-gray-700 space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-gray-50">Variables d'environnement</h3>
-        <button onClick={() => setShowValues(!showValues)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-50">
-          {showValues ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-          {showValues ? 'Masquer' : 'Afficher'}
-        </button>
-      </div>
-      {loading ? (
-        <div className="flex items-center justify-center py-8 text-gray-500"><Loader2 className="w-5 h-5 animate-spin" /></div>
-      ) : (
-        <>
-          <textarea
-            value={showValues ? envText : envText.split('\n').map(l => { const [k] = l.split('='); return k ? `${k}=***` : l; }).join('\n')}
-            onChange={e => { if (showValues) setEnvText(e.target.value); }}
-            readOnly={!showValues}
-            className="w-full h-64 p-3 rounded-sm text-sm font-mono bg-gray-900 text-gray-50 border border-gray-700 outline-hidden resize-y"
-            placeholder="KEY=value"
-          />
-          <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
 // ── Settings Tab ──
 
 function SettingsTab({ app, slug, onUpdate, onDelete }) {
@@ -264,7 +202,7 @@ function SettingsTab({ app, slug, onUpdate, onDelete }) {
       <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
         {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
       </button>
-      <EnvSection slug={slug} />
+      <p className="text-xs text-gray-500">Les variables d'environnement sont désormais dans l'onglet <span className="text-gray-300">Variables</span>.</p>
       <div className="pt-6 border-t border-gray-700">
         <button onClick={onDelete} className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-sm flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Supprimer l'application</button>
       </div>
@@ -630,6 +568,7 @@ export default function Studio() {
       case 'db':           return currentApp?.has_db ? <DbExplorer appSlug={selectedSlug} embedded /> : null;
       case 'logs':         return <LogsTab slug={selectedSlug} />;
       case 'docs':         return <DocsTab slug={selectedSlug} />;
+      case 'env':          return <EnvTab slug={selectedSlug} onRestart={() => handleControl(selectedSlug, 'restart')} />;
       case 'surveillance': return <SurveillanceTab slug={selectedSlug} initialKind={searchParams.get('kind')} onResolve={openAgentWithPrompt} />;
       case 'settings':     return <SettingsTab app={currentApp} slug={selectedSlug} onUpdate={handleUpdate} onDelete={handleDelete} />;
       default:             return null;

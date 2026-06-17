@@ -33,7 +33,18 @@ HR_DV_TOKEN=<base64url(32 octets aléatoires)>   # Authorization: Bearer
 HR_APP_UUID=<identité stable par app>
 ```
 
-`sync_dv_env` n'injecte plus `DATABASE_URL` ; le DSN est purgé des `.env` runtime — le process applicatif n'a donc **plus aucun moyen** de se connecter directement à Postgres.
+Aucun `DATABASE_URL` n'est injecté ; le process applicatif n'a **plus aucun moyen** de se connecter directement à Postgres. `HR_DV_*` est désormais un **tier plateforme calculé** du modèle env unifié (cf. ci-dessous), rendu dans le `.env` à chaque reconcile.
+
+## Gestion des variables d'environnement (modèle unifié, 2026-06-16)
+
+> Avant : deux stores non réconciliés (map `env_vars` en Postgres + fichier `.env` à la main), un Save UI qui ne marchait pas (route `PUT` inexistante), des vars mortes (`HR_FLOW_*`) jamais nettoyées. Refondu en **un seul modèle à 3 tiers** ([crates/atelier-api/src/mcp/env_ops.rs](crates/atelier-api/src/mcp/env_ops.rs)).
+
+- **Tiers** : `platform` (calculé, jamais stocké : `PORT`, `HR_DV_BASE_URL`/`HR_DV_TOKEN`/`HR_APP_UUID` si `has_db`, `ATELIER_INGEST_URL`/`ATELIER_LOGS_TOKEN`) · `user config` · `user secret`. Seul le tier user est stocké (champ structuré `Application.env: Vec<EnvVar>` en JSONB ; l'ancienne map `env_vars` est legacy/vide).
+- **Secrets** : le flag `secret` pilote le **masquage UI** (vue masquée par défaut, révélation par ligne via `GET .../env/{key}`) ; la valeur est stockée **en clair** dans le JSONB (même exposition que `dataverse-secrets.json`, et que le `.env` rendu + l'unité systemd, root-only). Pas de chiffrement au repos (choix assumé 2026-06-16 : le gain ne couvrait que le dump PG alors que `.env`/state exposent déjà du clair dans le même backup).
+- **`.env` = artefact généré** (`/var/lib/atelier/apps/{slug}/.env`), **NE PAS éditer à la main**. `reconcile_app_env` est le **seul writer** : rend une projection déterministe (platform calculé + user déchiffré), GC les vars mortes (denylist `HR_FLOW_*`/`HR_FLOWD_*`/`FLOW_RUNS_DIR`), importe une fois les vars résiduelles hand-seeded. Appelé sur **create / boot-sweep / changement d'env / rotation de token**. Le supervisor lit ce `.env` comme **canal de livraison unique** (identique Node `process.env` et Rust `std::env`).
+- **Scope `runtime|build|both`** : `build`/`both` sont aussi exportées avant la commande de build (canal pour `VITE_*`/`NEXT_PUBLIC_*` ; `GET /api/apps/{slug}/build-env` consommé par `build.sh`/`deploy-app.sh`). Runtime-only par défaut → compat des 2 stacks.
+- **API** : `GET /api/apps/{slug}/env` (vue structurée, secrets masqués sauf `?reveal=1`) · `GET .../env/{key}` (révèle 1 valeur) · `PUT/DELETE .../env/{key}` (CRUD user, rejette les clés plateforme) · `POST .../reconcile-env` (dry-run par défaut). UI : onglet **Variables** du Studio (tableau ligne-par-ligne, masquage par ligne, badges owner/scope). MCP `app.update env_vars` converge sur le même modèle.
+- **Boot-sweep** : gated par `ATELIER_ENV_RECONCILE_APPLY=1` (sinon dry-run/log only). Idempotent une fois migré.
 
 > ⚠️ Les rôles PG `app_{slug}` **gardent `LOGIN`** : la passerelle (`atelier-dataverse`) se connecte à la base `app_{slug}` **en s'authentifiant comme ce rôle** (isolation par app via les credentials de `dataverse-secrets.json`), pas comme `dataverse_admin`. Les passer en `NOLOGIN` casse la passerelle (vérifié 2026-05-30). Ne PAS révoquer `LOGIN` sans re-câbler la passerelle sur un rôle partagé (perdrait l'isolation).
 
@@ -120,10 +131,11 @@ ATELIER_APPS_RUNTIME_ROOT=/var/lib/atelier/apps
 ATELIER_APPS_SRC_ROOT=/var/lib/atelier/apps
 ATELIER_GIT_REPOS_DIR=/var/lib/atelier/git
 ATELIER_BUILD_AS_USER=...                # user de build des apps
-ATELIER_LOGS_TOKEN=...                    # auth ingestion logs (shipper)
+ATELIER_LOGS_TOKEN=...                    # auth ingestion logs (shipper) + injecté aux apps (tier platform)
 MCP_TOKEN=...                             # auth MCP (jamais loggé)
 CODEX_HOME=/root/.codex                   # config Codex (surveillance)
 ATELIER_CODEX_ARGS=exec --json ...        # args Codex CLI (--json OBLIGATOIRE pour streamer)
+ATELIER_ENV_RECONCILE_APPLY=1            # boot-sweep écrit les .env (sinon dry-run/log only)
 
 # Surchargeables (défauts en code, NON listées dans .env aujourd'hui) :
 # ATELIER_PRESERVE_PREFIX_SLUGS=www        slugs no-strip du path-proxy (défaut www)
