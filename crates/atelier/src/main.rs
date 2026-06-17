@@ -14,6 +14,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod source_watcher;
+
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:4100";
 const DEFAULT_IPC_SOCK: &str = "/run/atelier.sock";
 const DEFAULT_DOCS_DIR: &str = "/var/lib/atelier/docs";
@@ -135,6 +137,11 @@ async fn main() -> Result<()> {
     if let Err(err) = supervisor.start_all_running().await {
         warn!(?err, "supervisor.start_all_running failed");
     }
+
+    // Watcher inotify des sources d'apps → event WS `source:changed` : l'explorateur
+    // du Studio se rafraîchit tout seul (remplace le bouton refresh manuel). Partage
+    // le même `Arc<EventBus>` que celui passé à `ApiState::new` ci-dessous.
+    source_watcher::spawn_source_watcher(events.clone(), apps_src_root.clone());
 
     // Surveillance IA (Codex code-review + suggestions + sécurité). Migrate
     // schema, spawn git_watcher loop. Runs manuels uniquement (pas de

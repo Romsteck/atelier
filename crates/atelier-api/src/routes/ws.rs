@@ -33,6 +33,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut logs_pg_rx = state.logs.subscribe();
     let mut app_state_rx = state.events.app_state.subscribe();
     let mut app_build_rx = state.events.app_build.subscribe();
+    let mut source_changed_rx = state.events.source_changed.subscribe();
     let mut surveillance_rx = state.surveillance.subscribe();
     let mut transcript_rx = state.surveillance.subscribe_transcript();
     let mut backup_rx = state.backup.subscribe();
@@ -125,6 +126,21 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "app:build", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = source_changed_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "source:changed", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "source:changed", dropped = n, "ws subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

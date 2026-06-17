@@ -31,6 +31,9 @@ pub struct EventBus {
     pub app_state: broadcast::Sender<AppStateEvent>,
     /// App build progress events (supervisor build pipeline → websocket)
     pub app_build: broadcast::Sender<AppBuildEvent>,
+    /// Source file change events (filesystem watcher → websocket for the Studio
+    /// file-explorer auto-refresh). Coarse per-slug : le front relit l'arbre.
+    pub source_changed: broadcast::Sender<SourceChangedEvent>,
     /// Per-app todos change events (todos manager → websocket for Studio right-panel)
     pub app_todos: broadcast::Sender<AppTodosEvent>,
     /// Agent SDK run events (Node runner NDJSON → websocket for live chat stream).
@@ -55,6 +58,7 @@ impl EventBus {
             log_entry: broadcast::channel(512).0,
             app_state: broadcast::channel(64).0,
             app_build: broadcast::channel(128).0,
+            source_changed: broadcast::channel(128).0,
             app_todos: broadcast::channel(64).0,
             agent: broadcast::channel(2048).0,
         }
@@ -297,6 +301,14 @@ pub struct AppBuildEvent {
     pub duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Émis (debouncé) quand un fichier sous `{slug}/src` change — watcher inotify →
+/// websocket pour l'auto-refresh de l'explorateur du Studio. Coarse par slug :
+/// le front relit l'arbre, on ne transporte pas le chemin précis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceChangedEvent {
+    pub slug: String,
 }
 
 /// Per-app todos change event (todos manager → websocket for Studio panel).
