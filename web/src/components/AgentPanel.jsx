@@ -327,17 +327,34 @@ export default function AgentPanel({ panelKey }) {
 
   const [input, setInput] = useState('');
   const [modelId, setModelId] = useState(() => localStorage.getItem('agent:model') || 'opus-4-8');
-  const [effort, setEffort] = useState(() => localStorage.getItem('agent:effort') || 'max');
+  // Effort de CE panneau : l'effort imposé au lancement (ex. 'max' depuis « Résoudre »)
+  // prime sur la préférence stockée. Ne persiste PAS un effort synchronisé depuis la
+  // conversation (sinon « Résoudre » polluerait la préférence globale) — seul un clic
+  // délibéré sur le sélecteur l'enregistre (cf. chooseEffort).
+  const [effort, setEffort] = useState(() => convo?.effort || localStorage.getItem('agent:effort') || 'max');
   const [mode, setMode] = useState(() => localStorage.getItem('agent:mode') || 'plan');
   const [sdk, setSdk] = useState(null);
   const [updatingSdk, setUpdatingSdk] = useState(false);
   const [sdkMsg, setSdkMsg] = useState(null); // { ok: bool, text } — retour de la MAJ SDK
   const bodyRef = useRef(null);
 
-  // Choix mémorisés → défauts des prochaines conversations.
+  // Choix mémorisés → défauts des prochaines conversations. (L'effort n'est PAS persisté
+  // ici : seul un clic délibéré l'enregistre, cf. chooseEffort — pour ne pas que l'effort
+  // imposé d'une conversation « Résoudre » écrase la préférence globale.)
   useEffect(() => { localStorage.setItem('agent:model', modelId); }, [modelId]);
-  useEffect(() => { localStorage.setItem('agent:effort', effort); }, [effort]);
   useEffect(() => { localStorage.setItem('agent:mode', mode); }, [mode]);
+
+  // Reflète l'effort imposé au lancement (ex. 'max' depuis « Résoudre ») dès qu'il est connu.
+  useEffect(() => {
+    if (convo?.effort) setEffort(convo.effort);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convo?.effort]);
+
+  // Changement délibéré d'effort par l'utilisateur → applique + mémorise comme préférence.
+  const chooseEffort = useCallback((e) => {
+    setEffort(e);
+    localStorage.setItem('agent:effort', e);
+  }, []);
   useEffect(() => { getSdkVersion().then((r) => setSdk(r.data)).catch(() => {}); }, []);
 
   const items = useMemo(() => convo?.items || [], [convo?.items]);
@@ -386,7 +403,7 @@ export default function AgentPanel({ panelKey }) {
   const onChangeModel = (id) => {
     setModelId(id);
     const m = MODELS.find((x) => x.id === id);
-    if (m && m.efforts.length && !m.efforts.includes(effort)) setEffort(m.efforts[m.efforts.length - 1]);
+    if (m && m.efforts.length && !m.efforts.includes(effort)) chooseEffort(m.efforts[m.efforts.length - 1]);
     if (live) changeModel(panelKey, m?.model || null); // session vivante → setModel à chaud
   };
   const onChangeMode = (id) => {
@@ -587,7 +604,7 @@ export default function AgentPanel({ panelKey }) {
             title={live ? 'Effort figé au démarrage de la session — ouvre une nouvelle conversation pour le changer' : undefined}>
             <span className="text-[11px] text-gray-600 mr-1">Effort</span>
             {selModel.efforts.map((e) => (
-              <button key={e} disabled={live} onClick={() => setEffort(e)}
+              <button key={e} disabled={live} onClick={() => chooseEffort(e)}
                 className={`px-1.5 py-0.5 rounded-sm text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${effort === e ? 'bg-blue-500/20 text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
                 {e}
               </button>

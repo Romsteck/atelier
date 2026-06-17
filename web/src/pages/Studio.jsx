@@ -472,9 +472,13 @@ export default function Studio() {
   // de la surveillance). L'AgentWorkspace occupe le "code slot" → en mode tabs on bascule
   // sur l'onglet Code pour le rendre visible. Le `nonce` permet de rejouer même si l'agent
   // est déjà ouvert.
-  function openAgentWithPrompt(prompt) {
+  function openAgentWithPrompt(arg) {
+    // arg = prompt brut (string) OU { prompt, findingId, effort } depuis « Résoudre ».
+    const prompt = typeof arg === 'string' ? arg : arg?.prompt;
     if (!prompt) return;
-    setAgentLaunch({ prompt, mode: 'plan', nonce: ++nonceRef.current });
+    const findingId = typeof arg === 'string' ? undefined : arg?.findingId;
+    const effort = typeof arg === 'string' ? undefined : arg?.effort;
+    setAgentLaunch({ prompt, findingId, effort, mode: 'plan', nonce: ++nonceRef.current });
     if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
   }
 

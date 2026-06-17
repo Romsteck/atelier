@@ -79,7 +79,7 @@ impl MemoryStore {
         rows.iter().map(row_to_memory).collect()
     }
 
-    /// Bump `last_used_at` on entries returned to Codex. Pure LRU bookkeeping.
+    /// Bump `last_used_at` on entries returned to the scan-agent. Pure LRU bookkeeping.
     pub async fn touch(&self, ids: &[i64]) -> anyhow::Result<()> {
         if ids.is_empty() {
             return Ok(());

@@ -7,12 +7,12 @@ use tokio::sync::{Semaphore, broadcast, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::codex::{CodexConfig, CodexRunner};
 use crate::findings::FindingsStore;
 use crate::git_watcher::GitWatcher;
 use crate::gitutil;
 use crate::memory::MemoryStore;
 use crate::migration::{self, DEFAULT_DB_NAME};
+use crate::runner::{ScanDriverConfig, ScanRunner};
 use crate::runs::RunsStore;
 use crate::scandef::{AppScanStore, Gate, ScanDef, is_valid_kind, sha_key, watermark_key};
 use crate::sqlx::{Pool, Postgres};
@@ -37,13 +37,13 @@ struct Inner {
     memory: Option<MemoryStore>,
     /// Per-app scan definitions (`app_scan` table). `None` in noop mode.
     app_scan: Option<AppScanStore>,
-    runner: CodexRunner,
+    runner: ScanRunner,
     apps_src_root: PathBuf,
     stacks: HashMap<String, String>,
     sem: Arc<Semaphore>,
     /// Live event bus for WebSocket fan-out (findings/runs changes).
     tx: broadcast::Sender<SurveillanceEvent>,
-    /// Live stream of Codex stdout lines for the in-progress-run console.
+    /// Live stream of scan-agent stdout lines for the in-progress-run console.
     transcript_tx: broadcast::Sender<TranscriptLine>,
     /// Rolling buffer of transcript lines per in-flight run, so a client that
     /// (re)opens the tab mid-run can replay the conversation so far instead of
@@ -63,9 +63,9 @@ pub struct SurveillanceConfig {
     pub seed_apps: Vec<AppMeta>,
     /// Root of app sources: `<root>/<slug>/src/`.
     pub apps_src_root: PathBuf,
-    /// Codex CLI invocation config.
-    pub codex: CodexConfig,
-    /// Max concurrent Codex subprocesses (ratelimit guard).
+    /// AI engine for scans (Claude Agent SDK by default, Codex CLI as rollback).
+    pub driver: ScanDriverConfig,
+    /// Max concurrent scan subprocesses (ratelimit guard).
     pub max_concurrent: usize,
 }
 
@@ -104,7 +104,7 @@ impl SurveillanceService {
                 runs,
                 memory,
                 app_scan,
-                runner: CodexRunner::new(cfg.codex.clone()),
+                runner: cfg.driver.build(),
                 apps_src_root: cfg.apps_src_root.clone(),
                 stacks,
                 sem: Arc::new(Semaphore::new(cfg.max_concurrent.max(1))),
@@ -164,7 +164,7 @@ impl SurveillanceService {
         self.inner.tx.subscribe()
     }
 
-    /// Subscribe to the live Codex stdout stream (in-progress-run console).
+    /// Subscribe to the live scan-agent stdout stream (in-progress-run console).
     pub fn subscribe_transcript(&self) -> broadcast::Receiver<TranscriptLine> {
         self.inner.transcript_tx.subscribe()
     }
@@ -182,7 +182,7 @@ impl SurveillanceService {
     }
 
     /// Request cancellation of an in-flight run. Returns true if the run was
-    /// found running (its Codex subprocess is then killed and the run recorded
+    /// found running (its scan subprocess is then killed and the run recorded
     /// as `cancelled`); false if it already finished or never existed. Removing
     /// the sender + sending fires the oneshot the run's `exec` is awaiting.
     pub fn cancel_run(&self, run_id: Uuid) -> bool {
@@ -272,7 +272,7 @@ impl SurveillanceService {
 
     /// Start a scan run for one of the app's three kinds (`security` /
     /// `code_review` / `business`). Creates the `surveillance_runs` row, spawns a
-    /// detached task that runs the gates + Codex, and returns the run id
+    /// detached task that runs the gates + the scan-agent, and returns the run id
     /// immediately (the work is async). `trigger` is "manual" or "cron".
     ///
     /// `data_watermark` is the freshness signal for a data-gated scan (only the
@@ -312,7 +312,7 @@ impl SurveillanceService {
         data_watermark: Option<String>,
     ) {
         // Register a cancel channel for the whole run lifetime so a stop request
-        // can kill the Codex subprocess. The Sender is held in the registry
+        // can kill the scan subprocess. The Sender is held in the registry
         // until the run ends, so the Receiver only fires on an explicit cancel.
         let (cancel_tx, cancel_rx) = oneshot::channel();
         self.inner
@@ -373,7 +373,7 @@ impl SurveillanceService {
         // Gate 1 — cap: skip when this (app,kind) already has MAX_OPEN_FINDINGS
         // open findings (the UI disables that kind's launch button at the same
         // threshold; this is the server-side backstop). `open_now` is reused below
-        // to budget the prompt so Codex reports only the most important issues.
+        // to budget the prompt so the scan-agent reports only the most important issues.
         let open_now = match findings.count_open(&slug, kind).await {
             Ok(n) => n,
             Err(e) => {
@@ -457,12 +457,10 @@ impl SurveillanceService {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         let mem_entries = memory.get(&slug, None, None).await.unwrap_or_default();
-        let prompt = self
-            .inner
-            .runner
-            .build_prompt(&scan, &stack, diff.as_deref(), &mem_entries, open_now);
+        let prompt =
+            crate::runner::build_prompt(&scan, &stack, diff.as_deref(), &mem_entries, open_now);
 
-        // Acquire concurrency permit + run Codex.
+        // Acquire concurrency permit + run the scan.
         let _permit = self.inner.sem.acquire().await.ok();
         let measure_from = Utc::now();
         // Stream each stdout line to the live console (ephemeral; not persisted)
@@ -499,28 +497,28 @@ impl SurveillanceService {
 
         if exec.cancelled {
             let _ = runs.finish_cancelled(run_id).await;
-            info!(slug = %slug, "codex run cancelled by user");
+            info!(slug = %slug, "scan run cancelled by user");
             return;
         }
         if let Some(err) = exec.spawn_error {
             let _ = runs.finish_failed(run_id, &err).await;
             self.note_failure(&slug, kind, memory).await;
-            warn!(slug = %slug, %err, "codex spawn failed");
+            warn!(slug = %slug, %err, "scan spawn failed");
             return;
         }
         if !exec.exit_ok {
             let msg = if exec.stderr.is_empty() {
-                "codex exited non-zero".to_string()
+                "scan agent exited non-zero".to_string()
             } else {
                 exec.stderr.clone()
             };
             let _ = runs.finish_failed(run_id, &msg).await;
             self.note_failure(&slug, kind, memory).await;
-            warn!(slug = %slug, "codex run failed");
+            warn!(slug = %slug, "scan run failed");
             return;
         }
 
-        // Success — measure how many findings Codex touched during the run.
+        // Success — measure how many findings the scan touched during the run.
         let delta = findings
             .count_touched_since(&slug, kind, measure_from)
             .await
@@ -575,7 +573,7 @@ impl SurveillanceService {
             .delete(&slug, "last_run", &format!("{kind}:consecutive_failures"))
             .await;
 
-        info!(slug = %slug, findings = delta, empty, "codex run success");
+        info!(slug = %slug, findings = delta, empty, "scan run success");
     }
 
     /// Track consecutive failures. After 3 in a row we just log loudly — a
@@ -597,7 +595,7 @@ impl SurveillanceService {
             warn!(
                 slug = %slug,
                 count = next,
-                "surveillance: 3+ consecutive failures — check codex auth/install"
+                "surveillance: 3+ consecutive failures — check scan agent auth/install"
             );
         }
     }

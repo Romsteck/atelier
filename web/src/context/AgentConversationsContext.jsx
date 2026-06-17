@@ -2,6 +2,7 @@ import { createContext, useContext, useReducer, useRef, useEffect, useState, use
 import useWebSocket from '../hooks/useWebSocket';
 import { appendEvent } from '../lib/agentEvents';
 import { buildSettings } from '../lib/agentModels';
+import { setOpenResolveFindings } from '../lib/resolveConvos';
 import {
   startAgentQuery,
   resumeAgentQuery,
@@ -78,6 +79,8 @@ const emptyConvo = (key, sid) => ({
   activeModel: null,
   activeMode: null, // mode courant ('plan'|'bypass') reflété par le backend (approbation/set_mode)
   autoSend: null, // {prompt, settings} à envoyer une fois le panneau commit (lancement depuis surveillance)
+  findingId: null, // si lancée par « Résoudre » : id du finding (gate le bouton tant que l'onglet est ouvert)
+  effort: null, // effort imposé au lancement (ex. 'max' depuis « Résoudre ») — reflété par le sélecteur du panneau
 });
 
 function reducer(state, a) {
@@ -93,6 +96,8 @@ function reducer(state, a) {
           key = t.sid;
           c = emptyConvo(t.sid, t.sid);
           c.loading = true;
+          if (t.fid != null) c.findingId = t.fid; // restaure le lien finding↔conversation
+          if (t.eff) c.effort = t.eff; // restaure l'effort imposé (ex. 'max' depuis « Résoudre »)
         } else if (t.t === 'f' && t.path) {
           key = `file:${t.path}`;
           c = { key, type: 'file', path: t.path, name: t.name };
@@ -113,6 +118,8 @@ function reducer(state, a) {
     case 'NEW_PANEL': {
       const c = emptyConvo(a.key, null);
       if (a.autoSend) c.autoSend = a.autoSend;
+      if (a.findingId != null) c.findingId = a.findingId;
+      if (a.effort) c.effort = a.effort;
       return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c } };
     }
     case 'OPEN_PANEL': {
@@ -322,13 +329,22 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
         if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
         if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
-        return c.sid ? { t: 'c', sid: c.sid } : null;
+        return c.sid ? { t: 'c', sid: c.sid, ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
       })
       .filter(Boolean),
   );
   useEffect(() => {
     localStorage.setItem(openTabsKey(slug), tabsStr);
   }, [tabsStr, slug]);
+
+  // Publie l'ensemble des findings ayant une conversation de résolution OUVERTE, pour que
+  // la surveillance (hors de cet arbre) désactive leur bouton « Résoudre ». Recalculé à
+  // chaque changement d'onglets ; pas de reset au démontage → en mode onglets, l'état
+  // survit pendant qu'on regarde la surveillance (l'AgentWorkspace est démonté).
+  useEffect(() => {
+    const ids = state.order.map((k) => state.convos[k]?.findingId).filter((v) => v != null);
+    setOpenResolveFindings(ids);
+  }, [state.order, state.convos]);
 
   const refreshAll = useCallback(() => {
     listConversations(slug)
@@ -436,10 +452,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     launchNonce.current = launch.nonce;
     const settings = buildSettings({
       modelId: localStorage.getItem('agent:model') || 'opus-4-8',
-      effort: localStorage.getItem('agent:effort') || 'max',
+      // launch.effort (ex. 'max' depuis « Résoudre ») prime sur la préférence agent stockée.
+      effort: launch.effort || localStorage.getItem('agent:effort') || 'max',
       mode: launch.mode || 'plan',
     });
-    dispatch({ type: 'NEW_PANEL', key: newKey(), autoSend: { prompt: launch.prompt, settings } });
+    dispatch({ type: 'NEW_PANEL', key: newKey(), autoSend: { prompt: launch.prompt, settings }, findingId: launch.findingId, effort: settings.effort });
     onLaunchConsumed?.();
   }, [launch, onLaunchConsumed]);
 

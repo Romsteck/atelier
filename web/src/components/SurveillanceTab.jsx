@@ -13,6 +13,7 @@ import {
 } from '../api/client';
 import MarkdownView from './docs/MarkdownView';
 import useWebSocket from '../hooks/useWebSocket';
+import { useOpenResolveFindings } from '../lib/resolveConvos';
 
 // Each app has THREE scans, discriminated by `kind`:
 // - security / code_review: fixed platform scans (label/categories are constant).
@@ -78,7 +79,7 @@ function timeSince(iso) {
 
 // An issue row: title + présentation (summary) only. Clicking opens the side
 // drawer with the full resolution-plan document (the annex).
-function FindingCard({ finding, active, onSelect, onResolve }) {
+function FindingCard({ finding, active, onSelect, onResolve, resolving }) {
   const sev = sevMeta(finding.severity);
   return (
     <div
@@ -103,7 +104,18 @@ function FindingCard({ finding, active, onSelect, onResolve }) {
         </div>
         {finding.status === 'open' && (
           <div className="flex gap-1 shrink-0">
-            <button onClick={(e) => { e.stopPropagation(); onResolve(finding); }} title="Confier ce finding à l'agent (nouvelle conversation)" className="px-2 py-1 text-xs text-blue-300 hover:text-blue-200 hover:bg-blue-900/30 border border-blue-500/30 rounded-sm flex items-center gap-1"><Wrench className="w-3 h-3" /> Résoudre</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); if (!resolving) onResolve(finding); }}
+              disabled={resolving}
+              title={resolving ? 'Conversation de résolution déjà ouverte — ferme-la pour relancer' : "Confier ce finding à l'agent (nouvelle conversation)"}
+              className={`px-2 py-1 text-xs border rounded-sm flex items-center gap-1 ${
+                resolving
+                  ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
+                  : 'text-blue-300 hover:text-blue-200 hover:bg-blue-900/30 border-blue-500/30'
+              }`}
+            >
+              <Wrench className="w-3 h-3" /> {resolving ? 'Conversation ouverte' : 'Résoudre'}
+            </button>
           </div>
         )}
       </div>
@@ -112,7 +124,7 @@ function FindingCard({ finding, active, onSelect, onResolve }) {
 }
 
 // Side drawer: the resolution-plan document (annex) for the selected issue.
-function AnnexDrawer({ finding, onClose, onResolve }) {
+function AnnexDrawer({ finding, onClose, onResolve, resolving }) {
   const sev = sevMeta(finding.severity);
   return (
     <div className="w-[28rem] shrink-0 border-l border-gray-700 bg-gray-950/60 flex flex-col min-w-0">
@@ -145,7 +157,18 @@ function AnnexDrawer({ finding, onClose, onResolve }) {
       </div>
       {finding.status === 'open' && (
         <div className="px-3 py-2 border-t border-gray-700 flex gap-2">
-          <button onClick={() => onResolve(finding)} className="flex-1 px-2 py-1 text-xs text-blue-300 hover:text-blue-200 border border-blue-500/30 hover:bg-blue-900/30 rounded-sm flex items-center justify-center gap-1"><Wrench className="w-3 h-3" /> Résoudre avec l'agent</button>
+          <button
+            onClick={() => { if (!resolving) onResolve(finding); }}
+            disabled={resolving}
+            title={resolving ? 'Conversation de résolution déjà ouverte — ferme-la pour relancer' : undefined}
+            className={`flex-1 px-2 py-1 text-xs border rounded-sm flex items-center justify-center gap-1 ${
+              resolving
+                ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
+                : 'text-blue-300 hover:text-blue-200 border-blue-500/30 hover:bg-blue-900/30'
+            }`}
+          >
+            <Wrench className="w-3 h-3" /> {resolving ? 'Conversation ouverte' : "Résoudre avec l'agent"}
+          </button>
         </div>
       )}
     </div>
@@ -178,11 +201,52 @@ function mergeLines(prev, incoming) {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq).slice(-2000);
 }
 
-// Render one Codex JSONL event into a readable {icon, text, tone} entry, or
-// null to skip pure-noise events. Falls back to the raw line if not JSON.
-function formatCodexEvent(raw) {
+// Readable one-liner for a scan-agent tool call (Claude `tool_use` event).
+function scanToolLabel(ev) {
+  const name = ev.name || 'outil';
+  const inp = ev.input || {};
+  const bare = name.startsWith('mcp__') ? name.split('__').slice(2).join('__') : name;
+  switch (bare) {
+    case 'findings_upsert': return `finding: [${inp.severity || '?'}] ${inp.title || ''}`;
+    case 'findings_dismiss': return `findings_dismiss #${inp.id ?? ''}`;
+    case 'findings_resolve': return `findings_resolve #${inp.id ?? ''}`;
+    case 'pm_query': return 'pm_query';
+    default: break;
+  }
+  if (name === 'Read') return `Read ${inp.file_path || ''}`;
+  if (name === 'Grep') return `Grep ${inp.pattern || ''}`;
+  if (name === 'Glob') return `Glob ${inp.pattern || ''}`;
+  return bare;
+}
+
+// Render one scan-agent NDJSON event into a readable {icon, text, tone} entry,
+// or null to skip pure-noise events. Falls back to the raw line if not JSON.
+// Handles the Claude Agent SDK vocabulary (`t` field, the current driver) and
+// keeps the legacy Codex JSONL vocabulary (`type` field) so a Codex run still in
+// flight during a deploy keeps rendering. Drop the Codex branch in the cleanup release.
+function formatScanEvent(raw) {
   let ev;
   try { ev = JSON.parse(raw); } catch { return raw.trim() ? { icon: '', text: raw, tone: 'raw' } : null; }
+
+  // Claude Agent SDK (scan.js) — current driver.
+  if (ev.t) {
+    switch (ev.t) {
+      case 'system': return { icon: '▸', text: `Session de scan démarrée${ev.model ? ` (${ev.model})` : ''}`, tone: 'meta' };
+      case 'assistant': return ev.text?.trim() ? { icon: '🗨', text: ev.text, tone: 'msg' } : null;
+      case 'thinking': return ev.text?.trim() ? { icon: '💭', text: ev.text, tone: 'dim' } : null;
+      case 'tool_use': return { icon: '🔧', text: scanToolLabel(ev), tone: 'tool' };
+      // Successful tool results are implied by the next message; surface errors only.
+      case 'tool_result': return ev.is_error ? { icon: '⚠', text: (ev.text || '').slice(0, 200), tone: 'err' } : null;
+      case 'result': {
+        const u = ev.usage || {};
+        return { icon: '✓', text: `Scan terminé — ${u.input_tokens ?? '?'} in / ${u.output_tokens ?? '?'} out tokens`, tone: 'meta' };
+      }
+      case 'error': return { icon: '⚠', text: ev.message || 'erreur', tone: 'err' };
+      default: return null; // done, etc.
+    }
+  }
+
+  // Legacy Codex JSONL (`type` field) — transition fallback.
   const t = ev.type;
   if (t === 'thread.started') return { icon: '▸', text: 'Session Codex démarrée', tone: 'meta' };
   if (t === 'turn.started' || t === 'item.started') return null;
@@ -213,12 +277,12 @@ const TONE_CLS = {
   cmd: 'text-sky-300', tool: 'text-fuchsia-300', err: 'text-red-300', raw: 'text-gray-400',
 };
 
-// Live console of the Codex run in progress. Lines stream in over WebSocket;
+// Live console of the scan run in progress. Lines stream in over WebSocket;
 // the panel auto-scrolls and disappears once the run settles.
 function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
   const bodyRef = useRef(null);
   const entries = useMemo(
-    () => lines.map((l) => formatCodexEvent(l.line)).filter((e) => e && (e.text?.trim() || e.tone === 'meta')),
+    () => lines.map((l) => formatScanEvent(l.line)).filter((e) => e && (e.text?.trim() || e.tone === 'meta')),
     [lines],
   );
   useEffect(() => {
@@ -245,7 +309,7 @@ function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
       </div>
       <div ref={bodyRef} className="flex-1 overflow-y-auto p-2 space-y-1.5">
         {entries.length === 0 ? (
-          <div className="text-xs text-gray-600 italic">En attente de la sortie de Codex…</div>
+          <div className="text-xs text-gray-600 italic">En attente de la sortie du scan…</div>
         ) : (
           entries.map((e, i) => (
             <div key={i} className="flex gap-1.5 text-[11px] leading-relaxed font-mono">
@@ -300,12 +364,17 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
   const [selected, setSelected] = useState(null); // finding shown in the annex drawer
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false); // launch/stop request in flight
-  const [transcript, setTranscript] = useState([]); // live Codex output (ephemeral)
+  const [transcript, setTranscript] = useState([]); // live scan-agent output (ephemeral)
   const [err, setErr] = useState(null);
   const [statusFilter, setStatusFilter] = useState('open');
   // Open findings count for the ACTIVE kind, independent of statusFilter — drives
   // that kind's launch-button cap.
   const [openCount, setOpenCount] = useState(0);
+  // Open findings count per kind — drives the count badges on the scan tabs.
+  const [openByKind, setOpenByKind] = useState({});
+
+  // Findings dont une conversation de résolution est ouverte → bouton « Résoudre » gaté.
+  const resolvingIds = useOpenResolveFindings();
 
   const meta = kindMeta(activeKind);
   const isBusiness = activeKind === 'business';
@@ -328,14 +397,18 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       getScan(slug),
       getAppFindings(slug, { kind: activeKind, status: statusFilter || undefined, limit: 300 }),
       listSurveillanceRuns(slug, { limit: 15 }),
-      getAppFindings(slug, { kind: activeKind, status: 'open', limit: 50 }),
+      // Open findings across ALL kinds (cap is ~6/kind) → per-kind tab badges + active cap.
+      getAppFindings(slug, { status: 'open', limit: 100 }),
     ])
       .then(([s, f, r, o]) => {
         setScan(s.data?.scan || null);
         setBlank(s.data?.blank ?? true);
         setFindings(f.data?.findings || []);
         setRuns(r.data?.runs || []);
-        setOpenCount((o.data?.findings || []).length);
+        const byKind = {};
+        for (const x of o.data?.findings || []) byKind[x.kind] = (byKind[x.kind] || 0) + 1;
+        setOpenByKind(byKind);
+        setOpenCount(byKind[activeKind] || 0);
       })
       .catch((e) => {
         if (e.response?.status === 503) setErr('Surveillance désactivée (Postgres injoignable).');
@@ -404,7 +477,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       await runSurveillance(slug, activeKind);
       await reload();
     } catch (e) {
-      alert(e.response?.status === 501 ? 'Runner Codex non implémenté.' : (e.response?.data?.error || e.message));
+      alert(e.response?.status === 501 ? 'Runner de scan non disponible.' : (e.response?.data?.error || e.message));
     } finally {
       setBusy(false);
     }
@@ -426,7 +499,11 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
   // « Résoudre » → ouvre une nouvelle conversation agent (Studio.openAgentWithPrompt) avec un
   // prompt préparé à partir du finding. Plus de clôture manuelle : l'agent s'en charge.
   const handleResolve = (f) => {
-    onResolve?.(buildResolvePrompt(f, slug, activeKind));
+    // findingId voyage avec le prompt → la conversation créée le porte → le bouton se
+    // désactive tant qu'elle est ouverte (cf. useOpenResolveFindings). effort:'max' force
+    // le thinking maximal (résoudre un finding est une tâche profonde) plutôt que d'hériter
+    // de la préférence agent stockée (souvent medium).
+    onResolve?.({ prompt: buildResolvePrompt(f, slug, activeKind), findingId: f.id, effort: 'max' });
     setSelected(null);
   };
 
@@ -452,6 +529,11 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
             >
               <k.Icon className="w-4 h-4" />
               {label}
+              {openByKind[k.id] > 0 && (
+                <span className={`text-[10px] leading-none px-1.5 py-0.5 rounded-full tabular-nums ${
+                  on ? 'bg-gray-900/60 text-current' : 'bg-gray-700/70 text-gray-200'
+                }`}>{openByKind[k.id]}</span>
+              )}
               {k.id === 'business' && blank && <span className="text-[10px] text-gray-500">(veille)</span>}
             </button>
           );
@@ -481,6 +563,16 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
               <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap bg-black/30 p-2 rounded-sm border border-gray-800 text-gray-400">{scan.prompt}</pre>
             </>
           )}
+        </div>
+      )}
+
+      {/* Fixed scans (Sécurité / Qualité) : axes d'analyse listés sous le nom du scan */}
+      {!isBusiness && meta.cats?.length > 0 && (
+        <div className="px-4 pt-2 pb-2 flex items-center gap-1.5 flex-wrap border-b border-gray-700/40 text-xs">
+          <span className="text-gray-500">Axes d'analyse :</span>
+          {meta.cats.map((c) => (
+            <span key={c} className="px-1.5 py-0.5 rounded-sm bg-gray-700/60 text-gray-300">{catLabel(c)}</span>
+          ))}
         </div>
       )}
 
@@ -528,16 +620,16 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
                 <div className="flex-1 h-px bg-gray-700/50" />
               </div>
               {items.map((f) => (
-                <FindingCard key={f.id} finding={f} active={selected?.id === f.id} onSelect={setSelected} onResolve={handleResolve} />
+                <FindingCard key={f.id} finding={f} active={selected?.id === f.id} onSelect={setSelected} onResolve={handleResolve} resolving={resolvingIds.has(f.id)} />
               ))}
             </div>
           ))}
         </div>
 
         {/* Right side: the annex drawer (selected issue) takes priority; otherwise
-            the live Codex console while a run is in progress. */}
+            the live scan console while a run is in progress. */}
         {selected ? (
-          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onResolve={handleResolve} />
+          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onResolve={handleResolve} resolving={resolvingIds.has(selected.id)} />
         ) : (activeRun || transcript.length > 0) ? (
           <LiveScanPanel
             lines={transcript}
@@ -547,16 +639,20 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
           />
         ) : null}
 
-        <aside className="w-72 shrink-0 border-l border-gray-700 bg-gray-900/30 p-3 hidden lg:block">
-          <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Runs récents</div>
-          {runs.length === 0 ? (
-            <div className="text-xs text-gray-600">Aucun run.</div>
-          ) : (
-            <div className="rounded-sm border border-gray-700 bg-gray-800/30">
-              {runs.map((r) => <RunRow key={r.id} run={r} />)}
-            </div>
-          )}
-        </aside>
+        {/* Historique des runs — masqué pendant qu'un scan tourne (console live) ou
+            quand l'annexe d'un finding est ouverte (le drawer prend la place). */}
+        {!activeRun && !selected && (
+          <aside className="w-72 shrink-0 border-l border-gray-700 bg-gray-900/30 p-3 hidden lg:block">
+            <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Runs récents</div>
+            {runs.length === 0 ? (
+              <div className="text-xs text-gray-600">Aucun run.</div>
+            ) : (
+              <div className="rounded-sm border border-gray-700 bg-gray-800/30">
+                {runs.map((r) => <RunRow key={r.id} run={r} />)}
+              </div>
+            )}
+          </aside>
+        )}
       </div>
     </div>
   );

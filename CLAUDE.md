@@ -2,7 +2,7 @@
 
 ## Statut migration (2026-06-15)
 
-> ✅ **Plateforme stabilisée sur Medion** — 5 apps live (`www:3005`, `home:3007`, `trader:3008`, `wallet:3009`, `myfrigo:3010`), l'app `files` décommissionnée (2026-05-31). Atelier tourne en `atelier.service` (4100) : supervisor + apps API + frontend + passerelle dataverse + agent Claude (Studio) + surveillance IA (Codex) + backup restic.
+> ✅ **Plateforme stabilisée sur Medion** — 5 apps live (`www:3005`, `home:3007`, `trader:3008`, `wallet:3009`, `myfrigo:3010`), l'app `files` décommissionnée (2026-05-31). Atelier tourne en `atelier.service` (4100) : supervisor + apps API + frontend + passerelle dataverse + agent Claude (Studio) + surveillance IA (Claude Agent SDK) + backup restic.
 >
 > ✅ **Path-routing interne LIVE** — les apps sont servies via le proxy même-origine `/apps/{slug}/` (`crates/atelier-api/src/routes/apps_proxy.rs`). Les sous-domaines `{slug}.mynetwk.biz` sont **morts** (404 hr-edge) et `app.mynetwk.biz` n'a **plus de route hr-edge**. Hostname externe fonctionnel = **`atelier.mynetwk.biz`** ; accès direct sans auth en local = `http://127.0.0.1:4100/apps/{slug}/`.
 >
@@ -63,7 +63,7 @@ Plateforme applicative autonome (sur Medion, port 4100). Contient :
 - **Dataverse** : moteur Postgres avec schéma dynamique, passerelle REST gateway-only, dvexpr.
 - **Path-proxy** : sert les apps en même-origine sous `/apps/{slug}/` (strip ou no-strip).
 - **Studio** : **UI custom d'édition** (`AgentWorkspace` : explorateur/diffs/commits + panneau git) + **agent Claude natif** (Agent SDK Node : chat/raisonnement/planification/approbation).
-- **Surveillance IA** : 3 scans Codex par app (sécurité, qualité, business) — crate `atelier-watcher`.
+- **Surveillance IA** : 3 scans Claude Agent SDK (lecture seule, headless) par app (sécurité, qualité, business) — crate `atelier-watcher` (driver Codex conservé en rollback).
 - **Backup** : restic + rclone vers SMB (incrémental, chiffré, dédupliqué) — crate `atelier-backup`.
 - **Docs** : système de documentation per-app (index de recherche désormais en Postgres `doc_entries`).
 - **Git** : bare repos.
@@ -116,7 +116,7 @@ Internet → Cloudflare → Medion (10.0.0.254)
 | 3005-3010 | Medion (0.0.0.0) | Apps : www:3005, home:3007, trader:3008, wallet:3009, myfrigo:3010 (3006 libre) — atteintes en pratique uniquement via le path-proxy |
 | 8081 | Medion (127.0.0.1) | code-server@romain (édition source Atelier) — **à la demande, normalement arrêté/disabled** |
 
-> Port 4001 = référence **legacy hr-orchestrator** uniquement ; aucun serveur n'écoute dessus. Le MCP d'Atelier est à `http://127.0.0.1:4100/mcp` (Bearer `MCP_TOKEN`, scope par app via `?project={slug}` ; `?scope=surveillance` restreint à une whitelist read-only pour le watcher Codex).
+> Port 4001 = référence **legacy hr-orchestrator** uniquement ; aucun serveur n'écoute dessus. Le MCP d'Atelier est à `http://127.0.0.1:4100/mcp` (Bearer `MCP_TOKEN`, scope par app via `?project={slug}` ; `?scope=surveillance` restreint à une whitelist read-only pour le scan-agent de surveillance).
 
 ## Variables d'environnement Atelier (Medion `/opt/atelier/.env`)
 
@@ -129,10 +129,17 @@ ATELIER_APPS_SRC_ROOT=/var/lib/atelier/apps
 ATELIER_GIT_REPOS_DIR=/var/lib/atelier/git
 ATELIER_BUILD_AS_USER=...                # user de build des apps
 ATELIER_LOGS_TOKEN=...                    # auth ingestion logs (shipper) + injecté aux apps (tier platform)
-MCP_TOKEN=...                             # auth MCP (jamais loggé)
-CODEX_HOME=/root/.codex                   # config Codex (surveillance)
-ATELIER_CODEX_ARGS=exec --json ...        # args Codex CLI (--json OBLIGATOIRE pour streamer)
+MCP_TOKEN=...                             # auth MCP (jamais loggé) — injecté au scan-agent via stdin
 ATELIER_ENV_RECONCILE_APPLY=1            # boot-sweep écrit les .env (sinon dry-run/log only)
+
+# Surveillance — driver de scan (défauts en code) :
+# ATELIER_SCAN_DRIVER=claude               claude (défaut) | codex (rollback)
+# ATELIER_SCAN_MODEL                       claude only ; unset → défaut abonnement (Opus)
+# ATELIER_SCAN_EFFORT=max                  claude only ; défaut max ; "none" pour omettre (Haiku)
+# ATELIER_SCAN_TIMEOUT_SECS=600            timeout par run
+# ATELIER_SCAN_MAX_CONCURRENT=2            ratelimit guard
+# ATELIER_SCAN_RUNNER=/opt/atelier/runner/src/scan.js   (claude ; réutilise ATELIER_AGENT_{NODE_BIN,USER,CLAUDE_CONFIG_DIR})
+# Rollback Codex uniquement : CODEX_HOME=/root/.codex, ATELIER_CODEX_{BIN,ARGS} (--json OBLIGATOIRE)
 
 # Surchargeables (défauts en code, NON listées dans .env aujourd'hui) :
 # ATELIER_PRESERVE_PREFIX_SLUGS=www        slugs no-strip du path-proxy (défaut www)
@@ -171,18 +178,22 @@ Le Studio inclut une **UI custom d'édition** (`AgentWorkspace` : explorateur de
 
 **API** : `POST /api/apps/{slug}/agent/{query,message,answer,plan_decision,set_mode,set_model,interrupt,cancel}` + CRUD conversations. **Debug** : runner à `/opt/atelier/runner/src/runner.js`, binaire natif `runner/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64`, `journalctl -u atelier` (stderr runner), croissance des fichiers de session.
 
-> ⚠️ Ne pas confondre cet **agent Studio (Claude)** avec la **surveillance IA (Codex)** ci-dessous ni avec `hr-orchestrator` (déploiements network).
+> ⚠️ Ne pas confondre cet **agent Studio (Claude)** interactif (multi-tour, mutations possibles) avec la **surveillance IA** ci-dessous (scan headless **lecture seule**, single-turn) ni avec `hr-orchestrator` (déploiements network). Les deux tournent sur le **même Claude Agent SDK** mais via deux runners distincts (`runner.js` vs `scan.js`).
 
-## Surveillance IA (3 scans/app, Codex)
+## Surveillance IA (3 scans/app, Claude Agent SDK)
 
-Crate `atelier-watcher` : 3 scans **Codex** (CLI OpenAI) par app, écrivant des **findings catégorisées** via MCP. Findings + runs + mémoire + config en Postgres `atelier_meta`. UI : page `/surveillance` (overview global) + tab Surveillance per-app. Live via WebSocket (`surveillance:event`, `surveillance:transcript`). Modèle hybride **3 scans** (déployé 2026-06-05, commit `6dec754`) ; le champ `kind` discrimine partout :
+> **Migration 2026-06-17** : le driver de scan est passé de **Codex** (CLI OpenAI) au **Claude Agent SDK** (même runtime que l'agent Studio). Plus de dissonance — un seul moteur IA. Codex reste sélectionnable en rollback via `ATELIER_SCAN_DRIVER=codex` (le retirer après validation). Le contrat UI/DB est inchangé : findings via le tool MCP `findings_upsert`, mêmes tables, mêmes events WebSocket.
+
+Crate `atelier-watcher` : 3 scans par app (driver sélectionnable, **Claude par défaut**), écrivant des **findings catégorisées** via MCP. Findings + runs + mémoire + config en Postgres `atelier_meta`. UI : page `/surveillance` (overview global) + tab Surveillance per-app. Live via WebSocket (`surveillance:event`, `surveillance:transcript`). Modèle hybride **3 scans** (déployé 2026-06-05, commit `6dec754`) ; le champ `kind` discrimine partout :
 
 - **`security`** + **`code_review`** (« Qualité ») = scans **plateforme FIXES** (prompts en code `crates/atelier-watcher/src/prompts/{security,code_review}.md`), gate diff git, tournent pour toutes les apps, **non éditables par l'agent**.
 - **`business`** = **seul scan possédé par l'agent**, défini en **données** (table `app_scan` : label/prompt/cadence/gate/gate_sql/categories) via MCP `scan_get`/`scan_set`, **vide par défaut** (run `skipped("blank")`). `gate_sql` SELECT-only, fourni par l'agent et adapté au schéma de SON app (jamais hardcodé plateforme).
 
-Gates : (1) plafond `MAX_OPEN_FINDINGS = 6` **par (app,kind)** (constante non configurable, injectée dans le prompt pour priorisation) ; (2) diff-aware. **Runs manuels uniquement** (scheduler cron retiré — coût GPT+) ; le `git_watcher` (auto-resolve via commit `fix(surveillance:N)`) tourne toujours. Kill d'un run = SIGKILL du **groupe de process** (Codex spawn des shells enfants). Findings : la liste = titre + `summary` ; le `plan` = document de résolution complet (tiroir latéral).
+Gates : (1) plafond `MAX_OPEN_FINDINGS = 6` **par (app,kind)** (constante non configurable, injectée dans le prompt pour priorisation) ; (2) diff-aware. **Runs manuels uniquement** (scheduler cron retiré — coût) ; le `git_watcher` (auto-resolve via commit `fix(surveillance:N)`) tourne toujours. Kill d'un run = SIGKILL du **groupe de process** (le SDK fork le binaire natif `claude`). Findings : la liste = titre + `summary` ; le `plan` = document de résolution complet (tiroir latéral).
 
-> La **config ops de Codex vit hors repo, sur Medion en root** : `~/.codex/{auth.json,config.toml}` (serveur MCP `atelier` + profil read-only + **modèle**), `/etc/gitconfig` `safe.directory=*`. Args CLI par défaut : `exec --json --sandbox read-only` (le `--json` est OBLIGATOIRE pour streamer ; surchargé via `ATELIER_CODEX_ARGS`). Cf. mémoire `atelier-surveillance-ia`.
+> **Driver Claude (défaut)** : `crates/atelier-watcher/src/claude.rs` spawn `runner/src/scan.js` en `hr-studio` (`sudo -n -H -u hr-studio … node scan.js`, OAuth abonnement via `/var/lib/hr-studio/.claude`, **jamais de clé API**). **Lecture seule = 3 couches** : (1) MCP `?scope=surveillance` (whitelist serveur autoritaire), (2) `canUseTool` de scan.js (n'autorise que Read/Glob/Grep + tools MCP), (3) tourne en `hr-studio` (jamais root). `permissionMode:'default'` (PAS `'plan'` qui n'exécute aucun outil) + **`disallowedTools`** (retire Bash/Write/Edit/Task/Skill/… du contexte — garantie dure ; un simple `canUseTool` ne suffit PAS : en `'default'` le SDK ne le consulte pas pour les builtins). Non-pollution du Studio : `op:delete` post-run (`claude.rs::cleanup_session`) — `persistSession:false` est **ignoré** par le binaire natif 0.3.167. Tokens lus depuis `result.usage`. Config via `ATELIER_SCAN_{DRIVER,MODEL,TIMEOUT_SECS,MAX_CONCURRENT}` + `ATELIER_SCAN_RUNNER` (réutilise les chemins `ATELIER_AGENT_*`).
+>
+> **Driver Codex (rollback)** : `crates/atelier-watcher/src/codex.rs`. Config ops hors repo sur Medion en root : `~/.codex/{auth.json,config.toml}` (serveur MCP `atelier` + profil read-only + modèle). Args via `ATELIER_CODEX_ARGS` (`exec --json --sandbox read-only`, `--json` OBLIGATOIRE pour streamer). Cf. mémoire `atelier-surveillance-ia`.
 
 ## Backup (restic + rclone)
 
@@ -273,7 +284,7 @@ Atelier est **autonome** : toutes ses crates vivent sous `crates/` (renommées d
 | `atelier-dv-codegen` | génération de code/contexte depuis le schéma dataverse |
 | `atelier-docs` | système de docs per-app (index Postgres `doc_entries`) |
 | `atelier-git` | bare repos + introspection (log/diff/activity) |
-| `atelier-watcher` | surveillance IA (driver Codex, 3 scans, git_watcher) |
+| `atelier-watcher` | surveillance IA (driver Claude Agent SDK par défaut / Codex en rollback, 3 scans, git_watcher) |
 | `atelier-backup` | backup restic + rclone + scheduler |
 | `atelier-logging` | pipeline de logs structurés (ingest, buffer, broadcast → `atelier_logs`) |
 | `atelier-common` | types/utilitaires partagés + bootstrap pool control-plane (`atelier_meta`) |

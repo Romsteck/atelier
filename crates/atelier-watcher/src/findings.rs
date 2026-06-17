@@ -169,8 +169,8 @@ impl FindingsStore {
 
     /// Count all OPEN findings for a (slug, kind). Backs the per-kind cap gate
     /// (`MAX_OPEN_FINDINGS`): a new scan is skipped once the cap is reached, and
-    /// the count is injected into the prompt so Codex self-limits to the most
-    /// important issues.
+    /// the count is injected into the prompt so the scan-agent self-limits to the
+    /// most important issues.
     pub async fn count_open(&self, slug: &str, kind: &str) -> anyhow::Result<i64> {
         let sql = r#"
             SELECT COUNT(*)::bigint AS c

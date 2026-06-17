@@ -69,6 +69,7 @@ runner-deps:
 
 runner: runner-deps
 	@test -f runner/src/runner.js || { echo "error: runner/src/runner.js missing — aborting" >&2; exit 1; }
+	@test -f runner/src/scan.js || { echo "error: runner/src/scan.js missing (surveillance scan runner) — aborting" >&2; exit 1; }
 	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing (npm ci --omit=optional?) — aborting" >&2; exit 1; }
 
 deploy:

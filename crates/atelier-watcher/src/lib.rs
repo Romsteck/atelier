@@ -1,14 +1,15 @@
-/// Surveillance IA per-app via Codex CLI. Chaque app a TROIS scans (discriminés
-/// par `kind`) : `security` et `code_review` (plateforme, fixes, prompts en code)
-/// + `business` (possédé par l'agent du projet, défini en DONNÉES dans `app_scan`,
-/// vide par défaut).
+/// Surveillance IA per-app via le **Claude Agent SDK** (driver Codex CLI
+/// conservé en rollback — cf. [`runner::ScanDriverConfig`]). Chaque app a TROIS
+/// scans (discriminés par `kind`) : `security` et `code_review` (plateforme,
+/// fixes, prompts en code) + `business` (possédé par l'agent du projet, défini
+/// en DONNÉES dans `app_scan`, vide par défaut).
 ///
 /// Runs **manuels uniquement** (déclenchés depuis l'UI ou MCP) — pas de
-/// scheduler interne : un cron consommerait trop l'abonnement GPT+. Chaque run
-/// passe par les gates cap (`MAX_OPEN_FINDINGS`, par (app,kind)) + diff-aware,
-/// puis Codex. Le git_watcher auto-résout les findings via les commits
-/// `fix(surveillance:N)`. Inert tant que le binaire `codex` n'est pas installé —
-/// un run renvoie alors une erreur propre.
+/// scheduler interne : un cron consommerait trop l'abonnement. Chaque run passe
+/// par les gates cap (`MAX_OPEN_FINDINGS`, par (app,kind)) + diff-aware, puis le
+/// scan-agent. Le git_watcher auto-résout les findings via les commits
+/// `fix(surveillance:N)`. Le scan-agent lit ses findings via le tool MCP
+/// `findings_upsert` (`…/mcp?scope=surveillance`, whitelist read-only serveur).
 #[allow(unused_imports)]
 pub(crate) mod sqlx {
     pub use sqlx_core::Error;
@@ -23,18 +24,22 @@ pub(crate) mod sqlx {
     pub use sqlx_postgres::{PgPool, PgPoolOptions, PgRow, Postgres};
 }
 
+pub mod claude;
 pub mod codex;
 pub mod findings;
 pub mod git_watcher;
 pub mod gitutil;
 pub mod memory;
 pub mod migration;
+pub mod runner;
 pub mod runs;
 pub mod scandef;
 pub mod service;
 
+pub use claude::{ClaudeRunner, ClaudeScanConfig};
 pub use codex::{CodexConfig, CodexRunner};
 pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding, OpenCountRow};
+pub use runner::{ScanDriverConfig, ScanExec, ScanRunner, build_prompt};
 pub use memory::{Memory, MemoryStore};
 pub use runs::{Run, RunsStore};
 pub use scandef::{
@@ -45,8 +50,8 @@ pub use service::{AppMeta, SurveillanceConfig, SurveillanceService};
 
 /// Per-kind cap on OPEN findings. A new scan of a kind is skipped once the kind
 /// already has this many open findings (the UI also disables the launch button),
-/// and the prompt tells Codex to report only the most important issues within
-/// this budget. Single source of truth — no longer per-app configurable.
+/// and the prompt tells the scan-agent to report only the most important issues
+/// within this budget. Single source of truth — no longer per-app configurable.
 pub const MAX_OPEN_FINDINGS: i64 = 6;
 
 /// Live event broadcast to the frontend over WebSocket whenever a finding or
@@ -61,8 +66,8 @@ pub struct SurveillanceEvent {
     pub action: String,
 }
 
-/// One line of Codex stdout, streamed live to the frontend while a run is in
-/// progress. Ephemeral — never persisted; the UI shows it in a live console
+/// One line of scan-agent stdout, streamed live to the frontend while a run is
+/// in progress. Ephemeral — never persisted; the UI shows it in a live console
 /// that disappears once the run settles.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TranscriptLine {
