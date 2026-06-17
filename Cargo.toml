@@ -47,9 +47,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1.0"
 thiserror = "2.0"
 
-# DB
-rusqlite = { version = "0.40", features = ["bundled"] }
-
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

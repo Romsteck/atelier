@@ -553,7 +553,7 @@ async fn init_dv(state_dir: &PathBuf) -> Option<Arc<atelier_dataverse::manager::
 /// Build the Postgres-backed docs search index over the shared `atelier_meta`
 /// pool, rebuilding it from the filesystem if the table is empty. Returns `None`
 /// when the control-plane pool is absent (Postgres down) — search then degrades
-/// to 503, matching the previous behaviour when the SQLite index failed to open.
+/// to 503.
 async fn open_docs_index(
     meta_pool: &Option<atelier_common::control_db::sqlx::PgPool>,
     docs_dir: &PathBuf,

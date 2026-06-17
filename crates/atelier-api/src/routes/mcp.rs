@@ -1348,9 +1348,6 @@ async fn tool_docs_diagram_set(id: Value, args: &Value, state: &McpState) -> Val
 }
 
 
-// (db tools removed -- now managed per-environment by env-agent)
-// (db tools removed -- now managed per-environment by env-agent)
-
 fn success_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }

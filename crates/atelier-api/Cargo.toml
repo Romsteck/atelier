@@ -21,7 +21,6 @@ libc = "0.2"
 
 atelier-common    = { workspace = true }
 atelier-docs      = { workspace = true }
-rusqlite     = { workspace = true }
 atelier-git       = { workspace = true }
 atelier-ipc       = { workspace = true }
 atelier-dataverse = { workspace = true }
