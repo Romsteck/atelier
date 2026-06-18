@@ -139,10 +139,13 @@ const TODO_MARK_CLS = { pending: 'text-gray-600', in_progress: 'text-blue-400', 
 const TODO_TEXT_CLS = { pending: 'text-gray-400', in_progress: 'text-gray-200', completed: 'text-gray-500 line-through' };
 
 function TodoList({ todos }) {
+  const total = todos.length;
+  const done = todos.filter((t) => t.status === 'completed').length;
   return (
     <div className="text-[12px] my-1">
       <div className="flex items-center gap-1.5 text-gray-400">
         <ListChecks className="w-3.5 h-3.5 shrink-0" /><span className="text-gray-300">Todos</span>
+        {total > 0 && <span className="text-gray-600">{done}/{total}</span>}
       </div>
       <ul className="mt-1 ml-5 space-y-0.5">
         {todos.map((t, i) => (
@@ -378,6 +381,25 @@ export default function AgentPanel({ panelKey }) {
     });
     return { resultByUseId: byId, consumedResultIdx: consumed };
   }, [items]);
+
+  // TodoWrite est RÉÉCRIT à chaque MAJ : Claude Code l'appelle N fois par tour (création →
+  // in_progress → completed). Sans coalescing on empilerait N checklists quasi identiques.
+  // On ne garde que la DERNIÈRE occurrence de chaque tour (segment borné par un item `user`)
+  // → une seule checklist évolutive, comme le panneau du TUI (qui ne montre jamais son
+  // historique). Les tool_result associés restent "consumed" via useIds → pas d'orphelins.
+  const todoKeep = useMemo(() => {
+    const keep = new Set();
+    let prev = -1;
+    items.forEach((it, i) => {
+      if (it.type === 'user') prev = -1; // nouveau tour
+      if (it.type === 'tool_use' && it.name === 'TodoWrite') {
+        if (prev >= 0) keep.delete(prev);
+        keep.add(i);
+        prev = i;
+      }
+    });
+    return keep;
+  }, [items]);
   // Tour suspendu sur une interaction (question/plan) : on remplace le spinner générique
   // par "en attente de ta réponse" pour ne pas laisser croire que le modèle calcule.
   const lastItem = items[items.length - 1];
@@ -511,6 +533,7 @@ export default function AgentPanel({ panelKey }) {
           }
           if (it.type === 'thinking') return <ThinkingBlock key={i} text={it.text} active={running && i === items.length - 1} />;
           if (it.type === 'tool_use') {
+            if (it.name === 'TodoWrite' && !todoKeep.has(i)) return null; // doublons de checklist supprimés
             return (
               <ToolCall key={it.id || i} name={it.name} input={it.input}
                 result={it.id != null ? resultByUseId.get(it.id) : undefined}
