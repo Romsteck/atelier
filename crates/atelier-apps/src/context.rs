@@ -376,6 +376,26 @@ impl ContextGenerator {
              control it — **never** lancer le binaire à la main (`nohup`, `tmux`, \
              `./bin/xxx &`, `cargo run`, `systemctl`, `kill`).\n\
              \n\
+             ## ⚠️ Isolation par worktree (lis-moi)\n\
+             \n\
+             Tu travailles dans un **worktree git dédié à CETTE conversation** \
+             (branche `conv/...`), pas dans `src/` (= le runtime de l'app, qui reste sur \
+             `main`). Tes éditions sont donc isolées des autres conversations en cours.\n\
+             - **Build / test** : `0-build` compile DANS ton worktree — itère librement, \
+             ça ne touche pas l'app en production.\n\
+             - **Commite toi-même, RÉGULIÈREMENT, SANS demander l'autorisation** : à chaque \
+             étape cohérente, `git add -A && git commit -m \"…\"` DANS ton worktree (tu en \
+             as le droit). C'est **ce qui sera mergé** — tout travail non commité serait \
+             **perdu** au merge. Ne demande jamais la permission de committer ; fais-le.\n\
+             - **Déployer = merger (action de l'utilisateur)** : tu ne déploies PAS \
+             toi-même. Quand ton travail est commité et prêt, l'**utilisateur** clique \
+             « Merge & Deploy » → Atelier merge ta branche dans `main`, rebuild et \
+             redémarre l'app. **N'utilise PAS `0-deploy`/`ship`** : ça rechargerait `src/` \
+             (sans ton travail tant qu'il n'est pas mergé), pas ton worktree.\n\
+             - **Base de données** : partagée (non branchée en Phase 1). Une migration de \
+             schéma frappe la base live de toutes les conversations — préviens \
+             l'utilisateur avant tout changement de schéma.\n\
+             \n\
              ## Interdits (et pourquoi)\n\
              - **Lancer le binaire à la main** : le superviseur vérifie que le port \
              `{port}` est libre avant de spawner. Un process manuel sur ce port bloque \
@@ -394,12 +414,15 @@ impl ContextGenerator {
              4. Si tout semble OK mais rien ne démarre → `ss -lntp | grep {port}` via \
              `app.exec` pour voir qui squatte le port.\n\
              \n\
-             ## Edit → build → restart → verify\n\
-             1. Edit sources in `{src_dir}`.\n\
-             2. Build on place : `{build_cmd}` (toujours en production, jamais de mode dev).\n\
-             3. Restart via MCP: `app.control` (ou `POST /api/apps/{slug}/control` avec `{{\"action\":\"restart\"}}`).\n\
-             4. Check the result via `app.status` and `app.logs`.\n\
-             5. Open {url} to validate the change end-to-end.\n\
+             ## Edit → build → test → commit (puis l'utilisateur merge)\n\
+             1. Édite les sources dans ton worktree (ton cwd).\n\
+             2. Build sur place : `0-build` / `{build_cmd}` (production, jamais de mode dev) — \
+             dans ton worktree.\n\
+             3. Teste ton changement (tests de l'app). En Phase 1, pas de preview live par \
+             branche : valide par les tests.\n\
+             4. Commit sur ta branche (panneau git du Studio) pour que ce soit inclus au merge.\n\
+             5. **L'utilisateur** déploie via « Merge & Deploy » (merge `main` + rebuild + \
+             restart). Vérifie ensuite via `app.status` / `app.logs` et {url}.\n\
              \n\
              ## Regles\n\
              - **Builder sur place** : jamais de cross-compile, tout se compile sur le serveur de production.\n\

@@ -479,6 +479,15 @@ export default function AgentPanel({ panelKey }) {
         <span className="text-gray-500 truncate max-w-[120px]" title={`modèle : ${convo.activeModel || selModel.label}`}>
           {convo.activeModel || selModel.label}
         </span>
+        {convo.convId && (
+          <>
+            <span className="text-gray-600">·</span>
+            <span className="font-mono text-[11px] text-purple-300/90 truncate max-w-[150px]"
+              title={`worktree isolé — branche conv/${convo.convId}`}>
+              conv/{convo.convId}
+            </span>
+          </>
+        )}
         {convo.loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-600" />}
         <div className="ml-auto flex items-center gap-2">
           {sdkMsg && (
@@ -584,7 +593,12 @@ export default function AgentPanel({ panelKey }) {
           }
           return null;
         })}
-        {running && !awaitingUser && (
+        {convo.provisioning && (
+          <div className="flex items-center gap-1.5 text-[12px] text-purple-300">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Préparation de l'espace de travail (worktree)…
+          </div>
+        )}
+        {running && !awaitingUser && !convo.provisioning && (
           <div className="flex items-center gap-1.5 text-[12px] text-gray-500">
             <Loader2 className="w-3.5 h-3.5 animate-spin" /> agent travaille…
           </div>

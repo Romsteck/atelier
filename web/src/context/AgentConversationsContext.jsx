@@ -29,6 +29,7 @@ let _kc = 0;
 const newKey = () => `c${Date.now().toString(36)}_${_kc++}`;
 const openSidsKey = (slug) => `agent:openSids:${slug}`; // legacy (lecture seule, migration)
 const openTabsKey = (slug) => `agent:openTabs:${slug}`;
+const activeTabKey = (slug) => `agent:activeTab:${slug}`; // onglet actif (remonté du split)
 
 function loadOpenSids(slug) {
   try {
@@ -67,6 +68,12 @@ function formatAnswer(payload) {
 const emptyConvo = (key, sid) => ({
   key,
   sid: sid || null,
+  // Identité de worktree (branche `conv/{convId}`) : STABLE sur toute la vie de la
+  // conversation, indépendante de `key` (qui devient le sid après restauration).
+  // Posée à la création (= la clé neuve), restaurée depuis le descripteur d'onglet,
+  // ou dérivée du `gitBranch` à l'ouverture depuis l'historique. null = conversation
+  // héritée (édite src/, pas de worktree).
+  convId: null,
   title: null,
   items: [],
   running: false,
@@ -75,6 +82,7 @@ const emptyConvo = (key, sid) => ({
   decided: new Set(),
   live: false,
   loading: false,
+  provisioning: false, // worktree en cours de création (1er message d'une conversation neuve)
   error: null,
   activeModel: null,
   activeMode: null, // mode courant ('plan'|'bypass') reflété par le backend (approbation/set_mode)
@@ -96,6 +104,7 @@ function reducer(state, a) {
           key = t.sid;
           c = emptyConvo(t.sid, t.sid);
           c.loading = true;
+          if (t.convId) c.convId = t.convId; // restaure l'identité de worktree (stable)
           if (t.fid != null) c.findingId = t.fid; // restaure le lien finding↔conversation
           if (t.eff) c.effort = t.eff; // restaure l'effort imposé (ex. 'max' depuis « Résoudre »)
         } else if (t.t === 'f' && t.path) {
@@ -106,7 +115,7 @@ function reducer(state, a) {
           c = { key, type: 'commit', sha: t.sha, short: t.short, subject: t.subject };
         } else if (t.t === 'd' && t.path) {
           key = `diff:${t.path}`;
-          c = { key, type: 'diff', path: t.path, status: t.status };
+          c = { key, type: 'diff', path: t.path, status: t.status, convId: t.convId || null };
         }
         if (key && !convos[key]) {
           convos[key] = c;
@@ -117,6 +126,8 @@ function reducer(state, a) {
     }
     case 'NEW_PANEL': {
       const c = emptyConvo(a.key, null);
+      // La clé neuve EST l'identité de worktree (conv_id-safe : `c<base36>_<n>`).
+      c.convId = a.key;
       if (a.autoSend) c.autoSend = a.autoSend;
       if (a.findingId != null) c.findingId = a.findingId;
       if (a.effort) c.effort = a.effort;
@@ -125,6 +136,7 @@ function reducer(state, a) {
     case 'OPEN_PANEL': {
       if (state.convos[a.key]) return state;
       const c = emptyConvo(a.key, a.sid);
+      if (a.convId) c.convId = a.convId; // dérivé du gitBranch de la session ouverte
       c.loading = true;
       return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c } };
     }
@@ -153,7 +165,7 @@ function reducer(state, a) {
     case 'OPEN_DIFF': {
       const key = `diff:${a.path}`;
       if (state.convos[key]) return state;
-      const c = { key, type: 'diff', path: a.path, status: a.status };
+      const c = { key, type: 'diff', path: a.path, status: a.status, convId: a.convId || null };
       return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
     }
     case 'SNAPSHOT_OK': {
@@ -192,10 +204,16 @@ function reducer(state, a) {
         convos: { ...state.convos, [a.key]: { ...c, items: [...c.items, { type: 'user', text: a.text }], running: true, error: null } },
       };
     }
+    case 'SET_PROVISIONING': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, provisioning: a.value } } };
+    }
     case 'SET_RUN': {
       const c = state.convos[a.key];
       if (!c) return state;
-      return { ...state, convos: { ...state.convos, [a.key]: { ...c, runId: a.runId } } };
+      // run_id reçu = le worktree est provisionné et l'agent a démarré.
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, runId: a.runId, provisioning: false } } };
     }
     case 'SET_STOPPED': {
       const c = state.convos[a.key];
@@ -223,7 +241,7 @@ function reducer(state, a) {
     case 'SET_ERROR': {
       const c = state.convos[a.key];
       if (!c) return state;
-      return { ...state, convos: { ...state.convos, [a.key]: { ...c, error: a.error, running: false } } };
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, error: a.error, running: false, provisioning: false } } };
     }
     case 'SET_TITLE': {
       const c = state.convos[a.key];
@@ -292,8 +310,17 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   // ConversationsSplit l'observe pour activer l'onglet (utile en mode replié/onglets).
   const [focusReq, setFocusReq] = useState(null);
   const focusNonce = useRef(0);
+  // Onglet actif — REMONTÉ ici (depuis ConversationsSplit) pour que la sidebar
+  // (git/explorateur) puisse suivre la conversation active = son worktree.
+  const [activeKey, setActiveKey] = useState(() => {
+    try { return localStorage.getItem(activeTabKey(slug)) || null; } catch { return null; }
+  });
   const stateRef = useRef(state);
   stateRef.current = state;
+  // Snapshot des sessions listées (pour dériver le convId/worktree d'une conversation
+  // ouverte depuis l'historique, via son `gitBranch` = `conv/{convId}`).
+  const allConvosRef = useRef([]);
+  allConvosRef.current = allConvos;
 
   // UN seul WebSocket pour tout le workspace ; le reducer route par session_id/run_id.
   useWebSocket({ 'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); } });
@@ -307,7 +334,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     dispatch({ type: 'RESTORE_TABS', tabs });
     for (const t of tabs) {
       if (t.t !== 'c' || !t.sid) continue;
-      getConversation(slug, t.sid)
+      getConversation(slug, t.sid, t.convId)
         .then((r) =>
           dispatch({ type: 'SNAPSHOT_OK', key: t.sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
         )
@@ -328,8 +355,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         if (!c) return null;
         if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
         if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
-        if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
-        return c.sid ? { t: 'c', sid: c.sid, ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
+        if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status, ...(c.convId ? { convId: c.convId } : {}) };
+        return c.sid ? { t: 'c', sid: c.sid, ...(c.convId ? { convId: c.convId } : {}), ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
       })
       .filter(Boolean),
   );
@@ -346,6 +373,25 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     setOpenResolveFindings(ids);
   }, [state.order, state.convos]);
 
+  // Onglet actif : défaut = dernier onglet (skip pendant la restauration où order est
+  // momentanément vide), persistance, et focus à l'ouverture d'un fichier/commit.
+  useEffect(() => {
+    if (!state.order.length) return;
+    if (!activeKey || !state.order.includes(activeKey)) setActiveKey(state.order[state.order.length - 1]);
+  }, [state.order, activeKey]);
+  useEffect(() => {
+    if (activeKey) { try { localStorage.setItem(activeTabKey(slug), activeKey); } catch { /* ignore */ } }
+  }, [activeKey, slug]);
+  useEffect(() => {
+    if (focusReq && stateRef.current.order.includes(focusReq.key)) setActiveKey(focusReq.key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReq]);
+
+  // convId (worktree) de la conversation active → la sidebar git/explorateur le suit.
+  const activeConvId = state.convos[activeKey]?.convId || null;
+  const activeConvIdRef = useRef(null);
+  activeConvIdRef.current = activeConvId;
+
   const refreshAll = useCallback(() => {
     listConversations(slug)
       .then((r) => setAllConvos(r.data?.conversations || []))
@@ -361,8 +407,13 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       const st = stateRef.current;
       if (st.order.some((k) => st.convos[k]?.sid === sid)) return; // déjà ouverte
       const key = sid;
-      dispatch({ type: 'OPEN_PANEL', key, sid });
-      getConversation(slug, sid)
+      // Dérive l'identité de worktree depuis le `gitBranch` de la session (`conv/{id}`) ;
+      // null pour une conversation héritée (branche `main`/src/).
+      const sess = allConvosRef.current.find((s) => s.sessionId === sid);
+      const gb = sess?.gitBranch;
+      const convId = gb && gb.startsWith('conv/') ? gb.slice('conv/'.length) : null;
+      dispatch({ type: 'OPEN_PANEL', key, sid, convId });
+      getConversation(slug, sid, convId)
         .then((r) =>
           dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
         )
@@ -400,7 +451,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   // lieu de l'aperçu condensé. `file` = { path, status }.
   const openDiff = useCallback((file) => {
     if (!file?.path) return;
-    dispatch({ type: 'OPEN_DIFF', path: file.path, status: file.status });
+    // Capture le worktree actif → le diff est lu dans la bonne branche (sinon src/).
+    dispatch({ type: 'OPEN_DIFF', path: file.path, status: file.status, convId: activeConvIdRef.current });
     focusNonce.current += 1;
     setFocusReq({ key: `diff:${file.path}`, n: focusNonce.current });
   }, []);
@@ -414,6 +466,9 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       dispatch({ type: 'OPTIMISTIC_USER', key, text: t });
       try {
         let runId = c.runId;
+        // conv_id (worktree) injecté dans tout démarrage/reprise de session → l'agent
+        // tourne dans son worktree dédié (null = conversation héritée → src/).
+        const wt = { conv_id: c.convId };
         if (c.runId) {
           try {
             await sendAgentMessage(slug, c.runId, { text: t }); // tour suivant, session vivante
@@ -422,17 +477,20 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
             // après un deploy qui a coupé la session). On retombe sur la reprise de la session
             // sur disque → la conversation se relance au lieu de renvoyer une erreur 404.
             if (e.response?.status === 404 && c.sid) {
-              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings });
+              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings, ...wt });
               runId = r.data?.run_id;
             } else {
               throw e;
             }
           }
         } else if (c.sid) {
-          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings }); // reprise
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings, ...wt }); // reprise
           runId = r.data?.run_id;
         } else {
-          const r = await startAgentQuery(slug, { prompt: t, ...settings }); // session neuve
+          // Session neuve → le serveur provisionne le worktree (checkout + contexte) AVANT
+          // de répondre le run_id → on affiche un loading « préparation du worktree ».
+          dispatch({ type: 'SET_PROVISIONING', key, value: true });
+          const r = await startAgentQuery(slug, { prompt: t, ...settings, ...wt }); // session neuve
           runId = r.data?.run_id;
         }
         if (runId && runId !== c.runId) dispatch({ type: 'SET_RUN', key, runId });
@@ -483,8 +541,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         if (c.runId) {
           await answerAgentRun(slug, c.runId, { request_id, ...payload });
         } else if (c.sid) {
-          // Conversation fermée : la réponse relance la session via resume.
-          const r = await resumeAgentQuery(slug, c.sid, { prompt: formatAnswer(payload) });
+          // Conversation fermée : la réponse relance la session via resume (dans son worktree).
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: formatAnswer(payload), conv_id: c.convId });
           if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
         }
       } catch (e) {
@@ -554,6 +612,17 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     [slug],
   );
 
+  // Résout le convId (worktree) d'une session par son sid : depuis la conversation
+  // ouverte si dispo, sinon dérivé du `gitBranch` de la session listée.
+  const convIdForSid = useCallback((sid) => {
+    const st = stateRef.current;
+    const key = st.order.find((k) => st.convos[k]?.sid === sid);
+    if (key && st.convos[key]?.convId) return st.convos[key].convId;
+    const sess = allConvosRef.current.find((s) => s.sessionId === sid);
+    const gb = sess?.gitBranch;
+    return gb && gb.startsWith('conv/') ? gb.slice('conv/'.length) : null;
+  }, []);
+
   const renameBySid = useCallback(
     async (sid, title) => {
       const st = stateRef.current;
@@ -561,12 +630,12 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if (key) dispatch({ type: 'SET_TITLE', key, title });
       setAllConvos((prev) => prev.map((x) => (x.sessionId === sid ? { ...x, customTitle: title, summary: title } : x)));
       try {
-        await renameConversation(slug, sid, title);
+        await renameConversation(slug, sid, title, convIdForSid(sid));
       } catch {
         /* ignore */
       }
     },
-    [slug],
+    [slug, convIdForSid],
   );
 
   const removeBySid = useCallback(
@@ -576,12 +645,12 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if (key) dispatch({ type: 'CLOSE_PANEL', key });
       setAllConvos((prev) => prev.filter((x) => x.sessionId !== sid));
       try {
-        await deleteConversation(slug, sid);
+        await deleteConversation(slug, sid, convIdForSid(sid));
       } catch {
         /* ignore */
       }
     },
-    [slug],
+    [slug, convIdForSid],
   );
 
   const value = {
@@ -589,6 +658,9 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     order: state.order,
     convos: state.convos,
     allConvos,
+    activeKey,
+    setActiveKey,
+    activeConvId,
     refreshAll,
     newConversation,
     openConversation,

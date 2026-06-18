@@ -13,16 +13,13 @@ import { useAgentConversations } from '../../context/AgentConversationsContext';
 const MIN_PANEL_W = 340;
 const MAX_SPLIT = 3;
 
-const activeKey = (slug) => `agent:activeTab:${slug}`;
-
 export default function ConversationsSplit() {
-  const { order, convos, newConversation, closeConversation, focusReq, slug } = useAgentConversations();
+  // `activeKey`/`setActiveKey` viennent du provider (remontés) : la sidebar git/explorateur
+  // suit la conversation active = son worktree. La validation/persistance/focus de l'onglet
+  // actif vivent désormais dans le provider.
+  const { order, convos, newConversation, closeConversation, activeKey, setActiveKey } = useAgentConversations();
   const ref = useRef(null);
   const [width, setWidth] = useState(0);
-  // Onglet actif restauré au rechargement / changement de page (validé contre `order`).
-  const [active, setActive] = useState(() => {
-    try { return localStorage.getItem(activeKey(slug)) || null; } catch { return null; }
-  });
 
   const typeOf = (key) => convos[key]?.type; // 'file' | 'commit' | 'diff' | undefined(=conversation)
   const renderPanel = (key) => {
@@ -42,27 +39,6 @@ export default function ConversationsSplit() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  useEffect(() => {
-    // Pendant la restauration `order` est momentanément vide : NE PAS réinitialiser
-    // l'actif (sinon on perdrait l'onglet persisté avant que les onglets reviennent).
-    if (!order.length) return;
-    if (!active || !order.includes(active)) setActive(order[order.length - 1]);
-  }, [order, active]);
-
-  // Persiste l'onglet actif.
-  useEffect(() => {
-    if (active) { try { localStorage.setItem(activeKey(slug), active); } catch { /* ignore */ } }
-  }, [active, slug]);
-
-  // Ouverture d'un fichier (nouvel onglet OU onglet déjà ouvert) → premier plan.
-  // Dépend UNIQUEMENT de focusReq (son nonce change à chaque openFile) : sinon un
-  // simple changement d'`order` (ex. « + nouvelle conversation ») redonnerait le
-  // focus au dernier fichier. `order` est à jour dans la closure de ce rendu.
-  useEffect(() => {
-    if (focusReq && order.includes(focusReq.key)) setActive(focusReq.key);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusReq]);
 
   if (!order.length) {
     return (
@@ -92,9 +68,9 @@ export default function ConversationsSplit() {
       <div className="flex items-stretch shrink-0 border-b border-gray-800 h-8 overflow-x-auto">
         {tabbed ? (
           order.map((key) => (
-            <button key={key} onClick={() => setActive(key)}
+            <button key={key} onClick={() => setActiveKey(key)}
               className={`group flex items-center gap-1.5 px-3 text-[12px] whitespace-nowrap border-r border-gray-800 ${
-                active === key ? 'bg-gray-800 text-gray-100' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+                activeKey === key ? 'bg-gray-800 text-gray-100' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
               }`}>
               {typeOf(key) === 'file'
                 ? <FileCode2 className="w-3 h-3 shrink-0 text-gray-500" />
@@ -120,7 +96,7 @@ export default function ConversationsSplit() {
       {tabbed ? (
         <div className="flex-1 min-h-0 relative">
           {order.map((key) => (
-            <div key={key} className={`absolute inset-0 ${active === key ? '' : 'hidden'}`}>
+            <div key={key} className={`absolute inset-0 ${activeKey === key ? '' : 'hidden'}`}>
               {renderPanel(key)}
             </div>
           ))}
@@ -128,7 +104,16 @@ export default function ConversationsSplit() {
       ) : (
         <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: `repeat(${order.length}, minmax(0, 1fr))` }}>
           {order.map((key) => (
-            <div key={key} className="min-w-0 min-h-0 overflow-hidden border-r border-gray-800 last:border-r-0">
+            // En mode split (plusieurs panneaux visibles), cliquer dans un panneau le
+            // rend « actif » → la sidebar git/explorateur suit son worktree. Ring discret
+            // sur l'actif quand il y en a plusieurs.
+            <div
+              key={key}
+              onMouseDownCapture={() => { if (activeKey !== key) setActiveKey(key); }}
+              className={`min-w-0 min-h-0 overflow-hidden border-r border-gray-800 last:border-r-0 ${
+                order.length > 1 && activeKey === key ? 'ring-1 ring-inset ring-blue-500/30' : ''
+              }`}
+            >
               {renderPanel(key)}
             </div>
           ))}

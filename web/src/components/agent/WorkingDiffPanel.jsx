@@ -36,11 +36,12 @@ export default function WorkingDiffPanel({ panelKey }) {
   const load = useCallback(() => {
     if (!path) return;
     if (!loadedOnce.current) setLoading(true);
-    getSourceGitDiff(slug, path)
+    // convId capturé à l'ouverture → diff lu dans le worktree de la conversation (sinon src/).
+    getSourceGitDiff(slug, path, convo?.convId)
       .then((r) => setDiff(r.data))
       .catch((e) => setDiff({ error: e.response?.data?.error || 'Erreur diff' }))
       .finally(() => { loadedOnce.current = true; setLoading(false); });
-  }, [slug, path]);
+  }, [slug, path, convo?.convId]);
 
   useEffect(() => {
     loadedOnce.current = false;
