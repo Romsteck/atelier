@@ -6,6 +6,7 @@ use atelier_logging::LogIngestService;
 use atelier_watcher::SurveillanceService;
 use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
+use atelier_common::agent_ui_state::OpenTabsStore;
 use atelier_common::events::EventBus;
 use atelier_common::task_store::TaskStore;
 
@@ -25,6 +26,11 @@ pub struct ApiState {
 
     // Tasks
     pub task_store: Arc<TaskStore>,
+
+    /// Studio open-tabs state (conversations/files/diffs/commits + active tab),
+    /// per app, in `atelier_meta`. Source of truth for cross-PC tab sync; pairs
+    /// with the `agent_open_tabs` WS broadcast. No-op when Postgres is down.
+    pub open_tabs: OpenTabsStore,
 
     // Dataverse
     pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
@@ -74,6 +80,7 @@ impl ApiState {
         apps_state_dir: PathBuf,
         dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
         task_store: Arc<TaskStore>,
+        open_tabs: OpenTabsStore,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
         events: Arc<EventBus>,
@@ -93,6 +100,7 @@ impl ApiState {
             apps_src_root,
             apps_runtime_root,
             task_store,
+            open_tabs,
             dv,
             events,
             app_registry,

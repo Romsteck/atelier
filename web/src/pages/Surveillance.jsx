@@ -65,7 +65,8 @@ function KindRow({ slug, kind }) {
   const KindIcon = meta.icon;
   return (
     <Link
-      to={`/studio?app=${slug}&tab=surveillance&kind=${kind.kind}`}
+      to="/studio"
+      state={{ app: slug, tab: 'surveillance', kind: kind.kind }}
       className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-gray-700/40 transition"
     >
       <KindIcon className={`w-3.5 h-3.5 shrink-0 ${kind.blank ? 'text-gray-600' : meta.color}`} />
@@ -90,7 +91,8 @@ function AppCard({ app }) {
   return (
     <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg overflow-hidden">
       <Link
-        to={`/studio?app=${app.slug}&tab=surveillance`}
+        to="/studio"
+        state={{ app: app.slug, tab: 'surveillance' }}
         className="flex items-center gap-2 px-3 py-2 border-b border-gray-700/50 hover:bg-gray-800 transition"
       >
         <span className="text-sm text-gray-50 font-medium truncate">{app.name}</span>

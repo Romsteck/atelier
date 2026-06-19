@@ -36,7 +36,7 @@ function Sidebar({ onClose, collapsed }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const { recentApps, selectedSlug, activeTab, onControl } = useStudio();
+  const { recentApps, selectedSlug, onControl } = useStudio();
   const buildingApps = useBuildingApps();
 
   useEffect(() => {
@@ -56,9 +56,10 @@ function Sidebar({ onClose, collapsed }) {
   const railLabel = collapsed ? 'lg:hidden lg:group-hover/aside:block' : '';
   const railText = collapsed ? 'lg:invisible lg:group-hover/aside:visible' : '';
 
-  // Selecting a recent app opens its studio.
+  // Selecting a recent app opens its studio. L'app cible passe par le `state` du
+  // router (hors URL) ; l'onglet courant est conservé par le Studio (localStorage).
   function handleSelectApp(slug) {
-    navigate(`/studio?app=${encodeURIComponent(slug)}&tab=${activeTab || 'code'}`);
+    navigate('/studio', { state: { app: slug }, replace: onStudio });
     onClose?.();
   }
 

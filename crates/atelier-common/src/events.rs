@@ -39,6 +39,12 @@ pub struct EventBus {
     /// Agent SDK run events (Node runner NDJSON → websocket for live chat stream).
     /// Buffer larger than the others: token deltas can burst.
     pub agent: broadcast::Sender<AgentEvent>,
+    /// Studio open-tabs state change (a PUT to `/agent/open-tabs` → websocket) so
+    /// every connected browser (incl. other PCs) re-syncs its open tab set live.
+    pub agent_open_tabs: broadcast::Sender<AgentOpenTabsEvent>,
+    /// Studio selected-app change (a PUT to `/agent/studio-state` → websocket) so
+    /// every connected browser (incl. other PCs) suit l'app ouverte en live.
+    pub studio_selected_app: broadcast::Sender<StudioSelectedAppEvent>,
 }
 
 impl EventBus {
@@ -61,6 +67,8 @@ impl EventBus {
             source_changed: broadcast::channel(128).0,
             app_todos: broadcast::channel(64).0,
             agent: broadcast::channel(2048).0,
+            agent_open_tabs: broadcast::channel(64).0,
+            studio_selected_app: broadcast::channel(64).0,
         }
     }
 }
@@ -342,6 +350,27 @@ pub struct AgentEvent {
     /// "error" | "done"
     pub kind: String,
     pub data: serde_json::Value,
+}
+
+/// Studio open-tabs state for one app (full snapshot — last write wins). Emitted
+/// on every `PUT /api/apps/{slug}/agent/open-tabs` so connected clients reconcile
+/// their open tab set + active tab. `tabs` is the ordered descriptor array (kept
+/// as generic JSON: the shape is owned by the frontend's RESTORE_TABS).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentOpenTabsEvent {
+    pub slug: String,
+    pub tabs: serde_json::Value,
+    #[serde(default)]
+    pub active: Option<String>,
+}
+
+/// Studio's globally-selected app (full snapshot — last write wins). Emitted on
+/// every `PUT /api/agent/studio-state` so connected clients (incl. other PCs)
+/// follow the open app live. `selected_app` = `None` ⇒ apps gallery (no app open).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudioSelectedAppEvent {
+    #[serde(default)]
+    pub selected_app: Option<String>,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

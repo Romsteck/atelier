@@ -300,6 +300,18 @@ export const renameConversation = (slug, sid, title) =>
   api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
 export const deleteConversation = (slug, sid) =>
   api.delete(`/apps/${slug}/agent/conversations/${sid}`);
+// État d'UI des onglets ouverts (sync cross-PC) : { tabs, active }. Autoritaire
+// côté serveur ; le PUT déclenche un broadcast WS `agent:open-tabs`.
+export const getAgentOpenTabs = (slug) =>
+  api.get(`/apps/${slug}/agent/open-tabs`);
+export const setAgentOpenTabs = (slug, body) =>
+  api.put(`/apps/${slug}/agent/open-tabs`, body);
+// App ouverte dans le Studio (sélection GLOBALE, sync cross-PC) : { selected_app }.
+// Autoritaire côté serveur (singleton) ; le PUT déclenche un broadcast WS
+// `studio:selected-app`. Permet de restaurer l'app au refresh ET au changement
+// de navigateur/PC (le localStorage est per-browser). body: { selected_app: string|null }.
+export const getStudioSelectedApp = () => api.get('/agent/studio-state');
+export const setStudioSelectedApp = (body) => api.put('/agent/studio-state', body);
 // Version SDK installée vs dernière (npm) + MAJ in-place (éphémère) du runner.
 export const getSdkVersion = () => api.get('/agent/sdk/version');
 // timeout long : `npm install` côté serveur peut dépasser les 30 s par défaut du client.

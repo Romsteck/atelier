@@ -13,16 +13,12 @@ import { useAgentConversations } from '../../context/AgentConversationsContext';
 const MIN_PANEL_W = 340;
 const MAX_SPLIT = 3;
 
-const activeKey = (slug) => `agent:activeTab:${slug}`;
-
 export default function ConversationsSplit() {
-  const { order, convos, convName, newConversation, closeConversation, focusReq, slug } = useAgentConversations();
+  // `active`/`setActive` sont désormais propriétés du provider (état synchronisé
+  // cross-PC) : la restauration + la validité de l'actif sont gérées là-bas.
+  const { order, convos, active, setActive, convName, newConversation, closeConversation, focusReq } = useAgentConversations();
   const ref = useRef(null);
   const [width, setWidth] = useState(0);
-  // Onglet actif restauré au rechargement / changement de page (validé contre `order`).
-  const [active, setActive] = useState(() => {
-    try { return localStorage.getItem(activeKey(slug)) || null; } catch { return null; }
-  });
 
   const typeOf = (key) => convos[key]?.type; // 'file' | 'commit' | 'diff' | undefined(=conversation)
   const renderPanel = (key) => {
@@ -42,18 +38,6 @@ export default function ConversationsSplit() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  useEffect(() => {
-    // Pendant la restauration `order` est momentanément vide : NE PAS réinitialiser
-    // l'actif (sinon on perdrait l'onglet persisté avant que les onglets reviennent).
-    if (!order.length) return;
-    if (!active || !order.includes(active)) setActive(order[order.length - 1]);
-  }, [order, active]);
-
-  // Persiste l'onglet actif.
-  useEffect(() => {
-    if (active) { try { localStorage.setItem(activeKey(slug), active); } catch { /* ignore */ } }
-  }, [active, slug]);
 
   // Ouverture d'un fichier (nouvel onglet OU onglet déjà ouvert) → premier plan.
   // Dépend UNIQUEMENT de focusReq (son nonce change à chaque openFile) : sinon un

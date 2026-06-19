@@ -92,6 +92,8 @@ async fn main() -> Result<()> {
     let meta_pool = init_control_db().await;
     let task_store =
         Arc::new(atelier_common::task_store::TaskStore::new(meta_pool.clone()).await);
+    // Studio open-tabs store (cross-PC tab sync). Degrades to no-op without the pool.
+    let open_tabs = atelier_common::agent_ui_state::OpenTabsStore::new(meta_pool.clone());
     let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
     // Apps supervisor wiring. The registries (apps + ports) live in the shared
@@ -160,6 +162,7 @@ async fn main() -> Result<()> {
         apps_state_dir.clone(),
         dv,
         task_store,
+        open_tabs,
         apps_src_root,
         apps_runtime_root,
         events,

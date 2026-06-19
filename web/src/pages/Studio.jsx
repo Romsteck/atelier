@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useSearchParams, useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
@@ -17,8 +17,8 @@ import {
 import {
   listApps, createApp, controlApp, deleteApp, updateApp,
   getApp, getAppStatus, getAppLogs, getLogs,
+  getStudioSelectedApp, setStudioSelectedApp,
 } from '../api/client';
-import { Link } from 'react-router-dom';
 
 const STACKS = [
   { value: 'next-js', label: 'Next.js' },
@@ -116,13 +116,6 @@ function LogsTab({ slug }) {
         </div>
         <input type="text" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtrer..."
           className="flex-1 max-w-[300px] px-3 py-1 rounded-sm text-sm outline-hidden bg-gray-900 text-gray-50 border border-gray-700" />
-        <Link
-          to={`/logs?app_slug=${encodeURIComponent(slug)}`}
-          className="text-xs text-amber-400 hover:text-amber-300 inline-flex items-center gap-1"
-          title="Voir tous les logs de cette app en plein écran"
-        >
-          plein écran <ExternalLink className="w-3 h-3" />
-        </Link>
         <span className="text-xs text-gray-500 ml-2">{filtered.length} entrees{autoScroll ? ' (auto-scroll)' : ''}</span>
       </div>
       <div ref={ref} onScroll={onScroll} className="flex-1 overflow-y-auto p-4 font-mono text-xs">
@@ -334,12 +327,33 @@ function AppsGallery({ apps, onOpen, onAdd, onControl }) {
 // ██ MAIN STUDIO COMPONENT
 // ══════════════════════════════════════════════════════════════════
 
+// « Ce document vient-il d'être chargé ? » — flag au scope module, donc remis à
+// false UNIQUEMENT par un rechargement complet de page (refresh, ouverture du PWA,
+// host nu `/`, URL directe), et conservé à travers les navigations SPA. WHY : on ne
+// peut PAS distinguer un chargement initial d'un clic « Studio » via `location.key`
+// (le redirect `/`→`/studio` de App.jsx, le PWA `start_url:"/"` et le wildcard `*`
+// passent tous par <Navigate replace> qui forge une clé ALÉATOIRE ≠ 'default'). Le
+// 1er montage du Studio dans le document = chargement de page → on restaure l'app ;
+// les montages suivants (nav SPA « Studio ») → galerie.
+let studioBooted = false;
+
 export default function Studio() {
-  const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const [apps, setApps] = useState([]);
-  const [selectedSlug, setSelectedSlug] = useState(() => searchParams.get('app') || '');
-  const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'code');
+  // App/onglet sélectionnés = état interne (plus AUCUN paramètre d'URL). Les deep-links
+  // inter-pages passent par le `state` du router (hors URL) ; un chargement de page
+  // restaure la dernière app via localStorage (paint immédiat) PUIS via le serveur
+  // (`studio_state`, autoritaire cross-navigateur/PC — cf. effet de chargement plus bas) ;
+  // un clic « Studio » (nav SPA sans state) → galerie. La discrimination chargement/clic
+  // se fait par `studioBooted` (cf. ci-dessus), PAS par `location.key` (cf. WHY).
+  const [selectedSlug, setSelectedSlug] = useState(() => {
+    if (location.state?.app != null) return location.state.app;
+    if (!studioBooted) return localStorage.getItem('studio:selectedApp') || '';
+    return '';
+  });
+  const [activeTab, setActiveTab] = useState(() => location.state?.tab || localStorage.getItem('studio:activeTab') || 'code');
+  // Kind de surveillance demandé par un deep-link (one-shot, hors URL) → onglet Surveillance.
+  const [pendingKind, setPendingKind] = useState(() => location.state?.kind || null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -370,6 +384,27 @@ export default function Studio() {
   const [agentLaunch, setAgentLaunch] = useState(null);
   const nonceRef = useRef(0);
 
+  // ── Sync cross-PC de l'app ouverte (serveur autoritaire, ≠ localStorage per-browser) ──
+  // `studioStateLoadedRef` : le PUT serveur est gardé tant que la lecture initiale n'a pas
+  // eu lieu (sinon le PUT au montage, sur la valeur localStorage, écraserait la valeur
+  // serveur AVANT qu'on l'ait lue — même classe de bug que le mount-ordering des open-tabs).
+  // `selectedAppSyncedRef` : dernière valeur connue du serveur (anti-echo : du PUT comme de
+  // notre propre broadcast WS qui nous revient).
+  const studioStateLoadedRef = useRef(false);
+  const selectedAppSyncedRef = useRef(undefined);
+  // Valeur courante de selectedSlug, lisible dans les closures asynchrones : la lecture
+  // serveur (GET en vol) ne doit JAMAIS écraser un choix fait par l'utilisateur (ou poussé
+  // par un WS) pendant ce GET. Mise à jour à chaque rendu (≠ mountSlug, périmé).
+  const selectedSlugRef = useRef(selectedSlug);
+  selectedSlugRef.current = selectedSlug;
+  // Ce montage est-il le 1er du document (= chargement de page) ? Capturé AVANT que l'effet
+  // ci-dessous ne bascule `studioBooted`. Pilote la restauration (cf. effet de chargement).
+  const isBootMountRef = useRef(!studioBooted);
+  useEffect(() => { studioBooted = true; }, []);
+  // 1er passage de l'effet de nav [location.key] = le montage : on ne « vide vers galerie »
+  // qu'aux CHANGEMENTS de nav SUIVANTS (clic « Studio »), jamais au montage initial.
+  const firstNavEffectRef = useRef(true);
+
   // ── Fetch apps list ──
   const fetchApps = useCallback(async () => {
     try {
@@ -390,8 +425,65 @@ export default function Studio() {
     getAppStatus(selectedSlug).then(r => setStatus(r.data?.data || r.data)).catch(() => {});
   }, [selectedSlug]);
 
-  // ── Persist last-used tab ──
+  // ── Persist last-used tab + last-opened app (refresh restore, sans URL) ──
+  // localStorage = cache de paint rapide même-navigateur ; la source de vérité
+  // cross-PC/navigateur est `studio_state` côté serveur (effets ci-dessous).
   useEffect(() => { localStorage.setItem('studio:activeTab', activeTab); }, [activeTab]);
+  useEffect(() => {
+    try {
+      if (selectedSlug) localStorage.setItem('studio:selectedApp', selectedSlug);
+      else localStorage.removeItem('studio:selectedApp');
+    } catch { /* ignore */ }
+  }, [selectedSlug]);
+
+  // ── Restaurer l'app ouverte depuis le serveur (refresh ET changement de navigateur/PC) ──
+  // Le localStorage ne couvre que le même navigateur ; sur un poste neuf il est vide. On lit
+  // donc `studio_state` au montage : sur un chargement initial / refresh (key === 'default',
+  // pas de deep-link) on restaure l'app serveur même si le localStorage était vide. Sinon
+  // (galerie après nav explicite, ou deep-link) on respecte l'app courante locale mais on
+  // SEED le serveur avec elle (premier passage / autre app). Postgres down → repli localStorage.
+  useEffect(() => {
+    let cancelled = false;
+    const mountSlug = selectedSlug; // valeur initiale (localStorage / deep-link / '')
+    // Restauration UNIQUEMENT sur un chargement de page (1er montage du document) et hors
+    // deep-link explicite (state.app, lui, est appliqué par l'effet de nav / l'initializer).
+    const isInitial = isBootMountRef.current && location.state?.app == null;
+    getStudioSelectedApp()
+      .then(res => {
+        if (cancelled) return;
+        const srv = res.data?.selected_app ?? null;
+        const cur = selectedSlugRef.current; // sélection COURANTE (peut avoir changé depuis le montage)
+        selectedAppSyncedRef.current = srv;
+        studioStateLoadedRef.current = true; // déverrouille le PUT serveur
+        if (isInitial && srv && srv !== mountSlug && cur === mountSlug) {
+          // Serveur autoritaire cross-navigateur ET l'utilisateur n'a pas touché à la sélection
+          // pendant le GET → on restaure (le PUT verra synced === srv, donc pas de ré-écriture).
+          setSelectedSlug(srv);
+        } else {
+          // Serveur vide/obsolète, ou l'utilisateur/WS a déjà changé l'app : on persiste la valeur
+          // COURANTE (seed au 1er passage / maj) si elle diffère du serveur. Jamais mountSlug (périmé).
+          const val = cur || null;
+          if (val !== srv) {
+            selectedAppSyncedRef.current = val;
+            setStudioSelectedApp({ selected_app: val }).catch(() => {});
+          }
+        }
+      })
+      .catch(() => { if (!cancelled) studioStateLoadedRef.current = true; });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persistance serveur de l'app ouverte (cross-PC + cross-navigateur). Gardée par
+  // loadedRef (cf. mount-ordering) ; anti-echo via syncedRef (pas de PUT redondant quand
+  // le changement vient du serveur/WS ou n'a pas bougé).
+  useEffect(() => {
+    if (!studioStateLoadedRef.current) return;
+    const val = selectedSlug || null;
+    if (val === selectedAppSyncedRef.current) return;
+    selectedAppSyncedRef.current = val;
+    setStudioSelectedApp({ selected_app: val }).catch(() => {});
+  }, [selectedSlug]);
 
   // ── Persist disposition ──
   useEffect(() => { localStorage.setItem('studio:layoutMode', layoutMode); }, [layoutMode]);
@@ -430,17 +522,35 @@ export default function Studio() {
         setApp(prev => prev ? { ...prev, state: data.state } : prev);
       }
     },
+    // Un autre PC (ou navigateur) a changé l'app ouverte → on suit en live. Anti-echo :
+    // on ignore l'écho de notre propre PUT (qui a déjà positionné selectedAppSyncedRef).
+    'studio:selected-app': (data) => {
+      const srv = data?.selected_app ?? null;
+      if (srv === selectedAppSyncedRef.current) return;
+      selectedAppSyncedRef.current = srv;
+      setSelectedSlug(srv || '');
+    },
   });
 
-  // ── Sync selection + tab from the URL (nav clicks, deep-links, back/forward) ──
-  // On /studio, no ?app= means "show the gallery" → clear the selection.
+  // ── Application de la navigation router (deep-links inter-pages + clic « Studio ») ──
+  // Le `state` du router transporte {app, tab, kind} HORS URL. À chaque navigation
+  // (location.key change) : on applique l'état s'il est présent ; sinon, une navigation
+  // SPA EXPLICITE vers /studio (clic « Studio ») ramène à la galerie. Le 1er passage =
+  // le montage (chargement de page) : on n'y touche PAS — la restauration est gérée par
+  // l'effet de chargement. (On ne se fie plus à `location.key`, cf. WHY de `studioBooted`.)
   useEffect(() => {
-    if (location.pathname !== '/studio') return;
-    const urlApp = searchParams.get('app') || '';
-    const urlTab = searchParams.get('tab');
-    if (urlApp !== selectedSlug) setSelectedSlug(urlApp);
-    if (urlTab && urlTab !== activeTab) setActiveTab(urlTab);
-  }, [searchParams, location.pathname, selectedSlug, activeTab]);
+    const st = location.state;
+    if (st && (st.app != null || st.tab || st.kind)) {
+      if (st.app != null) setSelectedSlug(st.app);
+      if (st.tab) setActiveTab(st.tab);
+      if (st.kind) setPendingKind(st.kind);
+      firstNavEffectRef.current = false;
+      return;
+    }
+    if (firstNavEffectRef.current) { firstNavEffectRef.current = false; return; }
+    setSelectedSlug(''); // clic « Studio » (nav SPA sans state) → galerie
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key]);
 
   // Un tab retiré du code (ex. l'ancien 'env', fusionné dans Settings) peut
   // rester en localStorage/URL d'une session précédente → panneau vide.
@@ -453,12 +563,12 @@ export default function Studio() {
   const handleAddApp = useCallback(() => setShowCreate(true), []);
 
   function handleOpenApp(slug) {
-    setSearchParams({ app: slug, tab: activeTab || 'code' });
+    setSelectedSlug(slug);
+    if (!activeTab) setActiveTab('code');
   }
 
   function handleSelectTab(tab) {
     setActiveTab(tab);
-    setSearchParams({ app: selectedSlug, tab });
   }
 
   function handleSetLayoutMode(mode) {
@@ -501,7 +611,7 @@ export default function Studio() {
   async function handleDelete() {
     if (!selectedSlug || !confirm(`Supprimer "${selectedSlug}" ?`)) return;
     await deleteApp(selectedSlug);
-    setSearchParams({});
+    setSelectedSlug('');
     setApp(null);
     fetchApps();
   }
@@ -523,7 +633,7 @@ export default function Studio() {
       case 'logs':         return <LogsTab slug={selectedSlug} />;
       case 'docs':         return <DocsTab slug={selectedSlug} />;
       case 'env':          return <EnvTab slug={selectedSlug} onRestart={() => handleControl(selectedSlug, 'restart')} />;
-      case 'surveillance': return <SurveillanceTab slug={selectedSlug} initialKind={searchParams.get('kind')} onResolve={openAgentWithPrompt} />;
+      case 'surveillance': return <SurveillanceTab slug={selectedSlug} initialKind={pendingKind} onResolve={openAgentWithPrompt} />;
       case 'settings':     return <SettingsTab app={currentApp} slug={selectedSlug} onUpdate={handleUpdate} onDelete={handleDelete} />;
       default:             return null;
     }

@@ -82,3 +82,34 @@ CREATE TABLE IF NOT EXISTS doc_entries (
 CREATE INDEX IF NOT EXISTS doc_entries_tsv_idx  ON doc_entries USING GIN (tsv);
 CREATE INDEX IF NOT EXISTS doc_entries_app_idx  ON doc_entries (app_id);
 CREATE INDEX IF NOT EXISTS doc_entries_type_idx ON doc_entries (app_id, doc_type);
+
+-- ---------------------------------------------------------------------------
+-- agent_open_tabs — état d'UI du Studio par app : ensemble des onglets ouverts
+-- (conversations + fichiers + diffs + commits) et onglet actif. WHY côté serveur :
+-- le Studio est utilisé depuis plusieurs PCs contre le même backend Atelier ; cet
+-- état doit rester ouvert et SYNCHRONISÉ entre machines (couplé au broadcast WS
+-- `agent:open-tabs`). Le localStorage des navigateurs ne reste qu'un cache de repli.
+--   tabs (JSONB)  = liste ordonnée de descripteurs (cf. RESTORE_TABS côté front)
+--   active        = clé de l'onglet au premier plan (NULL = aucun)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_open_tabs (
+    slug        TEXT         PRIMARY KEY,
+    tabs        JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    active      TEXT,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- studio_state — singleton : la DERNIÈRE app ouverte dans le Studio (sélection
+-- GLOBALE, ≠ agent_open_tabs qui est par-app). WHY côté serveur : restaurer l'app
+-- au refresh ET au changement de navigateur/PC (le localStorage est per-browser,
+-- donc absent sur un autre poste) ; couplé au broadcast WS `studio:selected-app`
+-- pour un suivi live entre PCs. Une seule ligne (id = true), upsert ON CONFLICT (id).
+--   selected_app NULL = aucune app ouverte (galerie)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS studio_state (
+    id            BOOLEAN      PRIMARY KEY DEFAULT true,
+    selected_app  TEXT,
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT studio_state_singleton CHECK (id)
+);

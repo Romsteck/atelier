@@ -1,3 +1,4 @@
+pub mod agent_ui_state;
 pub mod control_db;
 pub mod events;
 pub mod identity;

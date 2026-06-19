@@ -16,6 +16,8 @@ import {
   getConversation,
   renameConversation,
   deleteConversation,
+  getAgentOpenTabs,
+  setAgentOpenTabs,
 } from '../api/client';
 
 // Provider multi-conversations du mode agent. UNE source d'état + UN seul WebSocket
@@ -29,6 +31,7 @@ let _kc = 0;
 const newKey = () => `c${Date.now().toString(36)}_${_kc++}`;
 const openSidsKey = (slug) => `agent:openSids:${slug}`; // legacy (lecture seule, migration)
 const openTabsKey = (slug) => `agent:openTabs:${slug}`;
+const activeTabKey = (slug) => `agent:activeTab:${slug}`; // cache local de l'onglet actif
 
 function loadOpenSids(slug) {
   try {
@@ -41,7 +44,8 @@ function loadOpenSids(slug) {
 
 // Descripteurs d'onglets persistés (ordre préservé) : conversation `{t:'c',sid}`,
 // fichier `{t:'f',path,name}`, commit `{t:'g',sha,short,subject}`. Migration depuis
-// l'ancien format (liste de sids) si la nouvelle clé est absente.
+// l'ancien format (liste de sids) si la nouvelle clé est absente. = cache de repli
+// hors-ligne ; la source de vérité est désormais le serveur (sync cross-PC).
 function loadTabs(slug) {
   try {
     const v = JSON.parse(localStorage.getItem(openTabsKey(slug)));
@@ -50,6 +54,43 @@ function loadTabs(slug) {
     /* ignore */
   }
   return loadOpenSids(slug).map((sid) => ({ t: 'c', sid }));
+}
+
+function loadActive(slug) {
+  try {
+    return localStorage.getItem(activeTabKey(slug)) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Clé d'onglet dérivée d'un descripteur (miroir EXACT des clés construites par
+// RESTORE_TABS). Sert au calcul de l'actif et à la déduplication.
+function descriptorKey(t) {
+  if (!t) return null;
+  if (t.t === 'c' && t.sid) return t.sid;
+  if (t.t === 'f' && t.path) return `file:${t.path}`;
+  if (t.t === 'g' && t.sha) return `commit:${t.sha}`;
+  if (t.t === 'd' && t.path) return `diff:${t.path}`;
+  return null;
+}
+
+// Sérialisation canonique d'une liste de descripteurs (dédupliquée, ordre + forme
+// de champs stables) → DOIT correspondre octet pour octet à celle calculée depuis
+// l'état (cf. `tabsArr` du provider) pour que l'anti-écho (lastSyncedRef) marche.
+function canonTabs(descriptors) {
+  const seen = new Set();
+  const out = [];
+  for (const t of descriptors || []) {
+    const k = descriptorKey(t);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    if (t.t === 'f') out.push({ t: 'f', path: t.path, name: t.name });
+    else if (t.t === 'g') out.push({ t: 'g', sha: t.sha, short: t.short, subject: t.subject });
+    else if (t.t === 'd') out.push({ t: 'd', path: t.path, status: t.status });
+    else if (t.t === 'c') out.push({ t: 'c', sid: t.sid, ...(t.fid != null ? { fid: t.fid } : {}), ...(t.eff ? { eff: t.eff } : {}) });
+  }
+  return out;
 }
 
 // Réponse AskUserQuestion d'une conversation FERMÉE → tour en clair (miroir de
@@ -113,48 +154,107 @@ function reducer(state, a) {
           order.push(key);
         }
       }
-      return { order, convos };
+      const active = a.active && order.includes(a.active) ? a.active : order[order.length - 1] || null;
+      return { order, convos, active };
+    }
+    // Réconciliation d'un état serveur reçu par WS (autre PC). Reconstruit l'ordre
+    // depuis `data.tabs`, CONSERVE les objets convos existants (état live préservé),
+    // PRÉSERVE les brouillons locaux sans sid (non représentés côté serveur), retire
+    // les onglets absents et applique l'actif. Idempotent : renvoie le même état si
+    // rien ne change (évite render + re-PUT en boucle).
+    case 'SYNC_TABS': {
+      const tabs = Array.isArray(a.data?.tabs) ? a.data.tabs : [];
+      const convos = {};
+      const order = [];
+      const addKey = (key, makeConvo) => {
+        if (key && !convos[key]) {
+          convos[key] = state.convos[key] || makeConvo();
+          order.push(key);
+        }
+      };
+      for (const t of tabs) {
+        if (t.t === 'c' && t.sid) {
+          addKey(t.sid, () => {
+            const c = emptyConvo(t.sid, t.sid);
+            c.loading = true;
+            if (t.fid != null) c.findingId = t.fid;
+            if (t.eff) c.effort = t.eff;
+            return c;
+          });
+        } else if (t.t === 'f' && t.path) {
+          addKey(`file:${t.path}`, () => ({ key: `file:${t.path}`, type: 'file', path: t.path, name: t.name }));
+        } else if (t.t === 'g' && t.sha) {
+          addKey(`commit:${t.sha}`, () => ({ key: `commit:${t.sha}`, type: 'commit', sha: t.sha, short: t.short, subject: t.subject }));
+        } else if (t.t === 'd' && t.path) {
+          addKey(`diff:${t.path}`, () => ({ key: `diff:${t.path}`, type: 'diff', path: t.path, status: t.status }));
+        }
+      }
+      // Brouillons locaux (conversation neuve sans sid) : on les garde en fin.
+      for (const k of state.order) {
+        const c = state.convos[k];
+        if (c && !c.type && !c.sid && !convos[k]) {
+          convos[k] = c;
+          order.push(k);
+        }
+      }
+      let active = a.data?.active;
+      if (!active || !order.includes(active)) {
+        active = order.includes(state.active) ? state.active : order[order.length - 1] || null;
+      }
+      const sameOrder = order.length === state.order.length && order.every((k, i) => k === state.order[i]);
+      if (sameOrder && active === state.active) return state; // no-op
+      return { order, convos, active };
+    }
+    case 'SET_ACTIVE': {
+      if (a.key === state.active) return state;
+      if (a.key != null && !state.order.includes(a.key)) return state;
+      return { ...state, active: a.key };
     }
     case 'NEW_PANEL': {
       const c = emptyConvo(a.key, null);
       if (a.autoSend) c.autoSend = a.autoSend;
       if (a.findingId != null) c.findingId = a.findingId;
       if (a.effort) c.effort = a.effort;
-      return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c } };
+      // Une conversation neuve prend le focus (sinon, en mode onglets, elle s'ouvrirait
+      // en arrière-plan). C'est aussi l'actif synchronisé vers les autres PCs.
+      return { ...state, order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c }, active: a.key };
     }
     case 'OPEN_PANEL': {
-      if (state.convos[a.key]) return state;
+      if (state.convos[a.key]) return { ...state, active: a.key };
       const c = emptyConvo(a.key, a.sid);
       c.loading = true;
-      return { order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c } };
+      return { ...state, order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c }, active: a.key };
     }
     case 'CLOSE_PANEL': {
       if (!state.convos[a.key]) return state;
       const convos = { ...state.convos };
       delete convos[a.key];
-      return { order: state.order.filter((k) => k !== a.key), convos };
+      const order = state.order.filter((k) => k !== a.key);
+      // Si l'onglet fermé était l'actif, basculer sur le dernier restant.
+      const active = state.active === a.key ? order[order.length - 1] || null : state.active;
+      return { ...state, order, convos, active };
     }
     // Onglet « fichier » (visionneuse), à côté des conversations dans le même split.
     // Clé dérivée du chemin → ré-ouvrir le même fichier ne duplique pas l'onglet.
     case 'OPEN_FILE': {
       const key = `file:${a.path}`;
-      if (state.convos[key]) return state; // déjà ouvert → le focus est demandé à part
+      if (state.convos[key]) return state; // déjà ouvert → le focus est demandé via focusReq
       const c = { key, type: 'file', path: a.path, name: a.name };
-      return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
+      return { ...state, order: [...state.order, key], convos: { ...state.convos, [key]: c }, active: key };
     }
     // Onglet « commit » (diff plein écran d'un commit), même mécanique que les fichiers.
     case 'OPEN_COMMIT': {
       const key = `commit:${a.sha}`;
       if (state.convos[key]) return state;
       const c = { key, type: 'commit', sha: a.sha, short: a.short, subject: a.subject };
-      return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
+      return { ...state, order: [...state.order, key], convos: { ...state.convos, [key]: c }, active: key };
     }
     // Onglet « diff » (diff plein écran d'un fichier MODIFIÉ du working tree).
     case 'OPEN_DIFF': {
       const key = `diff:${a.path}`;
       if (state.convos[key]) return state;
       const c = { key, type: 'diff', path: a.path, status: a.status };
-      return { order: [...state.order, key], convos: { ...state.convos, [key]: c } };
+      return { ...state, order: [...state.order, key], convos: { ...state.convos, [key]: c }, active: key };
     }
     case 'SNAPSHOT_OK': {
       const c = state.convos[a.key];
@@ -286,7 +386,7 @@ function reducer(state, a) {
 }
 
 export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, children }) {
-  const [state, dispatch] = useReducer(reducer, { order: [], convos: {} });
+  const [state, dispatch] = useReducer(reducer, { order: [], convos: {}, active: null });
   const [allConvos, setAllConvos] = useState([]);
   // Demande de mise au premier plan d'un onglet (ouverture de fichier) : {key, n}.
   // ConversationsSplit l'observe pour activer l'onglet (utile en mode replié/onglets).
@@ -294,48 +394,147 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   const focusNonce = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
+  // Sync cross-PC : `loadedRef` empêche tout PUT avant le chargement initial ;
+  // `lastSyncedRef` = dernier payload connu du serveur (notre PUT OU un event WS reçu)
+  // → neutralise la boucle d'écho (on ne re-PUT pas ce qu'on vient de recevoir/d'envoyer).
+  const loadedRef = useRef(false);
+  const lastSyncedRef = useRef(null);
 
-  // UN seul WebSocket pour tout le workspace ; le reducer route par session_id/run_id.
-  useWebSocket({ 'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); } });
-
-  // Restauration au montage (par slug) : recharge TOUS les onglets (conversations,
-  // fichiers, commits) dans leur ordre. Les conversations re-fetchent leur snapshot ;
-  // fichiers/commits re-fetchent leur contenu à leur propre montage.
-  useEffect(() => {
-    const tabs = loadTabs(slug);
-    if (!tabs.length) return;
-    dispatch({ type: 'RESTORE_TABS', tabs });
-    for (const t of tabs) {
-      if (t.t !== 'c' || !t.sid) continue;
-      getConversation(slug, t.sid)
-        .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key: t.sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
-        )
-        .catch((e) => {
-          if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: t.sid });
-          else dispatch({ type: 'SNAPSHOT_ERR', key: t.sid, error: e.message });
-        });
-    }
+  // Re-fetch du snapshot d'une conversation (helper partagé restore/sync).
+  const fetchSnapshot = useCallback((sid) => {
+    getConversation(slug, sid)
+      .then((r) => dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }))
+      .catch((e) => {
+        if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
+        else dispatch({ type: 'SNAPSHOT_ERR', key: sid, error: e.message });
+      });
   }, [slug]);
 
-  // Persiste l'ensemble des onglets ouverts (ordre + type) — recalculé seulement
-  // quand la description change (pas à chaque delta de conversation). Une conversation
-  // neuve sans sid n'est pas encore persistable (rien à restaurer côté serveur).
-  const tabsStr = JSON.stringify(
-    state.order
-      .map((k) => {
-        const c = state.convos[k];
-        if (!c) return null;
-        if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
-        if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
-        if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
-        return c.sid ? { t: 'c', sid: c.sid, ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
-      })
-      .filter(Boolean),
-  );
+  // UN seul WebSocket pour tout le workspace : events de run (routés par session_id/
+  // run_id) + sync de l'ensemble des onglets ouverts (changement venu d'un autre PC).
+  useWebSocket({
+    'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); },
+    'agent:open-tabs': (d) => {
+      if (!d || d.slug !== slug) return;
+      const incoming = canonTabs(d.tabs);
+      const keys = incoming.map(descriptorKey);
+      const active = d.active && keys.includes(d.active) ? d.active : null;
+      // Pose la référence AVANT le dispatch : l'effet de persistance verra un payload
+      // identique → pas de re-PUT (anti-écho).
+      lastSyncedRef.current = JSON.stringify({ tabs: incoming, active });
+      const before = stateRef.current;
+      const beforeSids = new Set(before.order.map((k) => before.convos[k]?.sid).filter(Boolean));
+      dispatch({ type: 'SYNC_TABS', data: d });
+      // Snapshot des conversations nouvellement ouvertes par ce sync.
+      for (const t of d.tabs || []) {
+        if (t.t === 'c' && t.sid && !beforeSids.has(t.sid)) fetchSnapshot(t.sid);
+      }
+    },
+  });
+
+  // Chargement initial (par slug) : l'état des onglets est AUTORITAIRE côté serveur
+  // (sync cross-PC). On le charge, re-fetche les snapshots des conversations, et amorce
+  // le serveur depuis le cache local si la table est vide (migration douce post-deploy).
+  // Repli sur le cache localStorage si le serveur est injoignable (Postgres down).
   useEffect(() => {
-    localStorage.setItem(openTabsKey(slug), tabsStr);
-  }, [tabsStr, slug]);
+    let cancelled = false;
+    loadedRef.current = false;
+    lastSyncedRef.current = null;
+    // Capture le cache local AVANT que l'effet de cache (déclaré après) n'écrive l'état
+    // transitoire vide au montage → la migration douce lirait sinon un cache effacé.
+    const cachedLocal = loadTabs(slug);
+    const cachedActive = loadActive(slug);
+
+    const applyLoaded = (tabs, rawActive, seed) => {
+      if (cancelled) return;
+      const keys = [];
+      for (const t of tabs) { const k = descriptorKey(t); if (k && !keys.includes(k)) keys.push(k); }
+      const active = rawActive && keys.includes(rawActive) ? rawActive : keys[keys.length - 1] || null;
+      const canonical = { tabs: canonTabs(tabs), active };
+      dispatch({ type: 'RESTORE_TABS', tabs, active });
+      lastSyncedRef.current = JSON.stringify(canonical);
+      loadedRef.current = true;
+      if (seed) setAgentOpenTabs(slug, canonical).catch(() => {});
+      for (const t of tabs) {
+        if (t.t === 'c' && t.sid) fetchSnapshot(t.sid);
+      }
+    };
+
+    getAgentOpenTabs(slug)
+      .then((r) => {
+        if (cancelled) return;
+        const serverTabs = Array.isArray(r.data?.tabs) ? r.data.tabs : [];
+        if (serverTabs.length) {
+          applyLoaded(serverTabs, r.data?.active ?? null, false);
+        } else {
+          // Serveur vide → amorce depuis le cache local (migration douce).
+          applyLoaded(cachedLocal, cachedLocal.length ? cachedActive : null, cachedLocal.length > 0);
+        }
+      })
+      .catch(() => {
+        // Serveur injoignable → mode dégradé sur le cache local. loadedRef passe quand
+        // même à true : un PUT ultérieur réessaiera (et échouera proprement) jusqu'au
+        // rétablissement du serveur.
+        applyLoaded(cachedLocal, cachedActive, false);
+      });
+
+    return () => { cancelled = true; };
+  }, [slug, fetchSnapshot]);
+
+  // Sérialisation canonique de l'état courant (brouillons sans sid exclus). DOIT
+  // matcher `canonTabs(...)` à l'octet près pour que l'anti-écho fonctionne.
+  const tabsArr = state.order
+    .map((k) => {
+      const c = state.convos[k];
+      if (!c) return null;
+      if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
+      if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
+      if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
+      return c.sid ? { t: 'c', sid: c.sid, ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
+    })
+    .filter(Boolean);
+  // Actif persistable : un brouillon (clé locale `c…`, sans sid) n'a pas d'identité
+  // reproductible sur un autre PC → on stocke null dans ce cas.
+  const ac = state.active ? state.convos[state.active] : null;
+  const activeKeyVal = ac && (ac.type || ac.sid) ? state.active : null;
+  const tabsStr = JSON.stringify(tabsArr);
+  const payloadStr = JSON.stringify({ tabs: tabsArr, active: activeKeyVal });
+
+  // Cache local (repli hors-ligne). Gated par `loadedRef` : ne PAS écrire l'état
+  // transitoire vide du montage (sinon on efface le cache avant la migration douce).
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    try {
+      localStorage.setItem(openTabsKey(slug), tabsStr);
+      if (activeKeyVal) localStorage.setItem(activeTabKey(slug), activeKeyVal);
+      else localStorage.removeItem(activeTabKey(slug));
+    } catch { /* ignore */ }
+  }, [tabsStr, activeKeyVal, slug]);
+
+  // Source de vérité = serveur : PUT (debouncé 400 ms) à chaque changement réel →
+  // broadcast WS aux autres PCs. Anti-écho via lastSyncedRef ; pas de PUT tant que
+  // le chargement initial n'a pas eu lieu.
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    if (payloadStr === lastSyncedRef.current) return;
+    const id = setTimeout(() => {
+      setAgentOpenTabs(slug, { tabs: tabsArr, active: activeKeyVal })
+        .then(() => { lastSyncedRef.current = payloadStr; })
+        .catch(() => { /* serveur/PG down → cache local seul, retry au prochain changement */ });
+    }, 400);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payloadStr, slug]);
+
+  // Filet de sécurité : si l'actif n'est plus dans l'ordre (chemin ne passant pas par
+  // CLOSE_PANEL), basculer sur le dernier onglet (miroir de l'ancienne logique de
+  // ConversationsSplit, désormais propriétaire dans le provider).
+  useEffect(() => {
+    if (!state.order.length) return;
+    if (!state.active || !state.order.includes(state.active)) {
+      dispatch({ type: 'SET_ACTIVE', key: state.order[state.order.length - 1] });
+    }
+  }, [state.order, state.active]);
 
   // Publie l'ensemble des findings ayant une conversation de résolution OUVERTE, pour que
   // la surveillance (hors de cet arbre) désactive leur bouton « Résoudre ». Recalculé à
@@ -345,6 +544,10 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     const ids = state.order.map((k) => state.convos[k]?.findingId).filter((v) => v != null);
     setOpenResolveFindings(ids);
   }, [state.order, state.convos]);
+
+  // Onglet actif : propriété du provider (pour être synchronisé cross-PC). Le
+  // reducer valide la clé (ignore si absente de l'ordre).
+  const setActive = useCallback((key) => { dispatch({ type: 'SET_ACTIVE', key }); }, []);
 
   const refreshAll = useCallback(() => {
     listConversations(slug)
@@ -608,6 +811,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     slug,
     order: state.order,
     convos: state.convos,
+    active: state.active,
+    setActive,
     allConvos,
     convName,
     refreshAll,

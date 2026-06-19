@@ -25,9 +25,19 @@ function unwrap(res) {
 
 export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   const [searchParams, setSearchParams] = useSearchParams();
+  // En mode embarqué (onglet DB du Studio) : table sélectionnée = état interne, AUCUN
+  // paramètre d'URL. Stockée avec son app → s'auto-réinitialise au changement d'app
+  // (le tableSel pointe alors sur une autre app et `selectedTable` retombe à null).
+  const [tableSel, setTableSel] = useState(null);
 
   const selectedAppSlug = propAppSlug || searchParams.get('app') || null;
-  const selectedTable = searchParams.get('table') || null;
+  const selectedTable = embedded
+    ? (tableSel && tableSel.app === selectedAppSlug ? tableSel.table : null)
+    : (searchParams.get('table') || null);
+  const selectTable = (appSlug, name) => {
+    if (embedded) setTableSel({ app: appSlug, table: name });
+    else setSearchParams({ app: appSlug, table: name });
+  };
 
   // Data
   const [appsWithTables, setAppsWithTables] = useState([]);
@@ -101,7 +111,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
           const appData = results.find(r => r.app.slug === propAppSlug);
           if (appData && appData.tables.length > 0) {
             const name = typeof appData.tables[0] === 'string' ? appData.tables[0] : appData.tables[0].name;
-            setSearchParams({ app: propAppSlug, table: name }, { replace: true });
+            selectTable(propAppSlug, name);
           }
         }
       } catch (e) {
@@ -309,7 +319,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
   // ── Select table ──
   function handleSelectTable(appSlug, tableName) {
-    setSearchParams({ app: appSlug, table: tableName });
+    selectTable(appSlug, tableName);
     setCurrentPage(0);
     setSortColumn(null);
     setSortDesc(false);

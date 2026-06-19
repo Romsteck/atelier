@@ -19,10 +19,9 @@ import Backup from './pages/Backup';
 
 function DocsRedirect() {
   const { appId } = useParams();
-  const target = appId
-    ? `/studio?app=${encodeURIComponent(appId)}&tab=docs`
-    : '/studio?tab=docs';
-  return <Navigate to={target} replace />;
+  // Deep-link docs → Studio via le `state` du router (hors URL).
+  const state = appId ? { app: appId, tab: 'docs' } : { tab: 'docs' };
+  return <Navigate to="/studio" state={state} replace />;
 }
 
 function App() {
@@ -53,7 +52,7 @@ function App() {
             <Route path="/apps/:slug" element={<Navigate to="/studio" replace />} />
             <Route path="/dataverse" element={<Navigate to="/database" replace />} />
             <Route path="/dataverse/:slug" element={<Navigate to="/database" replace />} />
-            <Route path="/docs" element={<Navigate to="/studio?tab=docs" replace />} />
+            <Route path="/docs" element={<Navigate to="/studio" state={{ tab: 'docs' }} replace />} />
             <Route path="/docs/:appId" element={<DocsRedirect />} />
 
             <Route path="*" element={<Navigate to="/studio" replace />} />
