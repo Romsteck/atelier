@@ -11,7 +11,7 @@ import useWebSocket from './useWebSocket';
 //   - au retour de focus / visibilité de la fenêtre (édition hors-agent).
 // Le spinner (`loading`) ne s'affiche qu'au PREMIER chargement par app : les
 // rafraîchissements de fond échangent les données en place, sans clignotement.
-export default function useSourceGit(slug, convId) {
+export default function useSourceGit(slug) {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const loadedOnce = useRef(false);
@@ -20,15 +20,14 @@ export default function useSourceGit(slug, convId) {
   const refresh = useCallback(() => {
     if (!slug) return;
     if (!loadedOnce.current) setLoading(true);
-    // convId → status du worktree de la conversation active (sinon src/).
-    getSourceGitStatus(slug, convId)
+    getSourceGitStatus(slug)
       .then((r) => setStatus(r.data))
       .catch((e) => setStatus({ error: e.response?.data?.error || 'Erreur git status' }))
       .finally(() => {
         loadedOnce.current = true;
         setLoading(false);
       });
-  }, [slug, convId]);
+  }, [slug]);
 
   const refreshSoon = useCallback(() => {
     clearTimeout(debounce.current);

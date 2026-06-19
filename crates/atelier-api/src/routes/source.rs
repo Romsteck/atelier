@@ -13,14 +13,13 @@
 //! après `--` pour écarter toute injection d'option.
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,19 +51,6 @@ pub fn app_router() -> Router<ApiState> {
         .route("/{slug}/source/git/show", get(git_show))
         .route("/{slug}/source/git/commit", post(git_commit))
         .route("/{slug}/source/git/push", post(git_push))
-        // Worktrees par conversation (isolation Phase 1 « branch-per-conversation »).
-        // Chaque conversation édite dans `…/{slug}/wt/{conv_id}` (branche `conv/{id}`),
-        // jamais directement dans `src/` (= runtime de l'app, qui reste sur `main`).
-        .route(
-            "/{slug}/source/worktrees",
-            get(worktree_list).post(worktree_create),
-        )
-        .route("/{slug}/source/worktrees/{conv_id}", delete(worktree_remove))
-        // « Merge & deploy » (Phase 1) : merge `conv/<id>` → main, rebuild, restart, cleanup.
-        .route(
-            "/{slug}/source/worktrees/{conv_id}/merge",
-            post(worktree_merge),
-        )
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
@@ -81,38 +67,6 @@ fn resolve_src(state: &ApiState, slug: &str) -> Result<PathBuf, axum::response::
         return Err(err(StatusCode::NOT_FOUND, "source d'app introuvable"));
     }
     Ok(src)
-}
-
-/// Résout le **working dir** d'une op source : le worktree `…/{slug}/wt/{conv_id}`
-/// si `conv_id` est fourni (et valide + existant), sinon `…/{slug}/src`. Permet au
-/// panneau git / explorateur de suivre la conversation active (son worktree).
-fn resolve_workdir(
-    state: &ApiState,
-    slug: &str,
-    conv_id: Option<&str>,
-) -> Result<PathBuf, axum::response::Response> {
-    if !atelier_apps::valid_slug(slug) {
-        return Err(err(StatusCode::BAD_REQUEST, "slug invalide"));
-    }
-    match conv_id.map(str::trim).filter(|c| !c.is_empty()) {
-        Some(cid) => {
-            if !valid_conv_id(cid) {
-                return Err(err(StatusCode::BAD_REQUEST, "conv_id invalide"));
-            }
-            let wt = worktrees_base(state, slug).join(cid);
-            if !wt.is_dir() {
-                return Err(err(StatusCode::NOT_FOUND, "worktree introuvable"));
-            }
-            Ok(wt)
-        }
-        None => {
-            let src = state.apps_src_root.join(slug).join("src");
-            if !src.is_dir() {
-                return Err(err(StatusCode::NOT_FOUND, "source d'app introuvable"));
-            }
-            Ok(src)
-        }
-    }
 }
 
 /// Joint un chemin relatif fourni par le client SOUS `src`, en rejetant toute
@@ -149,16 +103,6 @@ fn within_src(src: &FsPath, abs: &FsPath) -> bool {
 struct PathQuery {
     #[serde(default)]
     path: String,
-    // Scope worktree (conversation active) ; absent → src/.
-    #[serde(default)]
-    conv_id: Option<String>,
-}
-
-/// Scope-only (status / commit / push) : worktree de la conversation, sinon src/.
-#[derive(Debug, Deserialize, Default)]
-struct WtScope {
-    #[serde(default)]
-    conv_id: Option<String>,
 }
 
 // ── Explorateur de fichiers ────────────────────────────────────────────────
@@ -169,7 +113,7 @@ async fn tree(
     Path(slug): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, q.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -228,7 +172,7 @@ async fn file(
     Path(slug): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, q.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -335,9 +279,8 @@ fn cap_diff(mut patch: String) -> (String, bool) {
 async fn git_status(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
-    Query(scope): Query<WtScope>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, scope.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -416,7 +359,7 @@ async fn git_diff(
     Path(slug): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, q.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -455,8 +398,6 @@ async fn git_diff(
 struct LogQuery {
     #[serde(default = "default_log_limit")]
     limit: usize,
-    #[serde(default)]
-    conv_id: Option<String>,
 }
 fn default_log_limit() -> usize {
     50
@@ -468,32 +409,16 @@ async fn git_log(
     Path(slug): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, q.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
     let limit = q.limit.clamp(1, 500);
     let max = format!("--max-count={limit}");
-    // `--branches --topo-order` : graphe multi-branches (main + toutes les `conv/*`),
-    // ordonné pour un rendu de lanes propre (façon VSCode). Champs séparés par 0x1f,
-    // commits par 0x1e. On ajoute `%P` (parents → topologie pour le graphe) et `%D`
-    // (décorations de refs → puces de branche). `--decorate-refs=refs/heads/` limite
-    // les décorations aux branches locales (pas les remotes).
-    let fmt = "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%P%x1f%D%x1e";
-    let (ok, stdout, stderr) = match git_capture(
-        &src,
-        &[
-            "log",
-            "--branches",
-            "--topo-order",
-            "--decorate=short",
-            "--decorate-refs=refs/heads/",
-            &max,
-            fmt,
-        ],
-    )
-    .await
-    {
+    // Champs séparés par 0x1f (unit sep), commits par 0x1e (record sep) — robuste
+    // face aux retours-ligne dans les sujets.
+    let fmt = "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1e";
+    let (ok, stdout, stderr) = match git_capture(&src, &["log", &max, fmt]).await {
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
@@ -514,24 +439,8 @@ async fn git_log(
         if f.len() < 5 {
             continue;
         }
-        // parents : SHAs séparés par espace ("" si commit racine).
-        let parents: Vec<&str> = f
-            .get(5)
-            .map(|p| p.split_whitespace().collect())
-            .unwrap_or_default();
-        // refs : décorations `%D` ("HEAD -> main, conv/x") → noms de branches nettoyés.
-        let refs: Vec<String> = f
-            .get(6)
-            .map(|d| {
-                d.split(',')
-                    .map(|s| s.trim().trim_start_matches("HEAD -> ").to_string())
-                    .filter(|s| !s.is_empty() && s != "HEAD")
-                    .collect()
-            })
-            .unwrap_or_default();
         commits.push(json!({
             "sha": f[0], "short": f[1], "author": f[2], "date": f[3], "subject": f[4],
-            "parents": parents, "refs": refs,
         }));
     }
     Json(json!({ "commits": commits })).into_response()
@@ -540,8 +449,6 @@ async fn git_log(
 #[derive(Debug, Deserialize)]
 struct ShaQuery {
     sha: String,
-    #[serde(default)]
-    conv_id: Option<String>,
 }
 
 #[instrument(skip(state), fields(slug = %slug))]
@@ -550,7 +457,7 @@ async fn git_show(
     Path(slug): Path<String>,
     Query(q): Query<ShaQuery>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, q.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -639,10 +546,9 @@ async fn commit_identity(src: &FsPath) -> Vec<String> {
 async fn git_commit(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
-    Query(scope): Query<WtScope>,
     Json(body): Json<CommitBody>,
 ) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, scope.conv_id.as_deref()) {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -685,18 +591,12 @@ async fn git_commit(
 /// Pousse la branche courante vers son upstream. L'origin du working tree est le
 /// bare repo local (`/var/lib/atelier/git/{slug}.git`) → pas de credentials.
 #[instrument(skip(state), fields(slug = %slug))]
-async fn git_push(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-    Query(scope): Query<WtScope>,
-) -> impl IntoResponse {
-    let src = match resolve_workdir(&state, &slug, scope.conv_id.as_deref()) {
+async fn git_push(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
+    let src = match resolve_src(&state, &slug) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    // `-u origin HEAD` : pousse la branche courante (main OU `conv/<id>`) en posant
-    // l'upstream → fonctionne pour un worktree dont la branche n'a pas encore d'upstream.
-    let (ok, out, e) = match git_capture(&src, &["push", "-u", "origin", "HEAD"]).await {
+    let (ok, out, e) = match git_capture(&src, &["push"]).await {
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
@@ -709,546 +609,4 @@ async fn git_push(
     // git push écrit son compte-rendu sur stderr → on le renvoie tel quel.
     let output = format!("{} {}", e.trim(), out.trim());
     Json(json!({ "ok": true, "output": output.trim() })).into_response()
-}
-
-// ── Worktrees par conversation ───────────────────────────────────────────────
-//
-// Isolation Phase 1 : chaque conversation de l'agent travaille dans un worktree
-// git dédié (`…/{slug}/wt/{conv_id}`, branche `conv/{conv_id}`) au lieu d'éditer
-// `src/` partagé. `src/` reste le **runtime** servi par le superviseur (toujours
-// sur `main`) ; le worktree partage l'object store de `src/` (merge local au
-// moment du « Merge & deploy », pas de push intermédiaire).
-//
-// Emplacement `apps/{slug}/wt/` choisi car (1) hérite du setgid `hr-studio` du
-// parent → éditable par l'agent, (2) hors de portée de `cleanup_legacy_parent_context`
-// (chirurgical : ne touche que CLAUDE.md/.mcp.json/.claude au niveau `{slug}/`),
-// (3) dans `ReadWritePaths` du service. Les fichiers de contexte agent (gitignorés)
-// sont régénérés dans le worktree par le provisioning (lot B), pas ici.
-
-/// Valide un identifiant de conversation pour usage comme **nom de branche**
-/// (`conv/<id>`) ET **segment de chemin** (`wt/<id>`). Alphabet sûr ; bloque
-/// `..`, le préfixe `-` (injection d'option git) et `.` (fichier caché).
-pub(crate) fn valid_conv_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 128
-        && !s.starts_with('-')
-        && !s.starts_with('.')
-        && !s.contains("..")
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-}
-
-/// Base des worktrees d'une app : `…/{slug}/wt/`.
-fn worktrees_base(state: &ApiState, slug: &str) -> PathBuf {
-    state.apps_src_root.join(slug).join("wt")
-}
-
-/// Le worktree est créé par le process Atelier (root) ; l'agent tourne en
-/// `hr-studio` et doit pouvoir éditer les fichiers checkout. On aligne donc le
-/// worktree sur ce qui rend `src/` éditable par l'agent : groupe agent,
-/// group-writable, setgid sur les répertoires (pour que les fichiers créés
-/// ensuite — build, edits — héritent du groupe). Best-effort : un échec est
-/// loggé sans bloquer (le worktree reste créé, juste root-only).
-async fn fixup_worktree_perms(wt: &FsPath) {
-    let group = std::env::var("ATELIER_RULES_GROUP").unwrap_or_else(|_| "hr-studio".into());
-    let warn_fail = |tool: &str, r: Result<std::process::Output, std::io::Error>| match r {
-        Ok(o) if !o.status.success() => warn!(
-            tool, wt = %wt.display(), stderr = %String::from_utf8_lossy(&o.stderr).trim(),
-            "worktree perms fixup failed (non-fatal)"
-        ),
-        Err(e) => warn!(tool, wt = %wt.display(), error = %e, "worktree perms fixup spawn failed"),
-        _ => {}
-    };
-    warn_fail("chgrp", Command::new("chgrp").args(["-R", &group]).arg(wt).output().await);
-    warn_fail("chmod", Command::new("chmod").args(["-R", "g+rwX"]).arg(wt).output().await);
-    // setgid sur les seuls répertoires (g+s sur un fichier = bit setgid sans
-    // effet voire refusé ; `X` ne le pose pas).
-    warn_fail(
-        "find-setgid",
-        Command::new("find")
-            .arg(wt)
-            .args(["-type", "d", "-exec", "chmod", "g+s", "{}", "+"])
-            .output()
-            .await,
-    );
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateWorktreeBody {
-    conv_id: String,
-}
-
-/// Provisionne (idempotent) le worktree d'une conversation et retourne
-/// `(chemin, créé)`. Crée le worktree `conv/<conv_id>` issu de `HEAD`
-/// (= `main` de `src/`) s'il manque, aligne les perms pour l'agent, et régénère
-/// le contexte agent (`.claude/`, `.mcp.json`, `CLAUDE.md` — gitignorés, donc
-/// HORS du diff de merge) dans le worktree. No-op (créé=false) si déjà présent.
-/// Appelé par la route `POST …/worktrees` ET par `/agent/query` (auto-provision).
-pub(crate) async fn provision_worktree(
-    state: &ApiState,
-    slug: &str,
-    conv_id: &str,
-) -> Result<(PathBuf, bool), (StatusCode, String)> {
-    if !atelier_apps::valid_slug(slug) {
-        return Err((StatusCode::BAD_REQUEST, "slug invalide".into()));
-    }
-    if !valid_conv_id(conv_id) {
-        return Err((StatusCode::BAD_REQUEST, "conv_id invalide".into()));
-    }
-    let src = state.apps_src_root.join(slug).join("src");
-    if !src.is_dir() {
-        return Err((StatusCode::NOT_FOUND, "source d'app introuvable".into()));
-    }
-    let base = worktrees_base(state, slug);
-    let wt = base.join(conv_id);
-    if wt.exists() {
-        return Ok((wt, false)); // déjà provisionné (chemin de reprise)
-    }
-    if let Err(e) = tokio::fs::create_dir_all(&base).await {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir wt/: {e}")));
-    }
-    let branch = format!("conv/{conv_id}");
-    let wt_str = wt.to_string_lossy().into_owned();
-    // `git worktree add` lancé sous **umask 002** : les dossiers que git crée dans
-    // `.git` (`worktrees/{id}/`, `refs/heads/conv/`) héritent du group-write ;
-    // combiné au setgid `hr-studio` déjà présent sur `.git`, le gitdir + les refs
-    // deviennent **writables par l'agent (hr-studio)** → il peut committer dans son
-    // worktree (sans ça : « cannot lock ref / index.lock: Permission denied »).
-    // `safe.directory=*` car le process est root et `src/` appartient à romain.
-    // conv_id validé (alphanum + _-.) + paths fixes → interpolation shell sûre.
-    let add_script = format!(
-        "umask 002 && git -C '{src}' -c safe.directory='*' worktree add '{wt}' -b '{branch}' HEAD",
-        src = src.to_string_lossy(),
-        wt = wt_str,
-        branch = branch,
-    );
-    let add_out = Command::new("bash")
-        .arg("-c")
-        .arg(&add_script)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("bash spawn: {e}")))?;
-    if !add_out.status.success() {
-        // Branche déjà existante / HEAD absent (repo vide) → 409 + message git.
-        let e = String::from_utf8_lossy(&add_out.stderr);
-        let _ = tokio::fs::remove_dir_all(&wt).await;
-        return Err((StatusCode::CONFLICT, format!("git worktree add: {}", e.trim())));
-    }
-    fixup_worktree_perms(&wt).await;
-    generate_worktree_context(state, slug, &src, &wt).await;
-    info!(slug = %slug, conv_id = %conv_id, branch = %branch, wt = %wt_str, "worktree provisioned");
-    Ok((wt, true))
-}
-
-/// Régénère le contexte Claude Code dans le worktree (mêmes fichiers que `src/`,
-/// tous gitignorés) + reprend le carnet `CLAUDE.md` de `src/` (gitignoré → absent
-/// du checkout) AVANT la génération pour que `write_if_missing` le préserve.
-/// Best-effort : un échec est loggé sans bloquer le provisioning.
-async fn generate_worktree_context(state: &ApiState, slug: &str, src: &FsPath, wt: &FsPath) {
-    let from = src.join("CLAUDE.md");
-    let to = wt.join("CLAUDE.md");
-    if from.is_file() && !to.exists() {
-        if let Err(e) = tokio::fs::copy(&from, &to).await {
-            warn!(slug = %slug, error = %e, "worktree CLAUDE.md seed failed (non-fatal)");
-        }
-    }
-    let Some(app) = state.app_registry.get(slug).await else {
-        warn!(slug = %slug, "worktree context skipped: app introuvable au registre");
-        return;
-    };
-    let all = state.app_registry.list().await;
-    // db_tables=None : n'enrichit que la liste de tables d'app-info.md (cosmétique) ;
-    // on évite ainsi un aller-retour dataverse sur le chemin de provisioning.
-    if let Err(e) = state
-        .context_generator
-        .generate_for_app_at(&app, wt, &all, None, false)
-    {
-        warn!(slug = %slug, error = %e, "worktree context generation failed (non-fatal)");
-    }
-}
-
-/// `POST …/worktrees` — provisionne explicitement le worktree d'une conversation
-/// (idempotent : `created:false` si déjà là). Même chemin que l'auto-provision
-/// de `/agent/query`.
-#[instrument(skip(state, body), fields(slug = %slug))]
-async fn worktree_create(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-    Json(body): Json<CreateWorktreeBody>,
-) -> impl IntoResponse {
-    let conv_id = body.conv_id.trim().to_string();
-    match provision_worktree(&state, &slug, &conv_id).await {
-        Ok((wt, created)) => Json(json!({
-            "ok": true,
-            "created": created,
-            "conv_id": conv_id,
-            "branch": format!("conv/{conv_id}"),
-            "path": wt.to_string_lossy(),
-        }))
-        .into_response(),
-        Err((st, msg)) => err(st, msg),
-    }
-}
-
-/// Liste les worktrees liés à `src/` (la branche `main`/principale incluse,
-/// flaggée `is_main: true`). Source : `git worktree list --porcelain`.
-#[instrument(skip(state), fields(slug = %slug))]
-async fn worktree_list(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-) -> impl IntoResponse {
-    let src = match resolve_src(&state, &slug) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    let (ok, out, e) = match git_capture(&src, &["worktree", "list", "--porcelain"]).await {
-        Ok(v) => v,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
-    };
-    if !ok {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git worktree list: {}", e.trim()));
-    }
-    let main_canon = src.canonicalize().ok();
-    let worktrees = parse_worktree_porcelain(&out, main_canon.as_deref());
-    Json(json!({ "worktrees": worktrees })).into_response()
-}
-
-/// Retire le worktree `conv/<conv_id>` et supprime sa branche. `--force` jette
-/// d'éventuelles modifs non commitées du worktree (en Phase 1 la résolution
-/// passe par le merge ; un retrait = abandon explicite). Idempotent-ish : si le
-/// worktree n'est plus reconnu, on `prune` + nettoie le dossier résiduel.
-#[instrument(skip(state), fields(slug = %slug))]
-async fn worktree_remove(
-    State(state): State<ApiState>,
-    Path((slug, conv_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let src = match resolve_src(&state, &slug) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    if !valid_conv_id(&conv_id) {
-        return err(StatusCode::BAD_REQUEST, "conv_id invalide");
-    }
-    let branch = format!("conv/{conv_id}");
-    let wt = worktrees_base(&state, &slug).join(&conv_id);
-    let wt_str = wt.to_string_lossy().into_owned();
-
-    let (ok, _o, e) =
-        match git_capture(&src, &["worktree", "remove", "--force", &wt_str]).await {
-            Ok(v) => v,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
-        };
-    if !ok {
-        // Worktree non reconnu (dossier supprimé à la main, métadonnée stale) :
-        // prune les liens morts puis retire le dossier résiduel s'il reste.
-        warn!(slug = %slug, conv_id = %conv_id, stderr = %e.trim(), "worktree remove failed, pruning");
-        let _ = git_capture(&src, &["worktree", "prune"]).await;
-        if wt.exists() {
-            let _ = tokio::fs::remove_dir_all(&wt).await;
-        }
-    }
-    // Supprime la branche (force : non encore mergée). Ignoré si déjà absente.
-    let _ = git_capture(&src, &["branch", "-D", &branch]).await;
-    info!(slug = %slug, conv_id = %conv_id, branch = %branch, "worktree removed");
-    Json(json!({ "ok": true })).into_response()
-}
-
-/// Parse `git worktree list --porcelain` en entrées JSON. Chaque worktree est un
-/// bloc de lignes (`worktree <path>`, `HEAD <sha>`, `branch refs/heads/<name>`),
-/// les blocs séparés par une ligne vide. `main_canon` = chemin canonique de la
-/// worktree principale (`src/`) pour flagger `is_main`.
-fn parse_worktree_porcelain(out: &str, main_canon: Option<&FsPath>) -> Vec<Value> {
-    let mut entries = Vec::new();
-    for block in out.split("\n\n") {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
-        let mut path: Option<String> = None;
-        let mut head: Option<String> = None;
-        let mut branch: Option<String> = None;
-        for line in block.lines() {
-            if let Some(p) = line.strip_prefix("worktree ") {
-                path = Some(p.to_string());
-            } else if let Some(h) = line.strip_prefix("HEAD ") {
-                head = Some(h.to_string());
-            } else if let Some(b) = line.strip_prefix("branch ") {
-                branch = Some(b.trim_start_matches("refs/heads/").to_string());
-            }
-        }
-        let Some(path) = path else { continue };
-        let conv_id = branch
-            .as_ref()
-            .and_then(|b| b.strip_prefix("conv/").map(str::to_string));
-        let is_main = match (main_canon, FsPath::new(&path).canonicalize().ok()) {
-            (Some(m), Some(p)) => p == m,
-            _ => false,
-        };
-        entries.push(json!({
-            "path": path,
-            "head": head,
-            "branch": branch,
-            "conv_id": conv_id,
-            "is_main": is_main,
-        }));
-    }
-    entries
-}
-
-// ── Merge & deploy (Phase 1) ─────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Default)]
-struct MergeBody {
-    #[serde(default)]
-    timeout_secs: Option<u64>,
-}
-
-/// Un `IpcResponse` de build/ship a réussi ? `ship()`/`build()` renvoient `ok`
-/// même sur échec de pipeline (le code de sortie est rangé dans `data.exit_code`)
-/// → on inspecte les deux, comme `ship_app` (sinon on annoncerait un succès alors
-/// que l'app est down).
-fn ipc_succeeded(resp: &atelier_ipc::types::IpcResponse) -> bool {
-    let exit_code = resp
-        .data
-        .as_ref()
-        .and_then(|d| d.get("exit_code"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    resp.ok && exit_code == 0
-}
-
-/// Reset `src/` au sha pré-merge. Suffit quand l'app n'a pas encore été redémarrée
-/// (build échoué) : le process tourne toujours sur l'ancien artefact.
-async fn rollback_src(src: &FsPath, pre_sha: &str) {
-    match git_capture(src, &["reset", "--hard", pre_sha]).await {
-        Ok((true, _, _)) => info!(pre_sha = %pre_sha, "merge rollback: src reset"),
-        Ok((false, _, e)) => warn!(pre_sha = %pre_sha, stderr = %e.trim(), "merge rollback: git reset failed"),
-        Err(e) => warn!(error = %e, "merge rollback: git reset spawn failed"),
-    }
-}
-
-/// Rollback complet quand l'app a déjà été redémarrée sur le code mergé (ship /
-/// healthcheck KO) : reset `src/` + rebuild + ship pour restaurer l'état pré-merge.
-/// Best-effort (loggé) — la priorité est de remettre l'app debout.
-async fn rollback_deploy(
-    ctx: &crate::mcp::apps_ops::AppsContext,
-    src: &FsPath,
-    pre_sha: &str,
-    slug: &str,
-    timeout_secs: Option<u64>,
-) {
-    warn!(slug = %slug, pre_sha = %pre_sha, "merge rollback: redeploying pre-merge src");
-    rollback_src(src, pre_sha).await;
-    let _ = ctx.build(slug.to_string(), timeout_secs).await;
-    let _ = ctx.ship(slug.to_string(), timeout_secs).await;
-}
-
-/// Attend que l'app soit `Running` après un (re)déploiement. Gate volontairement
-/// basé sur l'état du superviseur (et non un GET HTTP) : certaines apps répondent
-/// non-2xx sur leur health_path tout en étant saines (ex. `www` → 404), un check
-/// HTTP générique provoquerait des faux négatifs → rollbacks intempestifs.
-async fn verify_running(
-    supervisor: &atelier_apps::AppSupervisor,
-    slug: &str,
-) -> Result<(), String> {
-    use atelier_apps::AppState;
-    for _ in 0..15 {
-        match supervisor.status(slug).await {
-            Some(s) if matches!(s.state, AppState::Running) => return Ok(()),
-            Some(s) if matches!(s.state, AppState::Crashed) => {
-                return Err("app crashed après deploy".into());
-            }
-            _ => {}
-        }
-        tokio::time::sleep(Duration::from_millis(800)).await;
-    }
-    match supervisor.status(slug).await {
-        Some(s) if matches!(s.state, AppState::Running) => Ok(()),
-        Some(s) => Err(format!("app état={} après deploy (pas Running)", s.state.as_str())),
-        None => Err("app sans status après deploy".into()),
-    }
-}
-
-/// `POST …/worktrees/{conv_id}/merge` — pipeline « Merge & deploy » (Phase 1).
-/// merge `conv/<conv_id>` → branche courante de `src/`, rebuild en place, restart,
-/// vérifie que l'app est Running, puis retire worktree + branche. Conflit → 409
-/// (résolution humaine en Phase 1). Échec build → rollback git (app intacte) ;
-/// échec ship/health → rollback complet (reset + rebuild + ship). Synchrone et
-/// long (le front passe un timeout large, comme `/ship`).
-#[instrument(skip(state, body), fields(slug = %slug, conv_id = %conv_id))]
-async fn worktree_merge(
-    State(state): State<ApiState>,
-    Path((slug, conv_id)): Path<(String, String)>,
-    body: Option<Json<MergeBody>>,
-) -> impl IntoResponse {
-    let src = match resolve_src(&state, &slug) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    if !valid_conv_id(&conv_id) {
-        return err(StatusCode::BAD_REQUEST, "conv_id invalide");
-    }
-    let branch = format!("conv/{conv_id}");
-    let wt = worktrees_base(&state, &slug).join(&conv_id);
-    let wt_str = wt.to_string_lossy().into_owned();
-    let timeout_secs = body.and_then(|Json(b)| b.timeout_secs);
-    if !wt.exists() {
-        return err(StatusCode::NOT_FOUND, "worktree introuvable pour cette conversation");
-    }
-
-    // 1. src/ = runtime + cible de merge ; l'agent ne l'édite JAMAIS (il bosse dans son
-    //    worktree). Les seules modifs possibles dans src/ = résidus de build (ex.
-    //    `tsconfig.tsbuildinfo` tracké, régénéré à chaque build) → on les jette pour
-    //    partir d'un working tree propre (sinon `git merge` refuserait). Sans danger :
-    //    aucun travail réel ne vit dans src/. Le travail à merger est sur la branche.
-    let _ = git_capture(&src, &["checkout", "--", "."]).await;
-    let pre_sha = match git_capture(&src, &["rev-parse", "HEAD"]).await {
-        Ok((true, s, _)) => s.trim().to_string(),
-        _ => return err(StatusCode::INTERNAL_SERVER_ERROR, "rev-parse HEAD échec"),
-    };
-
-    // 1b. Garde-fous anti-perte de travail (le cleanup `--force` final supprime le
-    // worktree) : (a) la branche doit avoir des commits à merger ; (b) le worktree
-    // ne doit pas avoir de travail NON commité. Sinon → 422 « commit d'abord ».
-    let ahead = match git_capture(&src, &["rev-list", "--count", &format!("HEAD..{branch}")]).await {
-        Ok((true, o, _)) => o.trim().parse::<u32>().unwrap_or(0),
-        _ => 0,
-    };
-    if ahead == 0 {
-        return err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "rien à merger : la branche n'a aucun commit. La conversation doit committer son travail d'abord.",
-        );
-    }
-    let dirty = match git_capture(&wt, &["status", "--porcelain"]).await {
-        Ok((true, o, _)) => !o.trim().is_empty(),
-        _ => false,
-    };
-    if dirty {
-        return err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "le worktree a des modifications non commitées — commite-les d'abord (sinon elles seraient perdues au cleanup).",
-        );
-    }
-
-    // 2. Drain (filet serveur ; le front a déjà fermé les conversations).
-    let cancelled = crate::routes::agent::cancel_runs_for_slug(&slug);
-    if cancelled > 0 {
-        info!(slug = %slug, cancelled, "merge: live runs coupés");
-    }
-
-    // 3. Merge --no-ff (garde la trace de la branche dans l'historique).
-    let msg = format!("merge {branch}");
-    let (merge_ok, mout, merr) =
-        match git_capture(&src, &["merge", "--no-ff", "-m", &msg, &branch]).await {
-            Ok(v) => v,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
-        };
-    if !merge_ok {
-        let conflicts: Vec<String> = match git_capture(&src, &["diff", "--name-only", "--diff-filter=U"]).await {
-            Ok((true, o, _)) => o.lines().map(str::to_string).collect(),
-            _ => Vec::new(),
-        };
-        let _ = git_capture(&src, &["merge", "--abort"]).await;
-        warn!(slug = %slug, branch = %branch, ?conflicts, "merge conflit — abort");
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": "conflit de merge — résolution manuelle requise",
-                "conflicts": conflicts,
-                "detail": format!("{} {}", mout.trim(), merr.trim()).trim().to_string(),
-            })),
-        )
-            .into_response();
-    }
-    info!(slug = %slug, branch = %branch, "merge propre");
-
-    // 4. Rebuild en place puis restart (réutilise build()/ship() — events WS + lock).
-    let ctx = crate::mcp::apps_ops::AppsContext::from_api_state(&state);
-    let build_resp = ctx.build(slug.clone(), timeout_secs).await;
-    if !ipc_succeeded(&build_resp) {
-        rollback_src(&src, &pre_sha).await; // app pas encore redémarrée
-        let detail = build_resp.error.clone().unwrap_or_else(|| "build failed".into());
-        warn!(slug = %slug, %detail, "merge: build KO → src rollback");
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": "build échoué après merge — src/ rollback", "detail": detail })),
-        )
-            .into_response();
-    }
-    let ship_resp = ctx.ship(slug.clone(), timeout_secs).await;
-    if !ipc_succeeded(&ship_resp) {
-        rollback_deploy(&ctx, &src, &pre_sha, &slug, timeout_secs).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "ship échoué après merge — rollback", "detail": ship_resp.error.clone().unwrap_or_default() })),
-        )
-            .into_response();
-    }
-
-    // 5. Gate : l'app est-elle Running ? Sinon rollback complet.
-    if let Err(reason) = verify_running(state.supervisor.as_ref(), &slug).await {
-        rollback_deploy(&ctx, &src, &pre_sha, &slug, timeout_secs).await;
-        warn!(slug = %slug, %reason, "merge: app non saine → rollback complet");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "app non saine après deploy — rollback", "detail": reason })),
-        )
-            .into_response();
-    }
-
-    // 6. Succès : push (historique + miroir GitHub via post-receive), puis cleanup.
-    let _ = git_capture(&src, &["push", "origin", "HEAD"]).await; // best-effort
-    let _ = git_capture(&src, &["worktree", "remove", "--force", &wt_str]).await;
-    let _ = git_capture(&src, &["branch", "-D", &branch]).await;
-    info!(slug = %slug, branch = %branch, "merge & deploy OK — worktree retiré");
-
-    Json(json!({ "ok": true, "merged": branch, "pre_sha": pre_sha })).into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn conv_id_validation() {
-        assert!(valid_conv_id("1718000000-3"));
-        assert!(valid_conv_id("feature_x.2"));
-        assert!(!valid_conv_id(""));
-        assert!(!valid_conv_id("-rf")); // préfixe option
-        assert!(!valid_conv_id(".hidden"));
-        assert!(!valid_conv_id("a/b")); // slash interdit (un seul niveau)
-        assert!(!valid_conv_id("a..b")); // traversal
-        assert!(!valid_conv_id("a b")); // espace
-    }
-
-    #[test]
-    fn porcelain_parse_main_and_conv() {
-        let out = "worktree /var/lib/atelier/apps/home/src\n\
-                   HEAD cf41f33aaaa\n\
-                   branch refs/heads/main\n\
-                   \n\
-                   worktree /var/lib/atelier/apps/home/wt/c1\n\
-                   HEAD abc123def\n\
-                   branch refs/heads/conv/c1\n";
-        // main_canon=None → is_main=false partout (pas de FS réel ici), mais on
-        // valide le parsing des champs + l'extraction du conv_id.
-        let entries = parse_worktree_porcelain(out, None);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0]["branch"], "main");
-        assert_eq!(entries[0]["conv_id"], Value::Null);
-        assert_eq!(entries[1]["branch"], "conv/c1");
-        assert_eq!(entries[1]["conv_id"], "c1");
-        assert_eq!(entries[1]["head"], "abc123def");
-    }
-
-    #[test]
-    fn porcelain_parse_skips_detached_and_blank() {
-        let out = "worktree /x/src\nHEAD deadbeef\ndetached\n";
-        let entries = parse_worktree_porcelain(out, None);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["branch"], Value::Null);
-        assert_eq!(entries[0]["conv_id"], Value::Null);
-    }
 }

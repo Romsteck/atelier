@@ -325,7 +325,7 @@ function PlanReviewCard({ plan, decided, approved, onApprove, onReject }) {
 // en attente) vit dans le provider, indexé par `panelKey`. Le panneau ne fait que
 // rendre + déléguer (sendMessage/answer/cancel/closeConversation).
 export default function AgentPanel({ panelKey }) {
-  const { slug, convos, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, closeConversation } = useAgentConversations();
+  const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, closeConversation } = useAgentConversations();
   const convo = convos[panelKey];
 
   const [input, setInput] = useState('');
@@ -467,27 +467,18 @@ export default function AgentPanel({ panelKey }) {
 
   if (!convo) return null;
 
-  const titleLabel = convo.title || convo.activeModel || selModel.label;
+  const displayName = convName(convo);
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-gray-900">
       {/* En-tête : titre + modèle + fermer */}
       <div className="flex items-center gap-2 h-[34px] shrink-0 px-3 border-b border-gray-800 text-[12px]">
         <Bot className="w-4 h-4 text-blue-400 shrink-0" />
-        <span className="text-gray-300 truncate" title={titleLabel}>{convo.title || 'Conversation'}</span>
+        <span className="text-gray-300 truncate" title={displayName}>{displayName}</span>
         <span className="text-gray-600">·</span>
         <span className="text-gray-500 truncate max-w-[120px]" title={`modèle : ${convo.activeModel || selModel.label}`}>
           {convo.activeModel || selModel.label}
         </span>
-        {convo.convId && (
-          <>
-            <span className="text-gray-600">·</span>
-            <span className="font-mono text-[11px] text-purple-300/90 truncate max-w-[150px]"
-              title={`worktree isolé — branche conv/${convo.convId}`}>
-              conv/{convo.convId}
-            </span>
-          </>
-        )}
         {convo.loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-600" />}
         <div className="ml-auto flex items-center gap-2">
           {sdkMsg && (
@@ -593,12 +584,7 @@ export default function AgentPanel({ panelKey }) {
           }
           return null;
         })}
-        {convo.provisioning && (
-          <div className="flex items-center gap-1.5 text-[12px] text-purple-300">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Préparation de l'espace de travail (worktree)…
-          </div>
-        )}
-        {running && !awaitingUser && !convo.provisioning && (
+        {running && !awaitingUser && (
           <div className="flex items-center gap-1.5 text-[12px] text-gray-500">
             <Loader2 className="w-3.5 h-3.5 animate-spin" /> agent travaille…
           </div>

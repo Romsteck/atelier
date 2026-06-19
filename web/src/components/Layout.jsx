@@ -81,9 +81,11 @@ function StudioHeaderInfo() {
     'app:build': (data) => {
       if (!currentApp || data?.slug !== currentApp.slug) return;
       setBuildState(data);
-      if (data.status === 'finished') {
-        setTimeout(() => setBuildState(null), 2500);
-      }
+      // Les deux états terminaux s'effacent seuls : `finished` vite, `error` plus tard
+      // (laisse le temps de lire « Build failed » sans rester figé indéfiniment sur une
+      // étape — ex. un build coupé par un restart d'Atelier sans event terminal).
+      if (data.status === 'finished') setTimeout(() => setBuildState(null), 2500);
+      else if (data.status === 'error') setTimeout(() => setBuildState(null), 8000);
     },
   });
 

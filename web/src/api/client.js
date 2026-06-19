@@ -294,13 +294,12 @@ export const resumeAgentQuery = (slug, sid, body) =>
 export const listConversations = (slug) =>
   api.get(`/apps/${slug}/agent/conversations`);
 // Snapshot d'une conversation : { items, live, run_id }. items = transcript normalisé.
-// `convId` (optionnel) scope l'op au worktree de la conversation (sinon src/).
-export const getConversation = (slug, sid, convId) =>
-  api.get(`/apps/${slug}/agent/conversations/${sid}`, { params: convId ? { conv_id: convId } : {} });
-export const renameConversation = (slug, sid, title, convId) =>
-  api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title }, { params: convId ? { conv_id: convId } : {} });
-export const deleteConversation = (slug, sid, convId) =>
-  api.delete(`/apps/${slug}/agent/conversations/${sid}`, { params: convId ? { conv_id: convId } : {} });
+export const getConversation = (slug, sid) =>
+  api.get(`/apps/${slug}/agent/conversations/${sid}`);
+export const renameConversation = (slug, sid, title) =>
+  api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
+export const deleteConversation = (slug, sid) =>
+  api.delete(`/apps/${slug}/agent/conversations/${sid}`);
 // Version SDK installée vs dernière (npm) + MAJ in-place (éphémère) du runner.
 export const getSdkVersion = () => api.get('/agent/sdk/version');
 // timeout long : `npm install` côté serveur peut dépasser les 30 s par défaut du client.
@@ -309,39 +308,19 @@ export const updateSdk = (version) =>
 
 // ========== Source (explorateur fichiers + git du working tree — Studio) ==========
 // Lit l'arbre de travail réel `…/{slug}/src` (≠ /git/repos qui sert les bare repos).
-// `convId` (optionnel) scope l'op au worktree de la conversation active (sinon src/).
-const wt = (convId, extra = {}) => ({ params: { ...extra, ...(convId ? { conv_id: convId } : {}) } });
-export const getSourceTree = (slug, path = '', convId) =>
-  api.get(`/apps/${slug}/source/tree`, wt(convId, { path }));
-export const getSourceFile = (slug, path, convId) =>
-  api.get(`/apps/${slug}/source/file`, wt(convId, { path }));
-export const getSourceGitStatus = (slug, convId) =>
-  api.get(`/apps/${slug}/source/git/status`, wt(convId));
-export const getSourceGitDiff = (slug, path, convId) =>
-  api.get(`/apps/${slug}/source/git/diff`, wt(convId, { path }));
-export const getSourceGitLog = (slug, limit = 50, convId) =>
-  api.get(`/apps/${slug}/source/git/log`, wt(convId, { limit }));
-export const getSourceGitShow = (slug, sha, convId) =>
-  api.get(`/apps/${slug}/source/git/show`, wt(convId, { sha }));
+export const getSourceTree = (slug, path = '') =>
+  api.get(`/apps/${slug}/source/tree`, { params: { path } });
+export const getSourceFile = (slug, path) =>
+  api.get(`/apps/${slug}/source/file`, { params: { path } });
+export const getSourceGitStatus = (slug) => api.get(`/apps/${slug}/source/git/status`);
+export const getSourceGitDiff = (slug, path) =>
+  api.get(`/apps/${slug}/source/git/diff`, { params: { path } });
+export const getSourceGitLog = (slug, limit = 50) =>
+  api.get(`/apps/${slug}/source/git/log`, { params: { limit } });
+export const getSourceGitShow = (slug, sha) =>
+  api.get(`/apps/${slug}/source/git/show`, { params: { sha } });
 // Mutations du working tree : commit (stage-all + commit) et push vers l'upstream.
-export const commitSource = (slug, message, convId) =>
-  api.post(`/apps/${slug}/source/git/commit`, { message }, wt(convId));
-export const pushSource = (slug, convId) =>
-  api.post(`/apps/${slug}/source/git/push`, {}, { timeout: 60000, ...wt(convId) });
-
-// ========== Worktrees par conversation (isolation Phase 1) ==========
-// Chaque conversation édite dans `…/{slug}/wt/{convId}` (branche `conv/{convId}`),
-// jamais dans `src/` (= runtime, qui reste sur main). Le merge ramène la branche
-// dans main + rebuild + restart.
-export const listWorktrees = (slug) => api.get(`/apps/${slug}/source/worktrees`);
-export const createWorktree = (slug, convId) =>
-  api.post(`/apps/${slug}/source/worktrees`, { conv_id: convId });
-export const removeWorktree = (slug, convId) =>
-  api.delete(`/apps/${slug}/source/worktrees/${encodeURIComponent(convId)}`);
-// Merge & deploy : long (build + restart) → timeout client large, comme un deploy.
-export const mergeWorktree = (slug, convId, timeoutSecs = 900) =>
-  api.post(
-    `/apps/${slug}/source/worktrees/${encodeURIComponent(convId)}/merge`,
-    { timeout_secs: timeoutSecs },
-    { timeout: (timeoutSecs + 60) * 1000 },
-  );
+export const commitSource = (slug, message) =>
+  api.post(`/apps/${slug}/source/git/commit`, { message });
+export const pushSource = (slug) =>
+  api.post(`/apps/${slug}/source/git/push`, {}, { timeout: 60000 });

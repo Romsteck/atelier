@@ -180,18 +180,6 @@ Le Studio inclut une **UI custom d'édition** (`AgentWorkspace` : explorateur de
 
 > ⚠️ Ne pas confondre cet **agent Studio (Claude)** interactif (multi-tour, mutations possibles) avec la **surveillance IA** ci-dessous (scan headless **lecture seule**, single-turn) ni avec `hr-orchestrator` (déploiements network). Les deux tournent sur le **même Claude Agent SDK** mais via deux runners distincts (`runner.js` vs `scan.js`).
 
-## Isolation par worktree (branch-per-conversation, Phase 1)
-
-> Objectif : plusieurs conversations agent en parallèle sur une même app **sans se marcher dessus**. Chaque conversation édite dans un **worktree git dédié** au lieu du `src/` partagé.
-
-- **Worktree par conversation** : à `/var/lib/atelier/apps/{slug}/wt/{conv_id}` (branche `conv/{conv_id}`), créé off `src/` (partage l'object store → merge local, pas de push). `src/` reste le **runtime** servi par le superviseur, toujours sur `main` — jamais édité directement par l'agent. Emplacement choisi car group-writable (setgid `hr-studio`) + hors de portée de `cleanup_legacy_parent_context` (chirurgical) + dans `ReadWritePaths` de `atelier.service`.
-- **Contexte agent régénéré dans le worktree** au provisioning : `.claude/`, `.mcp.json` (scopé `project={slug}`), skills, `CLAUDE.md` (seedé depuis `src/`). Tous **gitignorés** → n'apparaissent PAS dans le diff de merge. Cf. `crates/atelier-api/src/routes/source.rs::provision_worktree` (git worktree add + fixup perms + `generate_for_app_at`).
-- **Binding** : `POST /api/apps/{slug}/agent/query` accepte `conv_id` → cwd = worktree (provision idempotent). Sans `conv_id` → `src/` (conversations héritées). Ops de session (`get/rename/delete`) acceptent `?conv_id=` ; les sessions SDK sont **scopées par cwd**, `listSessions(dir=src, includeWorktrees=true)` agrège toutes les branches (chaque session expose `cwd`/`gitBranch`). Le front porte un `convId` STABLE par conversation (≠ la clé d'onglet qui devient le sid après reload), persisté dans le descripteur d'onglet, dérivé du `gitBranch` à l'ouverture depuis l'historique.
-- **Merge & deploy** : `POST /api/apps/{slug}/source/worktrees/{conv_id}/merge` → pipeline déterministe : pré-check `src/` propre → drain des runs vivants → `git merge --no-ff conv/{id}` (conflit → **409 + fichiers**, résolution **humaine** en Phase 1) → `build()` → `ship()` → vérifie l'app `Running` → push `origin` (historique/miroir) → retire worktree+branche. **Rollback git** sur échec build (app intacte) ; rollback complet (reset+rebuild+ship) sur échec ship/health. UI : section « Branches de conversation » du `GitTab` (bouton **Merge & Deploy** par branche + confirmation). L'agent ne déploie PAS lui-même (le `0-deploy`/ship rechargerait `src/`, pas son worktree) — le `workflow.md` généré le lui dit.
-- **CRUD worktrees** : `POST/GET/DELETE /api/apps/{slug}/source/worktrees[/{conv_id}]`.
-
-> **Limites Phase 1 assumées** : (1) **DB non branchée** — Postgres `app_{slug}` partagé, une migration de schéma frappe la base live de toutes les branches (prévenir l'utilisateur ; migrations différées = phase ultérieure) ; (2) **pas de jail filesystem dur** — isolation = « cwd = worktree + merge-only vers main » par construction, mais Bash + chemins absolus pourraient en sortir (sandbox namespaces = phase ultérieure) ; (3) **pas de preview live par branche** (validation par tests) ; (4) conflits résolus à la main (pas d'auto-résolution agent) ; (5) le `CLAUDE.md` du worktree est seedé depuis `src/` mais ses éditions ne remontent pas au merge (gitignoré).
-
 ## Surveillance IA (3 scans/app, Claude Agent SDK)
 
 > **Migration 2026-06-17** : le driver de scan est passé de **Codex** (CLI OpenAI) au **Claude Agent SDK** (même runtime que l'agent Studio). Plus de dissonance — un seul moteur IA. Codex reste sélectionnable en rollback via `ATELIER_SCAN_DRIVER=codex` (le retirer après validation). Le contrat UI/DB est inchangé : findings via le tool MCP `findings_upsert`, mêmes tables, mêmes events WebSocket.
@@ -280,6 +268,7 @@ make deploy-app SLUG=home   # build sur Medion + restart via API + healthcheck p
 - **TOUJOURS** vérifier le healthcheck dans la sortie du `make deploy*` avant de considérer un deploy réussi.
 - **TOUJOURS** tester e2e les endpoints créés/modifiés (cf. `.claude/rules/testing.md`).
 - **TOUJOURS** logger structuré via `tracing` (cf. `.claude/rules/logging.md`).
+- **TOUJOURS déployer librement** (`make deploy` / `make deploy-app`) sans demander d'autorisation, MAIS **DEMANDER avant de committer** (`git commit`) : proposer le commit en fin de travail cohérent, laisser l'utilisateur décider.
 - **JAMAIS** d'attribution Claude dans les commits.
 
 ## Crates (workspace `atelier-*`)

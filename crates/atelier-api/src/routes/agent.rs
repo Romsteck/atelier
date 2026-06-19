@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -62,24 +62,6 @@ static SDK_UPDATING: AtomicBool = AtomicBool::new(false);
 /// Écrit une ligne NDJSON sur le stdin du runner d'un run. `false` si inconnu/terminé.
 fn send_input(run_id: &str, line: String) -> bool {
     RUNS.lock().unwrap().get(run_id).map(|r| r.input_tx.send(line).is_ok()).unwrap_or(false)
-}
-
-/// Coupe (cancel gracieux : interrupt + EOF → le SDK persiste la session) tous les
-/// runs vivants d'une app. Renvoie le nombre coupé. Utilisé par le pipeline de merge
-/// pour qu'aucune conversation n'édite pendant l'opération (filet serveur ; le front
-/// ferme déjà les conversations avec confirmation).
-pub(crate) fn cancel_runs_for_slug(slug: &str) -> usize {
-    let mut n = 0;
-    let mut runs = RUNS.lock().unwrap();
-    for r in runs.values_mut() {
-        if r.slug == slug {
-            if let Some(tx) = r.cancel_tx.take() {
-                let _ = tx.send(());
-                n += 1;
-            }
-        }
-    }
-    n
 }
 
 fn user_item(text: &str) -> Value {
@@ -308,36 +290,10 @@ struct QueryBody {
     allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     model: Option<String>,
-    /// Identité de conversation → isole le run dans un worktree dédié
-    /// (`…/{slug}/wt/{conv_id}`, branche `conv/{conv_id}`). Absent → cwd = `src/`
-    /// (compat des conversations héritées ; l'isolation devient obligatoire en lot C).
-    #[serde(default)]
-    conv_id: Option<String>,
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (status, Json(json!({"error": msg.into()}))).into_response()
-}
-
-/// Scope d'une op de conversation : worktree (`conv_id` présent) ou `src/`.
-#[derive(Debug, Deserialize)]
-struct ConvScope {
-    #[serde(default)]
-    conv_id: Option<String>,
-}
-
-/// Résout le cwd d'une conversation : `…/{slug}/wt/{conv_id}` si `conv_id` valide,
-/// sinon `…/{slug}/src`. `None` (→ 400) si `conv_id` est fourni mais invalide.
-fn scope_cwd(state: &ApiState, slug: &str, conv_id: &Option<String>) -> Option<PathBuf> {
-    match conv_id.as_deref() {
-        Some(cid) if !cid.is_empty() => {
-            if !crate::routes::source::valid_conv_id(cid) {
-                return None;
-            }
-            Some(state.apps_src_root.join(slug).join("wt").join(cid))
-        }
-        _ => Some(state.apps_src_root.join(slug).join("src")),
-    }
 }
 
 #[instrument(skip(state, body), fields(slug = %slug))]
@@ -349,22 +305,11 @@ async fn query(
     if body.prompt.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "prompt vide");
     }
-    // cwd = le working tree édité par l'agent. Avec `conv_id`, on provisionne (idempotent)
-    // un worktree dédié `…/{slug}/wt/{conv_id}` (branche `conv/{conv_id}`) → édition isolée,
-    // `src/` (= runtime) reste sur `main`. Sans `conv_id` → `src/` (compat héritée).
-    let cwd: PathBuf = match &body.conv_id {
-        Some(cid) => match crate::routes::source::provision_worktree(&state, &slug, cid).await {
-            Ok((wt, _created)) => wt,
-            Err((st, msg)) => return err(st, msg),
-        },
-        None => {
-            let c = state.apps_src_root.join(&slug).join("src");
-            if !c.is_dir() {
-                return err(StatusCode::NOT_FOUND, format!("app source introuvable: {}", c.display()));
-            }
-            c
-        }
-    };
+    // cwd = la source de l'app (le working tree édité par l'agent). Doit exister.
+    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    if !cwd.is_dir() {
+        return err(StatusCode::NOT_FOUND, format!("app source introuvable: {}", cwd.display()));
+    }
 
     let run_id = uuid::Uuid::new_v4().to_string();
 
@@ -792,14 +737,11 @@ async fn list_conversations(
 async fn get_conversation(
     State(state): State<ApiState>,
     Path((slug, sid)): Path<(String, String)>,
-    Query(scope): Query<ConvScope>,
 ) -> impl IntoResponse {
-    // Scope (worktree ou src/) : requis seulement pour le repli sur disque ; une
-    // session vivante est servie depuis la mémoire quel que soit le cwd.
-    let cwd = match scope_cwd(&state, &slug, &scope.conv_id) {
-        Some(c) => c,
-        None => return err(StatusCode::BAD_REQUEST, "conv_id invalide"),
-    };
+    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    if !cwd.is_dir() {
+        return err(StatusCode::NOT_FOUND, "app source introuvable");
+    }
     // Session vivante → fil servi depuis le buffer mémoire (pas encore sur disque).
     let rid = SID_RUN.lock().unwrap().get(&sid).cloned();
     if let Some(rid) = rid {
@@ -838,13 +780,9 @@ struct RenameBody {
 async fn rename_conversation(
     State(state): State<ApiState>,
     Path((slug, sid)): Path<(String, String)>,
-    Query(scope): Query<ConvScope>,
     Json(body): Json<RenameBody>,
 ) -> impl IntoResponse {
-    let cwd = match scope_cwd(&state, &slug, &scope.conv_id) {
-        Some(c) => c,
-        None => return err(StatusCode::BAD_REQUEST, "conv_id invalide"),
-    };
+    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
@@ -864,12 +802,8 @@ async fn rename_conversation(
 async fn delete_conversation(
     State(state): State<ApiState>,
     Path((slug, sid)): Path<(String, String)>,
-    Query(scope): Query<ConvScope>,
 ) -> impl IntoResponse {
-    let cwd = match scope_cwd(&state, &slug, &scope.conv_id) {
-        Some(c) => c,
-        None => return err(StatusCode::BAD_REQUEST, "conv_id invalide"),
-    };
+    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }

@@ -1,8 +1,7 @@
 import { useEffect, useCallback, useMemo, useState } from 'react';
-import { Loader2, GitBranch, ArrowUp, ArrowDown, GitMerge, Rocket } from 'lucide-react';
+import { Loader2, GitBranch, GitCommit, ArrowUp, ArrowDown } from 'lucide-react';
 import FileStatusBadge from './git/FileStatusBadge';
-import CommitGraph from './git/CommitGraph';
-import { getSourceGitLog, pushSource, listWorktrees, mergeWorktree } from '../api/client';
+import { getSourceGitLog, pushSource } from '../api/client';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 
 // Contrôle de source du working tree (`…/{slug}/src`) — façon onglet « Source
@@ -20,7 +19,20 @@ function SectionHeader({ children }) {
   );
 }
 
-export default function GitTab({ slug, active = true, status, statusLoading = false, onRefresh, convId }) {
+// Petit "il y a X" autonome (évite un import utilitaire transverse).
+function ago(iso) {
+  if (!iso) return '';
+  const d = new Date(iso).getTime();
+  if (!Number.isFinite(d)) return '';
+  const s = Math.max(0, (Date.now() - d) / 1000);
+  if (s < 60) return `il y a ${Math.floor(s)} s`;
+  if (s < 3600) return `il y a ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `il y a ${Math.floor(s / 3600)} h`;
+  if (s < 2592000) return `il y a ${Math.floor(s / 86400)} j`;
+  return new Date(iso).toLocaleDateString();
+}
+
+export default function GitTab({ slug, active = true, status, statusLoading = false, onRefresh }) {
   // Modifs et commits s'ouvrent en onglet central plein écran (façon fichier).
   const { openCommit, openDiff, order, convos } = useAgentConversations();
   const openShas = useMemo(
@@ -31,76 +43,26 @@ export default function GitTab({ slug, active = true, status, statusLoading = fa
     () => new Set(order.filter((k) => convos[k]?.type === 'diff').map((k) => convos[k].path)),
     [order, convos],
   );
-  // conv_ids des conversations actuellement EN COURS → on bloque leur Merge & Deploy
-  // (merger une conversation qui tourne l'interromprait et risquerait du travail non commité).
-  const runningConvIds = useMemo(
-    () => new Set(order.filter((k) => convos[k]?.running).map((k) => convos[k]?.convId).filter(Boolean)),
-    [order, convos],
-  );
 
   const [commits, setCommits] = useState(null);
   const [pushing, setPushing] = useState(false);
   const [actionError, setActionError] = useState(null);
-  // Branches de conversation (worktrees) : isolation Phase 1. Chacune est une
-  // conversation en cours ; « Merge & Deploy » la ramène dans main + rebuild + restart.
-  const [worktrees, setWorktrees] = useState([]);
-  const [merging, setMerging] = useState(null); // convId en cours de merge
-  const [mergeMsg, setMergeMsg] = useState(null);
-  const [conflicts, setConflicts] = useState(null); // { branch, files } sur 409
 
   const loadCommits = useCallback(() => {
-    getSourceGitLog(slug, 100, convId)
+    getSourceGitLog(slug, 100)
       .then((r) => setCommits(r.data?.commits || []))
       .catch(() => setCommits([]));
-  }, [slug, convId]);
-
-  const loadWorktrees = useCallback(() => {
-    listWorktrees(slug)
-      .then((r) => setWorktrees((r.data?.worktrees || []).filter((w) => !w.is_main)))
-      .catch(() => setWorktrees([]));
   }, [slug]);
 
   // Resynchronise le status (parent) à l'ouverture / réactivation du pane.
   useEffect(() => { if (active) onRefresh?.(); }, [active, onRefresh]);
 
-  // L'historique + les branches suivent le status : rechargés à chaque rafraîchissement
-  // (fin de tour agent / focus). Silencieux après le 1er.
+  // L'historique suit le status : rechargé à chaque rafraîchissement (fin de tour
+  // agent / focus) → nouveaux commits + marquage « non poussé ». Silencieux après le 1er.
   useEffect(() => {
     loadCommits();
-    loadWorktrees();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
-
-  const doMerge = useCallback(
-    async (convId, branch) => {
-      if (merging) return;
-      // Confirmation (9a) : le merge interrompt les conversations en cours + déploie.
-      if (!window.confirm(
-        `Merger « ${branch} » dans main et déployer ${slug} ?\n\n` +
-        `Les conversations en cours de cette app seront interrompues, l'app rebuildée puis redémarrée.`,
-      )) return;
-      setActionError(null);
-      setMergeMsg(null);
-      setConflicts(null);
-      setMerging(convId);
-      try {
-        const r = await mergeWorktree(slug, convId);
-        setMergeMsg(`« ${r.data?.merged || branch} » mergé et déployé.`);
-        loadWorktrees();
-        onRefresh?.();
-      } catch (e) {
-        const data = e.response?.data;
-        if (e.response?.status === 409 && Array.isArray(data?.conflicts)) {
-          setConflicts({ branch, files: data.conflicts });
-        } else {
-          setActionError(data?.error || data?.detail || 'Échec du merge & deploy');
-        }
-      } finally {
-        setMerging(null);
-      }
-    },
-    [slug, merging, loadWorktrees, onRefresh],
-  );
 
   const doPush = useCallback(() => {
     if (pushing) return;
@@ -145,53 +107,6 @@ export default function GitTab({ slug, active = true, status, statusLoading = fa
 
       {/* Modifications + Historique empilés (un seul scroll) */}
       <div className="flex-1 min-h-0 overflow-auto">
-        {/* — Branches de conversation (worktrees) : Merge & Deploy — */}
-        {worktrees.length > 0 && (
-          <>
-            <SectionHeader>Branches de conversation ({worktrees.length})</SectionHeader>
-            {worktrees.map((w) => {
-              const running = runningConvIds.has(w.conv_id);
-              return (
-                <div key={w.branch} className="flex items-center gap-2 px-2 py-1.5 border-b border-gray-800/60">
-                  <GitBranch className={`w-3.5 h-3.5 shrink-0 ${running ? 'text-blue-400' : 'text-purple-400'}`} />
-                  <span className="font-mono text-[12px] text-gray-300 truncate flex-1" title={w.branch}>
-                    {w.branch}
-                    {running && <span className="ml-1.5 text-[10px] text-blue-400">en cours…</span>}
-                  </span>
-                  <button
-                    onClick={() => doMerge(w.conv_id, w.branch)}
-                    disabled={!!merging || !w.conv_id || running}
-                    title={
-                      running
-                        ? 'Conversation en cours — attends qu\'elle finisse et ait commité son travail'
-                        : w.conv_id
-                        ? `Merger ${w.branch} dans main + déployer ${slug}`
-                        : 'branche sans conv_id'
-                    }
-                    className="flex items-center gap-1 px-2 py-0.5 rounded-sm bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed text-[11px] font-medium shrink-0"
-                  >
-                    {merging === w.conv_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <GitMerge className="w-3 h-3" />}
-                    {merging === w.conv_id ? 'Déploiement…' : 'Merge & Deploy'}
-                  </button>
-                </div>
-              );
-            })}
-            {mergeMsg && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-green-400">
-                <Rocket className="w-3 h-3 shrink-0" />{mergeMsg}
-              </div>
-            )}
-            {conflicts && (
-              <div className="px-3 py-1.5 text-[11px] text-amber-400">
-                Conflit sur « {conflicts.branch} » — à résoudre manuellement :
-                <ul className="mt-1 font-mono text-amber-300/90">
-                  {conflicts.files.map((f) => <li key={f} className="truncate">· {f}</li>)}
-                </ul>
-              </div>
-            )}
-          </>
-        )}
-
         {/* — Modifications — */}
         <SectionHeader>Modifications{fileCount ? ` (${fileCount})` : ''}</SectionHeader>
         {statusLoading && !status ? (
@@ -219,8 +134,26 @@ export default function GitTab({ slug, active = true, status, statusLoading = fa
         ) : commits.length === 0 ? (
           <div className="px-3 py-2 text-[12px] text-gray-600">Aucun commit.</div>
         ) : (
-          // Graphe multi-branches façon VSCode (lanes + merges + puces de branche).
-          <CommitGraph commits={commits} openShas={openShas} onOpen={openCommit} />
+          commits.map((c, i) => {
+            const unpushed = i < ahead; // les `ahead` plus récents ne sont pas sur l'upstream
+            return (
+              <button key={c.sha} onClick={() => openCommit(c)} title={unpushed ? `${c.subject}\n(non poussé)` : c.subject}
+                className={`w-full flex flex-col gap-0.5 pl-3 pr-3 py-1.5 text-left border-l-2 border-b border-b-gray-800/60 ${
+                  openShas.has(c.sha) ? 'bg-blue-500/20' : unpushed ? 'bg-green-500/5 hover:bg-green-500/10' : 'hover:bg-gray-700/40'
+                } ${unpushed ? 'border-l-green-500' : 'border-l-transparent'}`}>
+                <span className="text-[12px] text-gray-200 truncate flex items-center gap-1.5">
+                  {unpushed && <ArrowUp className="w-3 h-3 shrink-0 text-green-400" />}
+                  <span className="truncate">{c.subject}</span>
+                </span>
+                <span className="text-[11px] text-gray-500 flex items-center gap-1.5">
+                  <GitCommit className="w-3 h-3 shrink-0" />
+                  <span className={`font-mono ${unpushed ? 'text-green-400' : ''}`}>{c.short}</span>
+                  <span className="truncate">{c.author}</span>
+                  <span className="ml-auto shrink-0">{ago(c.date)}</span>
+                </span>
+              </button>
+            );
+          })
         )}
       </div>
     </div>
