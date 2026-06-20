@@ -1,6 +1,6 @@
-import { Database, ChevronRight } from 'lucide-react';
+import { Database, ChevronRight, ChevronLeft } from 'lucide-react';
 
-export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, onSelectTable, loading }) {
+export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, onSelectTable, onChangeApp, loading }) {
   if (loading) {
     return (
       <div className="w-56 min-w-[224px] border-r border-gray-700 p-4">
@@ -13,9 +13,19 @@ export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, o
 
   return (
     <aside className="w-56 min-w-[224px] border-r border-gray-700 overflow-y-auto flex flex-col">
-      <div className="px-3 pt-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
-        Bases de donnees
-      </div>
+      {onChangeApp ? (
+        <button
+          onClick={onChangeApp}
+          className="flex items-center gap-1.5 px-3 pt-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 hover:text-gray-300 border-none bg-transparent cursor-pointer text-left"
+          title="Changer d'application"
+        >
+          <ChevronLeft className="w-3 h-3" /> Changer d'app
+        </button>
+      ) : (
+        <div className="px-3 pt-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+          Bases de donnees
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {appsWithTables.length === 0 && (
           <div className="text-xs text-gray-500 text-center py-4">Aucune app avec DB</div>
@@ -43,7 +53,7 @@ export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, o
                     {sel && <ChevronRight className="w-3 h-3 shrink-0" />}
                     {name}
                   </span>
-                  {count != null && <span className="text-[10px] text-gray-600">{count}</span>}
+                  {count != null && <span className="text-[10px] text-gray-600 tabular-nums">{count.toLocaleString()}</span>}
                 </button>
               );
             })}

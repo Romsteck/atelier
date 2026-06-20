@@ -215,6 +215,25 @@ impl DataverseEngine {
         Ok(count)
     }
 
+    /// Number of *active* (non soft-deleted) rows in a user table.
+    ///
+    /// Mirrors the `"is_deleted" = FALSE` predicate the query gateway auto-injects
+    /// (cf. `query::build_list_sql`) so the sidebar count matches the grid's `total`.
+    /// `is_deleted` is a guaranteed system column on every dataverse table.
+    pub async fn count_active_rows(&self, table: &str) -> Result<i64> {
+        validation::validate_user_identifier(table)?;
+        let exists = self.table_exists(table).await?;
+        if !exists {
+            return Err(DataverseError::TableNotFound(table.into()));
+        }
+        let sql = format!(
+            "SELECT COUNT(*) FROM {} WHERE \"is_deleted\" = FALSE",
+            quote_ident(table)
+        );
+        let (count,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql)).fetch_one(&self.pool).await?;
+        Ok(count)
+    }
+
     async fn table_exists(&self, table: &str) -> Result<bool> {
         let row: Option<(bool,)> = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM _dv_tables WHERE name = $1)",

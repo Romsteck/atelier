@@ -9,13 +9,13 @@ import {
   updateAppDbRow,
   deleteAppDbRow,
 } from '../api/client';
-import { coerceValue } from '../components/db/fieldTypes';
 import { TableSidebar } from '../components/db/TableSidebar';
 import { DataGrid } from '../components/db/DataGrid';
 import { Pagination } from '../components/db/Pagination';
-import { AddRowModal } from '../components/db/AddRowModal';
+import { RowFormModal } from '../components/db/RowFormModal';
 import { DeleteConfirmModal } from '../components/db/DeleteConfirmModal';
-import { Download, Plus, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
+import { AppPicker } from '../components/db/AppPicker';
+import { Download, Plus, Trash2, RefreshCw, Database } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 
 function unwrap(res) {
@@ -25,27 +25,20 @@ function unwrap(res) {
 
 export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  // En mode embarqué (onglet DB du Studio) : table sélectionnée = état interne, AUCUN
-  // paramètre d'URL. Stockée avec son app → s'auto-réinitialise au changement d'app
-  // (le tableSel pointe alors sur une autre app et `selectedTable` retombe à null).
-  const [tableSel, setTableSel] = useState(null);
 
   const selectedAppSlug = propAppSlug || searchParams.get('app') || null;
-  const selectedTable = embedded
-    ? (tableSel && tableSel.app === selectedAppSlug ? tableSel.table : null)
-    : (searchParams.get('table') || null);
-  const selectTable = (appSlug, name) => {
-    if (embedded) setTableSel({ app: appSlug, table: name });
-    else setSearchParams({ app: appSlug, table: name });
-  };
+  const selectedTable = searchParams.get('table') || null;
 
   // Data
-  const [appsWithTables, setAppsWithTables] = useState([]);
+  const [apps, setApps] = useState([]);            // apps avec has_db (objets)
+  const [pickerCounts, setPickerCounts] = useState({}); // slug -> nb tables (picker standalone)
+  const [appTables, setAppTables] = useState([]);  // tables de l'app sélectionnée (+ row_count)
   const [schema, setSchema] = useState(null);
   const [result, setResult] = useState(null);
 
   // UI
-  const [sidebarLoading, setSidebarLoading] = useState(true);
+  const [appsLoading, setAppsLoading] = useState(true);
+  const [tablesLoading, setTablesLoading] = useState(false);
   const [tableLoading, setTableLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -62,16 +55,17 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   const [searchQuery, setSearchQuery] = useState('');
   const searchTimeout = useRef(null);
 
+  // Génération de chargement : invalide les réponses en vol quand on change de
+  // table (sinon une requête lente de la table précédente résout APRÈS et écrase
+  // les données de la nouvelle table — l'ancienne « reste en mémoire »).
+  const loadSeq = useRef(0);
+
   // Selection
   const [selectedRows, setSelectedRows] = useState(new Set());
 
-  // Inline editing
-  const [editingCell, setEditingCell] = useState(null);
-  const [editValue, setEditValue] = useState('');
-  const [savingCell, setSavingCell] = useState(null);
-
   // Modals
   const [showAddRow, setShowAddRow] = useState(false);
+  const [editingRow, setEditingRow] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Toast
@@ -82,46 +76,75 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     setTimeout(() => setToast(null), 3000);
   }
 
-  // ── Load sidebar ──
+  // ── Load apps (résolution des noms + picker standalone) ──
   useEffect(() => {
-    setSidebarLoading(true);
+    let cancelled = false;
+    setAppsLoading(true);
     setError(null);
 
-    const loadApps = async () => {
+    (async () => {
       try {
         const res = await listApps();
-        const apps = unwrap(res)?.apps || unwrap(res) || [];
-        const dbApps = (Array.isArray(apps) ? apps : []).filter(a => a.has_db);
+        const all = unwrap(res)?.apps || unwrap(res) || [];
+        const dbApps = (Array.isArray(all) ? all : []).filter(a => a.has_db);
+        if (cancelled) return;
+        setApps(dbApps);
 
-        const results = await Promise.all(
-          dbApps.map(async (app) => {
+        // Le picker (standalone) affiche le nombre de tables par app. On ne charge
+        // ces décomptes que là — l'embarqué Studio est déjà scopé à une app.
+        if (!propAppSlug) {
+          const counts = {};
+          await Promise.all(dbApps.map(async (app) => {
             try {
-              const tablesRes = await getAppDbTables(app.slug);
-              const raw = unwrap(tablesRes);
+              const r = await getAppDbTables(app.slug);
+              const raw = unwrap(r);
               const tables = raw?.tables || (Array.isArray(raw) ? raw : []);
-              return { app, tables };
+              counts[app.slug] = tables.length;
             } catch {
-              return { app, tables: [] };
+              counts[app.slug] = null;
             }
-          })
-        );
-        setAppsWithTables(results);
-
-        if (propAppSlug && !selectedTable) {
-          const appData = results.find(r => r.app.slug === propAppSlug);
-          if (appData && appData.tables.length > 0) {
-            const name = typeof appData.tables[0] === 'string' ? appData.tables[0] : appData.tables[0].name;
-            selectTable(propAppSlug, name);
-          }
+          }));
+          if (!cancelled) setPickerCounts(counts);
         }
       } catch (e) {
-        setError(e.message);
+        if (!cancelled) setError(e.message);
       } finally {
-        setSidebarLoading(false);
+        if (!cancelled) setAppsLoading(false);
       }
-    };
-    loadApps();
-  }, [propAppSlug]); // eslint-disable-line
+    })();
+
+    return () => { cancelled = true; };
+  }, [propAppSlug]);
+
+  // ── Load les tables de l'app sélectionnée (avec row_count) pour le sidebar ──
+  useEffect(() => {
+    if (!selectedAppSlug) { setAppTables([]); return; }
+    let cancelled = false;
+    setAppTables([]); // évite d'afficher les tables de l'app précédente
+    setTablesLoading(true);
+
+    (async () => {
+      try {
+        const r = await getAppDbTables(selectedAppSlug, { counts: 1 });
+        const raw = unwrap(r);
+        const tables = raw?.tables || (Array.isArray(raw) ? raw : []);
+        if (cancelled) return;
+        setAppTables(tables);
+
+        // Embarqué : auto-sélection de la 1ère table si aucune n'est choisie.
+        if (propAppSlug && !selectedTable && tables.length > 0) {
+          const name = typeof tables[0] === 'string' ? tables[0] : tables[0].name;
+          setSearchParams({ app: propAppSlug, table: name }, { replace: true });
+        }
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      } finally {
+        if (!cancelled) setTablesLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [selectedAppSlug]); // eslint-disable-line
 
   // ── Load table data ──
   const loadTableData = useCallback(async () => {
@@ -132,12 +155,18 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
       return;
     }
 
+    // Ce chargement « possède » cette génération ; toute réponse d'un chargement
+    // antérieur (table précédente) est ignorée si une nouvelle a démarré entre-temps.
+    const seq = ++loadSeq.current;
+    const isCurrent = () => seq === loadSeq.current;
+
     setTableLoading(true);
     setError(null);
 
     try {
       // Fetch schema first to know relations for expand
       const schemaRes = await getAppDbTable(appSlug, selectedTable);
+      if (!isCurrent()) return;
       const schemaData = unwrap(schemaRes);
       setSchema(schemaData);
 
@@ -154,7 +183,8 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
         };
       });
 
-      // Use the new structured query endpoint
+      // Le endpoint structuré renvoie déjà `total` (count filtré, hors soft-delete) :
+      // pas de 2ᵉ requête count séparée — un aller-retour de moins par chargement.
       const queryRes = await queryAppDbRows(appSlug, selectedTable, {
         filters: apiFilters,
         limit: pageSize,
@@ -163,25 +193,18 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
         order_desc: sortDesc,
         expand,
       });
+      if (!isCurrent()) return;
       const queryData = unwrap(queryRes);
-
-      // Also get total count (without pagination)
-      const countRes = await queryAppDbRows(appSlug, selectedTable, {
-        filters: apiFilters,
-        limit: 1,
-        offset: 0,
-      });
-      const countTotal = unwrap(countRes)?.total || queryData?.total || 0;
 
       setResult({
         columns: queryData?.columns || [],
         rows: queryData?.rows || [],
-        total_count: countTotal,
+        total_count: queryData?.total || 0,
       });
     } catch (e) {
-      setError(e.message);
+      if (isCurrent()) setError(e.message);
     } finally {
-      setTableLoading(false);
+      if (isCurrent()) setTableLoading(false);
     }
   }, [selectedAppSlug, selectedTable, pageSize, currentPage, sortColumn, sortDesc, filters]);
 
@@ -236,43 +259,20 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     setSelectedRows(checked && result ? new Set(result.rows.map((_, i) => i)) : new Set());
   }
 
-  // ── Inline edit ──
-  // The dataverse gateway keys every row by its `id`; the optimistic-lock
-  // version is resolved server-side, so the browser only sends id + patch.
-  function handleStartEdit(row, col, value) {
-    if (col === 'id') return;
-    setEditingCell({ row, col });
-    setEditValue(value == null ? '' : String(value));
+  // ── Édition en formulaire ── (un clic sur la ligne ouvre le formulaire pré-rempli)
+  function handleRowClick(rowIdx) {
+    const row = result?.rows?.[rowIdx];
+    if (row) setEditingRow(row);
   }
 
-  async function handleCommitEdit() {
-    if (!editingCell || !result || !selectedAppSlug || !selectedTable) return;
-
-    const row = result.rows[editingCell.row];
-    const col = editingCell.col;
-    const original = row[col];
-    if (String(original ?? '') === editValue) { setEditingCell(null); return; }
-
-    const id = row.id;
-    if (id == null) { setEditingCell(null); return; }
-
-    setSavingCell(editingCell);
-    setEditingCell(null);
-
-    try {
-      const fieldType = schema?.columns?.find(c => c.name === col)?.field_type;
-      const newVal = coerceValue(editValue, fieldType);
-      await updateAppDbRow(selectedAppSlug, selectedTable, id, { [col]: newVal });
-      await loadTableData();
-      showToast('Cellule mise à jour');
-    } catch (e) {
-      setError(e.response?.data?.error || e.message);
-    } finally {
-      setSavingCell(null);
-    }
+  async function handleUpdateRow(id, patch) {
+    if (!selectedAppSlug || !selectedTable || id == null) return;
+    await updateAppDbRow(selectedAppSlug, selectedTable, id, patch);
+    await loadTableData();
+    showToast('Ligne mise à jour');
   }
 
-  // ── Insert row ── (rowData already typed by AddRowModal/coerceValue)
+  // ── Insert row ── (rowData déjà typé par RowFormModal/coerceValue)
   async function handleInsertRow(rowData) {
     if (!selectedAppSlug || !selectedTable) return;
     await insertAppDbRow(selectedAppSlug, selectedTable, rowData);
@@ -319,168 +319,217 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
   // ── Select table ──
   function handleSelectTable(appSlug, tableName) {
-    selectTable(appSlug, tableName);
+    // On invalide tout chargement en vol AVANT de re-render : une réponse en
+    // retard de la table précédente ne pourra plus écraser la nouvelle.
+    loadSeq.current++;
+    // On vide schema/result tout de suite : pas de flash de l'ancienne table sous
+    // le nouveau nom, et la grille passe en skeleton stable (cf. DataGrid).
+    setResult(null);
+    setSchema(null);
+    setSearchParams({ app: appSlug, table: tableName });
     setCurrentPage(0);
     setSortColumn(null);
     setSortDesc(false);
     setFilters([]);
     setSearchQuery('');
     setSelectedRows(new Set());
-    setEditingCell(null);
+  }
+
+  // ── Sélection d'app (picker standalone) ──
+  function handleSelectApp(slug) {
+    setSearchParams({ app: slug });
+  }
+
+  // ── Retour au picker (changer d'app) ──
+  function handleChangeApp() {
+    loadSeq.current++;
+    setResult(null);
+    setSchema(null);
+    setFilters([]);
+    setSearchQuery('');
+    setSelectedRows(new Set());
+    setSearchParams({});
   }
 
   const totalCount = result?.total_count || 0;
+
+  // App sélectionnée (objet) pour l'en-tête du sidebar.
+  const selectedApp = apps.find(a => a.slug === selectedAppSlug)
+    || (selectedAppSlug ? { slug: selectedAppSlug, name: selectedAppSlug } : null);
+  const sidebarAppsWithTables = selectedAppSlug && selectedApp
+    ? [{ app: selectedApp, tables: appTables }]
+    : [];
+
+  // Vue picker : standalone et aucune app choisie.
+  const showPicker = !embedded && !selectedAppSlug;
 
   return (
     <>
       {!embedded && <PageHeader title="Bases de données" icon={Database} />}
       <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded-sm border border-gray-700'}`}>
-      {/* Sidebar */}
-      <TableSidebar
-        appsWithTables={propAppSlug ? appsWithTables.filter(a => a.app.slug === propAppSlug) : appsWithTables}
-        selectedAppSlug={selectedAppSlug}
-        selectedTable={selectedTable}
-        onSelectTable={handleSelectTable}
-        loading={sidebarLoading}
-      />
+        {showPicker ? (
+          <AppPicker
+            apps={apps.map(a => ({ app: a, tableCount: pickerCounts[a.slug] ?? null }))}
+            onSelect={handleSelectApp}
+            loading={appsLoading}
+          />
+        ) : (
+          <>
+            {/* Sidebar (scopé à l'app sélectionnée) */}
+            <TableSidebar
+              appsWithTables={sidebarAppsWithTables}
+              selectedAppSlug={selectedAppSlug}
+              selectedTable={selectedTable}
+              onSelectTable={handleSelectTable}
+              onChangeApp={!embedded ? handleChangeApp : undefined}
+              loading={tablesLoading && appTables.length === 0}
+            />
 
-      {/* Main */}
-      <div className="flex flex-col flex-1 min-w-0">
-        {/* Toolbar */}
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-700 shrink-0 bg-gray-800/50">
-          <div className="flex items-center gap-2 flex-1">
-            {selectedTable ? (
-              <>
-                <Database className="w-4 h-4 text-blue-400" />
-                <span className="text-sm font-medium text-gray-50">
-                  {selectedAppSlug && <span className="text-gray-500">{selectedAppSlug}.</span>}
-                  {selectedTable}
-                </span>
-                {totalCount > 0 && <span className="text-xs text-gray-500">({totalCount.toLocaleString()} lignes)</span>}
-              </>
-            ) : (
-              <span className="text-sm text-gray-500">Selectionnez une table</span>
-            )}
-          </div>
+            {/* Main */}
+            <div className="flex flex-col flex-1 min-w-0">
+              {/* Toolbar */}
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-700 shrink-0 bg-gray-800/50">
+                <div className="flex items-center gap-2 flex-1">
+                  {selectedTable ? (
+                    <>
+                      <Database className="w-4 h-4 text-blue-400" />
+                      <span className="text-sm font-medium text-gray-50">
+                        {selectedAppSlug && <span className="text-gray-500">{selectedAppSlug}.</span>}
+                        {selectedTable}
+                      </span>
+                      {totalCount > 0 && <span className="text-xs text-gray-500">({totalCount.toLocaleString()} lignes)</span>}
+                    </>
+                  ) : (
+                    <span className="text-sm text-gray-500">Selectionnez une table</span>
+                  )}
+                </div>
 
-          {selectedAppSlug && (
-            <span
-              className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
-              title="Postgres géré via atelier-dataverse (passerelle REST, plus d'accès direct)"
-            >
-              dataverse
-            </span>
-          )}
+                {selectedAppSlug && (
+                  <span
+                    className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    title="Postgres géré via atelier-dataverse (passerelle REST, plus d'accès direct)"
+                  >
+                    dataverse
+                  </span>
+                )}
 
-          {selectedTable && (
-            <div className="flex items-center gap-1">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={e => handleSearchChange(e.target.value)}
-                placeholder="Rechercher..."
-                className="bg-gray-900 text-gray-50 text-xs rounded-sm px-2 py-1 border border-gray-600 w-40 outline-hidden"
-              />
-              <button
-                onClick={() => setShowAddRow(true)}
-                className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer"
-                title="Ajouter"
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-              {selectedRows.size > 0 && (
-                <button
-                  onClick={() => setShowDeleteConfirm(true)}
-                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer"
-                  title="Supprimer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {selectedTable && (
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={e => handleSearchChange(e.target.value)}
+                      placeholder="Rechercher..."
+                      className="bg-gray-900 text-gray-50 text-xs rounded-sm px-2 py-1 border border-gray-600 w-40 outline-hidden"
+                    />
+                    <button
+                      onClick={() => setShowAddRow(true)}
+                      className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer"
+                      title="Ajouter"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                    {selectedRows.size > 0 && (
+                      <button
+                        onClick={() => setShowDeleteConfirm(true)}
+                        className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer"
+                        title="Supprimer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Actualiser">
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Error */}
+              {error && (
+                <div className="px-4 py-2 text-xs bg-red-500/10 text-red-400 border-b border-red-500/20 shrink-0">
+                  {error}
+                </div>
               )}
-              <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
-                <Download className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Actualiser">
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-        </div>
 
-        {/* Error */}
-        {error && (
-          <div className="px-4 py-2 text-xs bg-red-500/10 text-red-400 border-b border-red-500/20 shrink-0">
-            {error}
+              {/* Grid */}
+              <div className="flex-1 overflow-hidden">
+                {selectedTable ? (
+                  <DataGrid
+                    columns={result?.columns || []}
+                    rows={result?.rows || []}
+                    schema={schema}
+                    sortColumn={sortColumn}
+                    sortDesc={sortDesc}
+                    onSort={handleSort}
+                    filters={filters}
+                    onFilterChange={handleFilterChange}
+                    selectedRows={selectedRows}
+                    onSelectRow={handleSelectRow}
+                    onSelectAll={handleSelectAll}
+                    onRowClick={handleRowClick}
+                    loading={tableLoading}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                    <Database className="w-12 h-12 mb-3 opacity-20" />
+                    <p className="text-sm">Selectionnez une table{!propAppSlug ? ' dans la barre laterale' : ''}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Pagination */}
+              {selectedTable && totalCount > 0 && (
+                <Pagination
+                  currentPage={currentPage}
+                  pageSize={pageSize}
+                  totalCount={totalCount}
+                  onPageChange={(p) => { setCurrentPage(p); setSelectedRows(new Set()); }}
+                  onPageSizeChange={(s) => { setPageSize(s); setCurrentPage(0); setSelectedRows(new Set()); }}
+                />
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Toast */}
+        {toast && (
+          <div className={`fixed bottom-4 right-4 z-50 px-4 py-2 rounded-lg text-sm shadow-lg ${
+            toast.type === 'ok' ? 'bg-green-500/90 text-white' : 'bg-red-500/90 text-white'
+          }`}>
+            {toast.msg}
           </div>
         )}
 
-        {/* Grid */}
-        <div className="flex-1 overflow-hidden">
-          {selectedTable ? (
-            <DataGrid
-              columns={result?.columns || []}
-              rows={result?.rows || []}
-              schema={schema}
-              sortColumn={sortColumn}
-              sortDesc={sortDesc}
-              onSort={handleSort}
-              filters={filters}
-              onFilterChange={handleFilterChange}
-              selectedRows={selectedRows}
-              onSelectRow={handleSelectRow}
-              onSelectAll={handleSelectAll}
-              editingCell={editingCell}
-              editValue={editValue}
-              savingCell={savingCell}
-              onStartEdit={handleStartEdit}
-              onEditValueChange={setEditValue}
-              onCommitEdit={handleCommitEdit}
-              onCancelEdit={() => setEditingCell(null)}
-              loading={tableLoading}
-            />
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-gray-500">
-              <Database className="w-12 h-12 mb-3 opacity-20" />
-              <p className="text-sm">Selectionnez une table{!propAppSlug ? ' dans la barre laterale' : ''}</p>
-            </div>
-          )}
-        </div>
-
-        {/* Pagination */}
-        {selectedTable && totalCount > 0 && (
-          <Pagination
-            currentPage={currentPage}
-            pageSize={pageSize}
-            totalCount={totalCount}
-            onPageChange={(p) => { setCurrentPage(p); setSelectedRows(new Set()); setEditingCell(null); }}
-            onPageSizeChange={(s) => { setPageSize(s); setCurrentPage(0); setSelectedRows(new Set()); }}
+        {/* Modals */}
+        {showAddRow && schema && (
+          <RowFormModal
+            mode="add"
+            columns={schema.columns || []}
+            relations={schema.relations || []}
+            appSlug={selectedAppSlug}
+            onSubmit={handleInsertRow}
+            onClose={() => setShowAddRow(false)}
           />
         )}
+        {editingRow && schema && (
+          <RowFormModal
+            mode="edit"
+            columns={schema.columns || []}
+            relations={schema.relations || []}
+            appSlug={selectedAppSlug}
+            initialRow={editingRow}
+            onSubmit={handleUpdateRow}
+            onClose={() => setEditingRow(null)}
+          />
+        )}
+        {showDeleteConfirm && (
+          <DeleteConfirmModal count={selectedRows.size} onConfirm={handleDeleteSelected} onClose={() => setShowDeleteConfirm(false)} />
+        )}
       </div>
-
-      {/* Toast */}
-      {toast && (
-        <div className={`fixed bottom-4 right-4 z-50 px-4 py-2 rounded-lg text-sm shadow-lg ${
-          toast.type === 'ok' ? 'bg-green-500/90 text-white' : 'bg-red-500/90 text-white'
-        }`}>
-          {toast.msg}
-        </div>
-      )}
-
-      {/* Modals */}
-      {showAddRow && schema && (
-        <AddRowModal
-          columns={schema.columns || []}
-          relations={schema.relations || []}
-          appSlug={selectedAppSlug}
-          onInsert={handleInsertRow}
-          onClose={() => setShowAddRow(false)}
-        />
-      )}
-      {showDeleteConfirm && (
-        <DeleteConfirmModal count={selectedRows.size} onConfirm={handleDeleteSelected} onClose={() => setShowDeleteConfirm(false)} />
-      )}
-    </div>
     </>
   );
 }

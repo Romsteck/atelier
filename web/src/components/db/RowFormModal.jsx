@@ -1,14 +1,37 @@
 import { useState } from 'react';
-import { X, Plus, Loader2 } from 'lucide-react';
+import { X, Plus, Save, Loader2 } from 'lucide-react';
 import { getFieldConfig, isReadOnly, coerceValue } from './fieldTypes';
 import { LookupCombobox } from './LookupCombobox';
 
-export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) {
+/**
+ * Formulaire de ligne, type-aware, partagé entre l'ajout et l'édition.
+ *
+ * - `mode="add"`   → champs vides, `onSubmit(row)` insère une nouvelle ligne.
+ * - `mode="edit"`  → champs pré-remplis depuis `initialRow`, `onSubmit(id, patch)`
+ *   met à jour la ligne (l'`id` PK est affiché en lecture seule).
+ *
+ * Remplace l'ancienne édition in-line cellule-par-cellule : toute la ligne est
+ * éditée dans un seul formulaire cohérent avec l'ajout.
+ */
+export function RowFormModal({ mode = 'add', columns, relations, appSlug, initialRow, onSubmit, onClose }) {
+  const isEdit = mode === 'edit';
   const editableCols = (columns || []).filter(c => !c.primary_key && !isReadOnly(c.field_type));
+
   const [values, setValues] = useState(() => {
     const init = {};
     editableCols.forEach(c => {
-      init[c.name] = c.field_type === 'Boolean' ? false : '';
+      const raw = isEdit ? initialRow?.[c.name] : undefined;
+      if (c.field_type === 'Boolean') {
+        init[c.name] = raw === true || raw === 1 || raw === 'true';
+      } else if (raw == null) {
+        init[c.name] = '';
+      } else if (c.field_type === 'Json') {
+        init[c.name] = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+      } else if (c.field_type === 'MultiChoice') {
+        init[c.name] = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      } else {
+        init[c.name] = String(raw);
+      }
     });
     return init;
   });
@@ -31,15 +54,22 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
         if (c.field_type === 'Boolean') {
           row[c.name] = coerceValue(v, 'Boolean');
         } else if (v === '' || v == null) {
-          if (!c.required) row[c.name] = null;
+          // En édition on envoie explicitement null (mise à null possible) ;
+          // en ajout on n'envoie la clé que si la colonne n'est pas requise.
+          if (isEdit || !c.required) row[c.name] = null;
         } else {
           row[c.name] = coerceValue(v, c.field_type);
         }
       });
-      await onInsert(row);
+      if (isEdit) {
+        const id = initialRow?.id;
+        await onSubmit(id, row);
+      } else {
+        await onSubmit(row);
+      }
       onClose();
     } catch (err) {
-      setError(err.message || 'Erreur');
+      setError(err?.response?.data?.error || err.message || 'Erreur');
     } finally {
       setSaving(false);
     }
@@ -47,18 +77,29 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
 
   const setValue = (name, val) => setValues(prev => ({ ...prev, [name]: val }));
 
+  const Icon = isEdit ? Save : Plus;
+  const title = isEdit ? 'Modifier la ligne' : 'Ajouter une ligne';
+  const submitLabel = isEdit ? 'Enregistrer' : 'Ajouter';
+  const savingLabel = isEdit ? 'Enregistrement...' : 'Ajout...';
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-xl w-full max-w-md max-h-[80vh] flex flex-col">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
           <h3 className="text-sm font-semibold text-gray-50 flex items-center gap-2">
-            <Plus className="w-4 h-4 text-blue-400" /> Ajouter une ligne
+            <Icon className="w-4 h-4 text-blue-400" /> {title}
           </h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-50 rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 space-y-3">
+          {isEdit && initialRow?.id != null && (
+            <div className="flex items-center gap-2 text-xs text-gray-500 pb-1">
+              <span className="text-[10px] uppercase tracking-wide text-gray-600">id</span>
+              <span className="font-mono text-gray-400">{String(initialRow.id)}</span>
+            </div>
+          )}
           {editableCols.map(col => {
             const cfg = getFieldConfig(col.field_type);
             const rel = relationMap[col.name];
@@ -80,6 +121,9 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
               </div>
             );
           })}
+          {editableCols.length === 0 && (
+            <div className="text-xs text-gray-500 text-center py-4">Aucune colonne éditable</div>
+          )}
           {error && <div className="text-xs text-red-400 bg-red-500/10 rounded-sm px-3 py-2">{error}</div>}
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
@@ -87,7 +131,7 @@ export function AddRowModal({ columns, relations, appSlug, onInsert, onClose }) 
             Annuler
           </button>
           <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded-sm border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1">
-            {saving ? <><Loader2 className="w-3 h-3 animate-spin" /> Ajout...</> : <><Plus className="w-3 h-3" /> Ajouter</>}
+            {saving ? <><Loader2 className="w-3 h-3 animate-spin" /> {savingLabel}</> : <><Icon className="w-3 h-3" /> {submitLabel}</>}
           </button>
         </div>
       </div>
@@ -184,4 +228,3 @@ function FieldInput({ col, cfg, relation, appSlug, value, onChange }) {
     />
   );
 }
-

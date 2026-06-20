@@ -10,7 +10,7 @@
 //! `POST db/tables/{t}/insert`, `PATCH/DELETE db/tables/{t}/rows/{id}`. Le SQL
 //! brut n'existe plus (postgres-dataverse) — ces endpoints sont la voie admin.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -168,10 +168,20 @@ async fn get_schema(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ListTablesParams {
+    /// Opt-in : `?counts=1` enrichit chaque table de son `row_count` (lignes
+    /// actives, hors soft-delete). Sans, la réponse reste `["t1", ...]` (compat
+    /// MCP/SchemaPage). Le compteur est borné à une seule app par appel côté UI.
+    #[serde(default)]
+    counts: Option<String>,
+}
+
 /// GET /api/apps/{slug}/db/tables
 async fn list_tables(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
+    Query(params): Query<ListTablesParams>,
 ) -> impl IntoResponse {
     if let Err(r) = validate_slug(&slug) {
         return r;
@@ -197,16 +207,30 @@ async fn list_tables(
             );
         }
     };
-    match engine.list_tables().await {
-        Ok(tables) => {
-            info!(slug = %slug, count = tables.len(), "AppDb list_tables ok");
-            ok_data(json!({"tables": tables}))
+    let names = match engine.list_tables().await {
+        Ok(t) => t,
+        Err(e) => {
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_tables: {e}"),
+            );
         }
-        Err(e) => err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("list_tables: {e}"),
-        ),
+    };
+
+    let want_counts = matches!(params.counts.as_deref(), Some("1") | Some("true"));
+    if !want_counts {
+        info!(slug = %slug, count = names.len(), "AppDb list_tables ok");
+        return ok_data(json!({"tables": names}));
     }
+
+    // Opt-in : on annote chaque table de son nombre de lignes actives.
+    let mut tables = Vec::with_capacity(names.len());
+    for name in &names {
+        let row_count = engine.count_active_rows(name).await.unwrap_or(0) as u64;
+        tables.push(json!({"name": name, "row_count": row_count}));
+    }
+    info!(slug = %slug, count = names.len(), "AppDb list_tables ok (with counts)");
+    ok_data(json!({"tables": tables}))
 }
 
 /// GET /api/apps/{slug}/db/tables/{table}

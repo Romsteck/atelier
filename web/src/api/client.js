@@ -208,7 +208,8 @@ export const setAppEnvVar = (slug, key, body) =>
 export const deleteAppEnvVar = (slug, key) =>
   api.delete(`/apps/${slug}/env/${encodeURIComponent(key)}`);
 // Apps DB
-export const getAppDbTables = (slug) => api.get(`/apps/${slug}/db/tables`);
+export const getAppDbTables = (slug, { counts } = {}) =>
+  api.get(`/apps/${slug}/db/tables`, counts ? { params: { counts: 1 } } : undefined);
 export const getAppDbTable = (slug, table) => api.get(`/apps/${slug}/db/tables/${table}`);
 export const queryAppDbRows = (slug, table, body) => api.post(`/apps/${slug}/db/tables/${table}/rows`, body);
 // Admin row writes — routed through the dataverse engine (postgres-dataverse).
