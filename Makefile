@@ -33,7 +33,7 @@ IS_MEDION := $(shell [ "$$(uname -n)" = medion ] && echo yes || echo no)
 help:
 	@echo "Targets:"
 	@echo "  atelier            cargo build --release -p atelier (local)"
-	@echo "  web                npm ci (si besoin) + build frontend (web/dist)"
+	@echo "  web                npm ci (si besoin) + 2 builds Vite : homepage (dist) + Studio (dist/studio)"
 	@echo "  deploy             build + install dans /opt/atelier + restart atelier.service"
 	@echo "                     (en place sur Medion, sinon fallback rsync/SSH)"
 	@echo "  deploy-app SLUG=x  build app x + restart via API (cf. scripts/deploy-app.sh)"
@@ -59,8 +59,11 @@ atelier:
 web-deps:
 	cd web && { [ -d node_modules ] && [ node_modules -nt package-lock.json ] || npm ci; }
 
+# Deux builds Vite SÉPARÉS partageant web/src/ : la homepage (base /, → dist/) puis
+# le Studio (base /studio/, → dist/studio/). ORDRE IMPÉRATIF : la homepage d'abord
+# (son emptyOutDir vide dist/, donc dist/studio/ aussi), le Studio ensuite.
 web: web-deps
-	cd web && CI=1 npm run build
+	cd web && CI=1 npm run build && CI=1 npm run build:studio
 
 # Runner Node : npm ci (reproductible). JAMAIS --omit=optional → le binaire natif
 # linux-x64 du SDK est une optional-dep ; sans lui le runner échoue au runtime.
@@ -83,6 +86,7 @@ endif
 deploy-local: atelier web runner
 	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting (a --delete rsync would wipe prod web)" >&2; exit 1; }
+	@test -s $(WEB_DIST_LOCAL)/studio/studio.html || { echo "error: $(WEB_DIST_LOCAL)/studio/studio.html missing/empty — studio build absent (a --delete rsync would wipe prod /studio)" >&2; exit 1; }
 	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
 	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — aborting (a --delete rsync would wipe prod runner)" >&2; exit 1; }
 	sudo install -d -o root -g root -m 0755 $(PREFIX)/bin $(PREFIX)/web $(PREFIX)/crates $(RUNNER_DST)
@@ -117,6 +121,7 @@ deploy-local: atelier web runner
 deploy-remote: atelier web runner
 	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting" >&2; exit 1; }
+	@test -s $(WEB_DIST_LOCAL)/studio/studio.html || { echo "error: $(WEB_DIST_LOCAL)/studio/studio.html missing/empty — studio build absent — aborting" >&2; exit 1; }
 	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
 	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — aborting" >&2; exit 1; }
 	@echo "→ rsync atelier binary + web/dist to $(MEDION)"

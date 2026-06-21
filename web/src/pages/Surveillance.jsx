@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
 import {
   ShieldAlert, RefreshCw, ShieldCheck, AlertOctagon, Activity,
   AlertTriangle, AlertCircle, Info, Loader2, XCircle, ChevronRight,
 } from 'lucide-react';
 import { getSurveillanceOverview } from '../api/client';
+import { openStudio } from '../lib/openStudio';
 import PageHeader from '../components/PageHeader';
 import StatCard, { StatSkeleton } from '../components/StatCard';
 import useWebSocket from '../hooks/useWebSocket';
@@ -64,10 +64,10 @@ function KindRow({ slug, kind }) {
   const meta = KIND_META[kind.kind] || KIND_META.security;
   const KindIcon = meta.icon;
   return (
-    <Link
-      to="/studio"
-      state={{ app: slug, tab: 'surveillance', kind: kind.kind }}
-      className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-gray-700/40 transition"
+    <button
+      type="button"
+      onClick={() => openStudio(slug, { tab: 'surveillance', kind: kind.kind })}
+      className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-gray-700/40 transition"
     >
       <KindIcon className={`w-3.5 h-3.5 shrink-0 ${kind.blank ? 'text-gray-600' : meta.color}`} />
       <span className={`text-xs flex-1 truncate ${kind.blank ? 'text-gray-500 italic' : 'text-gray-300'}`}>
@@ -83,17 +83,17 @@ function KindRow({ slug, kind }) {
         )}
       </span>
       <RunStatus run={kind.last_run} />
-    </Link>
+    </button>
   );
 }
 
 function AppCard({ app }) {
   return (
     <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg overflow-hidden">
-      <Link
-        to="/studio"
-        state={{ app: app.slug, tab: 'surveillance' }}
-        className="flex items-center gap-2 px-3 py-2 border-b border-gray-700/50 hover:bg-gray-800 transition"
+      <button
+        type="button"
+        onClick={() => openStudio(app.slug, { tab: 'surveillance' })}
+        className="w-full text-left flex items-center gap-2 px-3 py-2 border-b border-gray-700/50 hover:bg-gray-800 transition"
       >
         <span className="text-sm text-gray-50 font-medium truncate">{app.name}</span>
         <span className="text-xs text-gray-500">{app.slug}</span>
@@ -106,7 +106,7 @@ function AppCard({ app }) {
           <span className="text-xs text-emerald-300">RAS</span>
         )}
         <ChevronRight className="w-4 h-4 text-gray-600 shrink-0" />
-      </Link>
+      </button>
       <div className="p-1.5 space-y-0.5">
         {app.kinds.map((k) => (
           <KindRow key={k.kind} slug={app.slug} kind={k} />

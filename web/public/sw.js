@@ -1,4 +1,4 @@
-const CACHE_NAME = 'atelier-v2';
+const CACHE_NAME = 'atelier-v3';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/favicon.svg',
@@ -43,8 +43,9 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Network-first for JS/CSS (hashed filenames handle versioning)
-  if (url.pathname.startsWith('/assets/')) {
+  // Network-first for JS/CSS (hashed filenames handle versioning). Couvre la
+  // homepage (/assets/) ET l'app Studio séparée (/studio/assets/).
+  if (url.pathname.startsWith('/assets/') || url.pathname.startsWith('/studio/assets/')) {
     event.respondWith(
       fetch(request)
         .then((response) => {

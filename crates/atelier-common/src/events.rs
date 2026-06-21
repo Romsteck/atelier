@@ -42,9 +42,6 @@ pub struct EventBus {
     /// Studio open-tabs state change (a PUT to `/agent/open-tabs` → websocket) so
     /// every connected browser (incl. other PCs) re-syncs its open tab set live.
     pub agent_open_tabs: broadcast::Sender<AgentOpenTabsEvent>,
-    /// Studio selected-app change (a PUT to `/agent/studio-state` → websocket) so
-    /// every connected browser (incl. other PCs) suit l'app ouverte en live.
-    pub studio_selected_app: broadcast::Sender<StudioSelectedAppEvent>,
 }
 
 impl EventBus {
@@ -68,7 +65,6 @@ impl EventBus {
             app_todos: broadcast::channel(64).0,
             agent: broadcast::channel(2048).0,
             agent_open_tabs: broadcast::channel(64).0,
-            studio_selected_app: broadcast::channel(64).0,
         }
     }
 }
@@ -362,15 +358,6 @@ pub struct AgentOpenTabsEvent {
     pub tabs: serde_json::Value,
     #[serde(default)]
     pub active: Option<String>,
-}
-
-/// Studio's globally-selected app (full snapshot — last write wins). Emitted on
-/// every `PUT /api/agent/studio-state` so connected clients (incl. other PCs)
-/// follow the open app live. `selected_app` = `None` ⇒ apps gallery (no app open).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StudioSelectedAppEvent {
-    #[serde(default)]
-    pub selected_app: Option<String>,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

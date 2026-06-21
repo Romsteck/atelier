@@ -33,6 +33,26 @@ pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
 
     if let Some(dir) = web_dist {
         if dir.is_dir() {
+            // The Studio is a SECOND, separately-built Vite SPA (base `/studio/`,
+            // outDir `web/dist/studio/`) served by the same API — see the frontend
+            // split (2026-06-21). It must be nested BEFORE the homepage fallback so
+            // `/studio/*` (incl. its `/studio/assets/*`) routes to the studio bundle
+            // and is never swallowed by the homepage SPA fallback. `nest_service`
+            // strips `/studio` → ServeDir resolves `web/dist/studio/...`; a client
+            // route like `/studio/<slug>` 404s in ServeDir → falls back to the
+            // studio `index.html` (200) for SPA routing.
+            let studio_dir = dir.join("studio");
+            // The studio Vite build's entry is `studio.html` (Vite keeps the input
+            // filename), so that — not `index.html` — is the SPA fallback document.
+            let studio_index = studio_dir.join("studio.html");
+            if studio_index.is_file() {
+                let studio_serve =
+                    ServeDir::new(&studio_dir).fallback(ServeFile::new(studio_index));
+                app = app.nest_service("/studio", studio_serve);
+            } else {
+                tracing::warn!(path = %studio_dir.display(), "studio dist missing — /studio not served");
+            }
+
             // Serve every file in `web/dist/` (manifest.json, sw.js, favicon.svg,
             // icons, /assets/*, etc.) with the right Content-Type, and fall back
             // to `index.html` for any 404 — that's standard SPA semantics.

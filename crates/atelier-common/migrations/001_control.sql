@@ -100,16 +100,10 @@ CREATE TABLE IF NOT EXISTS agent_open_tabs (
 );
 
 -- ---------------------------------------------------------------------------
--- studio_state — singleton : la DERNIÈRE app ouverte dans le Studio (sélection
--- GLOBALE, ≠ agent_open_tabs qui est par-app). WHY côté serveur : restaurer l'app
--- au refresh ET au changement de navigateur/PC (le localStorage est per-browser,
--- donc absent sur un autre poste) ; couplé au broadcast WS `studio:selected-app`
--- pour un suivi live entre PCs. Une seule ligne (id = true), upsert ON CONFLICT (id).
---   selected_app NULL = aucune app ouverte (galerie)
+-- studio_state — RETIRÉE (2026-06-21). Le singleton « app ouverte » n'a plus de
+-- sens depuis que le Studio est une app Vite séparée, ouverte en un onglet par
+-- app (`/studio/{slug}`) : l'app vient de l'URL, plus d'une sélection globale.
+-- DROP idempotent (ce blob DDL rejoue à chaque boot) pour nettoyer les bases
+-- existantes ; la sync per-app `agent_open_tabs` ci-dessus est conservée.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS studio_state (
-    id            BOOLEAN      PRIMARY KEY DEFAULT true,
-    selected_app  TEXT,
-    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT studio_state_singleton CHECK (id)
-);
+DROP TABLE IF EXISTS studio_state;

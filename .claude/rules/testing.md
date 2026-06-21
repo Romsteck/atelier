@@ -18,6 +18,10 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4100/api/<route>
 # App via path-proxy (sans auth en local) :
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4100/apps/<slug>/<health_path>
 
+# Front : homepage ET app Studio séparée (200 + index/studio.html, fallback SPA)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4100/             # homepage → 200
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4100/studio/<slug> # Studio  → 200
+
 # 3. Logs propres (en local sur Medion ; sinon ssh romain@10.0.0.254 "...")
 sudo journalctl -u atelier --since '1 min ago' | grep -iE 'error|warn' | tail -20
 ```

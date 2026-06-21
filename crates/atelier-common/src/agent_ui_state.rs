@@ -1,13 +1,14 @@
 //! Studio UI state, backed by the shared `atelier_meta` control-plane pool. WHY
 //! server-side: the Studio is used from several PCs against the same Atelier
 //! backend, so this state must follow the user across machines/browsers (a
-//! per-browser `localStorage` cache cannot). Two scopes live here:
+//! per-browser `localStorage` cache cannot). One scope lives here:
 //!   - per-app **open tabs** (conversations + files + diffs + commits) + active
 //!     tab, keyed by slug (`agent_open_tabs`, paired with the `agent:open-tabs`
-//!     WS broadcast);
-//!   - the **globally-selected app** (which app is open in the Studio), a
-//!     singleton (`studio_state`, paired with the `studio:selected-app` WS
-//!     broadcast) — so a refresh OR a different browser/PC restores it.
+//!     WS broadcast).
+//!
+//! (The former globally-selected-app singleton `studio_state` was removed on
+//! 2026-06-21 when the Studio became a separate per-app tab — the open app now
+//! comes from the URL `/studio/{slug}`, so there is no global selection to sync.)
 //!
 //! Degrades to a no-op / "empty" when the pool is absent (Postgres down at boot)
 //! — mirrors [`crate::task_store::TaskStore`]; the UI then falls back to its
@@ -71,45 +72,6 @@ impl OpenTabsStore {
         .bind(slug)
         .bind(tabs)
         .bind(active)
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Read the globally last-selected Studio app (singleton row). `None` when
-    /// unset (apps gallery) or the pool is down — the caller treats both as
-    /// "no app to restore".
-    pub async fn get_selected_app(&self) -> Option<String> {
-        let pool = self.pool.as_ref()?;
-        match query("SELECT selected_app FROM studio_state WHERE id = true")
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some(row)) => row.try_get("selected_app").ok().flatten(),
-            Ok(None) => None,
-            Err(e) => {
-                error!(error = %e, "studio_state get failed");
-                None
-            }
-        }
-    }
-
-    /// Upsert the globally last-selected Studio app (singleton row). `None` clears
-    /// it (gallery). No-op when the pool is down.
-    pub async fn set_selected_app(&self, slug: Option<&str>) -> anyhow::Result<()> {
-        let Some(pool) = self.pool.as_ref() else {
-            return Ok(());
-        };
-        query(
-            r#"
-            INSERT INTO studio_state (id, selected_app, updated_at)
-            VALUES (true, $1, now())
-            ON CONFLICT (id) DO UPDATE SET
-                selected_app = EXCLUDED.selected_app,
-                updated_at   = now()
-            "#,
-        )
-        .bind(slug)
         .execute(pool)
         .await?;
         Ok(())

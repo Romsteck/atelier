@@ -12,10 +12,10 @@ make deploy        # build + install /opt/atelier + restart atelier.service + he
 
 Sous le capot (sur Medion) :
 1. `cargo build --release -p atelier`
-2. `npm ci` (si besoin) + `npm run build` dans `web/` (web/.npmrc porte `legacy-peer-deps=true`)
+2. `npm ci` (si besoin) + **2 builds Vite** dans `web/` : `npm run build` (homepage → `web/dist/`) **puis** `npm run build:studio` (Studio → `web/dist/studio/`). Ordre impératif (le build homepage vide `dist/`). `web/.npmrc` porte `legacy-peer-deps=true`. Garde-fou deploy : `web/dist/index.html` **et** `web/dist/studio/studio.html` doivent exister avant le rsync `--delete`.
 3. `make runner` : `npm ci --omit=dev` du runner Node (Agent SDK). ⚠️ **JAMAIS `--omit=optional`** — le binaire natif `@anthropic-ai/claude-agent-sdk-linux-x64` est une optional-dep, sans lui le runner échoue au runtime (garde-fou Makefile).
 4. `sudo install` du binaire → `/opt/atelier/bin/atelier.new` + `mv -f` atomique
-5. `sudo rsync --delete web/dist/` → `/opt/atelier/web/dist/`
+5. `sudo rsync --delete web/dist/` → `/opt/atelier/web/dist/` (porte la homepage **et** le sous-build `web/dist/studio/`)
 6. `sudo rsync` du crate `atelier-logging-shipper` → `/opt/atelier/crates/atelier-logging-shipper/` (path-dep absolu de plusieurs apps)
 7. `sudo rsync` du runner → `/opt/atelier/runner/{src,node_modules,package*.json,.npmrc}` (exécuté en `hr-studio`)
 8. `sudo systemctl restart atelier.service`

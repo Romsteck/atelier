@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Studio · Atelier</title>
+    <!-- Thème sombre/clair : posé avant le paint pour éviter le flash (FOUC).
+         Même clé `atelier:theme` que la homepage → thème cohérent entre les
+         deux apps Vite. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('atelier:theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+          }
+          document.documentElement.dataset.theme = t;
+          document.documentElement.style.colorScheme = t;
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute('content', t === 'light' ? '#f3f4f6' : '#0f172a');
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+    <meta name="theme-color" content="#0f172a" />
+    <!-- Pas de manifest PWA ici : le Studio n'est pas une app installable
+         indépendante (le SW de la homepage, scope `/`, couvre déjà `/studio/*`). -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main-studio.jsx"></script>
+  </body>
+</html>

@@ -97,7 +97,7 @@ Internet → Cloudflare → Medion (10.0.0.254)
 | Control-plane canonical | **Postgres `atelier_meta`** : apps/ports (`applications`), tasks (`tasks`/`task_steps`), index docs (`doc_entries`, tsvector+GIN), surveillance (`app_scan`/`findings`/`surveillance_runs`), backup (`backup_target`/`backup_runs`/`backup_run_snapshots`), mémoire agent (`agent_memory`) |
 | Backfill control-plane (legacy, non-live) | `/opt/atelier/data/{apps.json, port-registry.json}` + `/var/lib/atelier/docs-index.sqlite` — importés 1× au 1er boot post-migration, gardés pour rollback |
 | Logs structurés | Postgres `atelier_logs` (ingest via `atelier-logging`) |
-| Atelier binaire + frontend + runner | `/opt/atelier/{bin/atelier, web/dist, runner, crates/atelier-logging-shipper}` (Medion) |
+| Atelier binaire + frontend + runner | `/opt/atelier/{bin/atelier, web/dist, runner, crates/atelier-logging-shipper}` (Medion) — `web/dist/` contient la homepage **et** le sous-build Studio `web/dist/studio/` (servi sous `/studio/{slug}`) |
 | Atelier env | `/opt/atelier/.env` (Medion) |
 | Docs (source contenu) | `/var/lib/atelier/docs/` (l'index de recherche est en Postgres `doc_entries`) |
 | Postgres | Medion 127.0.0.1:5432 (local depuis Atelier) |
@@ -111,7 +111,7 @@ Internet → Cloudflare → Medion (10.0.0.254)
 
 | Port/socket | Hôte | Service |
 |---|---|---|
-| 4100 | Medion (0.0.0.0) | Atelier HTTP API + frontend + `/mcp` + `/apps/{slug}/` proxy |
+| 4100 | Medion (0.0.0.0) | Atelier HTTP API + frontend (homepage `/` + Studio `/studio/{slug}`) + `/mcp` + `/apps/{slug}/` proxy |
 | /run/atelier.sock | Medion | Atelier IPC |
 | 3005-3010 | Medion (0.0.0.0) | Apps : www:3005, home:3007, trader:3008, wallet:3009, myfrigo:3010 (3006 libre) — atteintes en pratique uniquement via le path-proxy |
 | 8081 | Medion (127.0.0.1) | code-server@romain (édition source Atelier) — **à la demande, normalement arrêté/disabled** |
@@ -166,6 +166,8 @@ Le path-routing **interne** est donc complet et live. Ce qui reste pendant : l'i
 
 Le Studio inclut une **UI custom d'édition** (`AgentWorkspace` : explorateur de fichiers, diffs, commits, panneau git — cf. [Frontend](#frontend--control-panel-web-react--vite)) ET un **agent Claude** (chat, raisonnement, plan, approbation interactive). L'agent est un shim Node (`runner/src/runner.js`) piloté par `routes/agent.rs` et le **Claude Agent SDK** (binaire natif linux-x64). _(L'éditeur code-server `atelier-studio.service`/:8443 a été décommissionné le 2026-06-17.)_
 
+> Depuis le 2026-06-21, cette UI Studio est une **app Vite séparée** (entrée `studio.html`, base `/studio/`) servie sous `/studio/{slug}`, ouverte en **onglet navigateur dédié** par app (cf. [Frontend](#frontend--control-panel-web-react--vite)) — elle n'est plus montée inline dans la homepage. Le backend agent (`routes/agent.rs`, runner) est inchangé.
+
 - **Runner** : `/opt/atelier/runner/src/runner.js`, exécuté **en `hr-studio`** via `sudo -n -u hr-studio node runner.js` (process group propre pour reaper le binaire `claude` petit-fils). Reçoit son init JSON sur stdin (dont `MCP_TOKEN` — jamais en env/argv, anti-leak journalctl), émet du NDJSON sur stdout.
 - **Auth** : abonnement OAuth via `/var/lib/hr-studio/.claude/.credentials.json`, **PAS** de clé API (le runner échoue si `ANTHROPIC_API_KEY` est présent).
 - **Sessions** : persistées incrémentalement par le SDK à `/var/lib/hr-studio/.claude/sessions/{scope}/` (scope = `cwd` par workspace d'app), reprises via `sessionId`.
@@ -210,10 +212,16 @@ API : `PUT /api/backup/target`, `POST /api/backup/discover`, `GET /api/backup/ru
 
 ## Frontend / control-panel (web/, React + Vite)
 
-SPA React + Vite servie à `http://127.0.0.1:4100/` depuis `/opt/atelier/web/dist`. Panneau de contrôle unifié : Studio (UI custom d'édition + agent), gestion des 5 apps, DbExplorer, git history, surveillance, backup, chat agent.
+> **Deux builds Vite séparés, une seule API (2026-06-21).** Le frontend est scindé en **deux apps Vite distinctes** partageant `web/src/` :
+> - **Homepage / panneau de contrôle** — entrée `index.html` (base `/`, → `web/dist/`), servie à `http://127.0.0.1:4100/`. Galerie d'apps (landing), DbExplorer, schema, git, surveillance, backup, tasks. **Ne contient plus le Studio** → bundle nettement plus léger (l'agent, `mermaid`, `katex`, `cytoscape`, `xterm` ne sont QUE dans le Studio).
+> - **Studio (per-app)** — entrée `studio.html` (base `/studio/`, sortie `web/dist/studio/studio.html`), servie sous `http://127.0.0.1:4100/studio/{slug}` (nest Axum `nest_service("/studio", ServeDir(dist/studio).fallback(studio.html))` monté **avant** le fallback homepage, cf. [crates/atelier-api/src/lib.rs](crates/atelier-api/src/lib.rs)). Éditeur focalisé sur UNE app (slug dans l'URL) : barre supérieure propre + onglets + agent.
+>
+> **Ouverture** : depuis la homepage (galerie, sous-menu Sidebar, deep-links surveillance) on ouvre le Studio d'une app dans un **nouvel onglet navigateur focalisé** via `web/src/lib/openStudio.js` (`window.open('/studio/{slug}?tab=…', 'atelier-studio-{slug}')` — `target` nommé → reclic = refocus de l'onglet existant). Le deep-link (`tab`/`kind`) passe par l'URL (un `window.open` ne transporte pas le `state` du router). _(L'ancien Studio inline dans la homepage + la sync cross-PC `studio_state` de l'« app ouverte » ont été retirés ; la sync per-app `agent_open_tabs` est conservée.)_
 
-- **WebSocket = la convention temps réel** : tous les updates live passent par `/api/ws` (broadcast Axum, `routes/ws.rs`), **jamais de polling front**. Channels : état app, builds, logs, tasks, `surveillance:event`/`transcript`, `backup:live`, `agent`. Hook `useWebSocket` (auto-reconnect).
-- **Studio hub** : tabs (code/preview/db/logs/docs/surveillance/env/settings — l'onglet **Code** rend l'`AgentWorkspace`) ou mode split (`AgentWorkspace` à gauche, tabs à droite). **PreviewTab** = mini-navigateur iframe vers `/apps/{slug}/` (barre d'adresse relative).
+SPA React + Vite. Panneau de contrôle unifié : galerie des 5 apps (landing), DbExplorer, git history, surveillance, backup, tasks ; le Studio (édition + agent) s'ouvre en **onglet séparé** (`/studio/{slug}`).
+
+- **WebSocket = la convention temps réel** : tous les updates live passent par `/api/ws` (broadcast Axum, `routes/ws.rs`), **jamais de polling front**. Channels : état app, builds, logs, tasks, `surveillance:event`/`transcript`, `backup:live`, `agent`, `agent:open-tabs`. Hook `useWebSocket` (auto-reconnect).
+- **Studio (app `/studio/{slug}`)** : barre supérieure propre (statut/contrôles app + lien `/apps/{slug}/` + retour « ← Atelier ») ; tabs (code/preview/db/logs/docs/surveillance/env/settings — l'onglet **Code** rend l'`AgentWorkspace`) ou mode split (`AgentWorkspace` à gauche, tabs à droite). **PreviewTab** = mini-navigateur iframe vers `/apps/{slug}/` (barre d'adresse relative).
 - **AgentPanel** + `AgentConversationsContext` : multi-sessions, streaming via le channel `agent`, rendu par type de tool (Read/Write/Bash/Edit/MCP), `ConversationsSplit` (max 3 côte-à-côte).
 - **DbExplorer** : CRUD tables/colonnes via endpoints typés (`/apps/{slug}/db/...`), pas de SQL brut.
 - **Surveillance** : overview global + détail per-app (3 kinds), console live (`surveillance:transcript`).
@@ -233,7 +241,7 @@ Source à `/home/romain/atelier`. Build, install, restart **en local** (plus de 
 ```bash
 make help              # tous les targets
 make atelier           # cargo build --release -p atelier
-make web               # npm ci (si besoin) + build frontend (web/dist)
+make web               # npm ci (si besoin) + 2 builds Vite : homepage (web/dist) PUIS Studio (web/dist/studio)
 make runner            # npm ci --omit=dev du runner + vérifie runner.js + binaire SDK natif
 make deploy            # build atelier+web+runner + install /opt/atelier + restart + healthcheck
 make logs              # tail journalctl atelier (local)
@@ -241,7 +249,7 @@ make logs              # tail journalctl atelier (local)
 
 `make deploy` détecte l'hôte : sur Medion → `deploy-local` (build + `sudo install` atomique `.new`+rename + restart + healthcheck `/api/health`) ; ailleurs → fallback `deploy-remote` (build local + rsync/SSH vers `$MEDION`). Le deploy synchronise aussi :
 
-- `web/dist/` → `/opt/atelier/web/dist/`
+- `web/dist/` → `/opt/atelier/web/dist/` (inclut le sous-build `web/dist/studio/` du Studio — un seul rsync, un seul arbre dist ; `make web` build la homepage **puis** le Studio, ordre impératif car le build homepage vide `dist/`).
 - le crate **source** `atelier-logging-shipper` → `/opt/atelier/crates/atelier-logging-shipper/` (path-dep absolu consommé par les apps qui shippent leurs logs ; modifier le shipper impose de rebuild ces apps).
 - le **runner** Node → `/opt/atelier/runner/{src,node_modules,package*.json,.npmrc}`. ⚠️ `npm ci` du runner se fait en `--omit=dev` mais **JAMAIS `--omit=optional`** : le binaire natif `@anthropic-ai/claude-agent-sdk-linux-x64` est une optional-dep, sans lui le runner échoue au runtime (le Makefile garde-fou teste sa présence avant deploy).
 

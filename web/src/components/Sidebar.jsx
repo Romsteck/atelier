@@ -1,12 +1,13 @@
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
-  LogOut, User, Code2, Database, Hammer,
+  LogOut, User, LayoutGrid, Database, Hammer,
   GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
   Play, Square, Archive, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { useStudio } from '../context/StudioContext';
-import { statusDot } from '../pages/Studio';
+import { useApps } from '../context/AppsContext';
+import { statusDot } from '../lib/appsUi';
+import { openStudio } from '../lib/openStudio';
 import { useEffect } from 'react';
 import useBuildingApps from '../hooks/useBuildingApps';
 import InstallButton from './InstallButton';
@@ -15,7 +16,7 @@ const navGroups = [
   {
     label: 'Applications',
     items: [
-      { to: '/studio', icon: Code2, label: 'Studio', highlight: true },
+      { to: '/', icon: LayoutGrid, label: 'Applications', highlight: true },
       { to: '/database', icon: Database, label: 'Base de donnees' },
       { to: '/schema', icon: TableProperties, label: 'Schema' },
       { to: '/git', icon: GitBranch, label: 'Git' },
@@ -35,15 +36,14 @@ const linkClass = ({ isActive }) =>
 function Sidebar({ onClose, collapsed }) {
   const { user, logout } = useAuth();
   const location = useLocation();
-  const navigate = useNavigate();
-  const { recentApps, selectedSlug, onControl } = useStudio();
+  const { recentApps, control } = useApps();
   const buildingApps = useBuildingApps();
 
   useEffect(() => {
     onClose?.();
   }, [location.pathname, onClose]);
 
-  const onStudio = location.pathname === '/studio';
+  const onHome = location.pathname === '/';
 
   // Rail replié (lg) → rétabli au survol de l'aside (group/aside). Gated lg: →
   // mobile + sidebar étendue intacts.
@@ -56,10 +56,10 @@ function Sidebar({ onClose, collapsed }) {
   const railLabel = collapsed ? 'lg:hidden lg:group-hover/aside:block' : '';
   const railText = collapsed ? 'lg:invisible lg:group-hover/aside:visible' : '';
 
-  // Selecting a recent app opens its studio. L'app cible passe par le `state` du
-  // router (hors URL) ; l'onglet courant est conservé par le Studio (localStorage).
+  // Selecting a recent app opens its Studio dans un nouvel onglet focalisé (le
+  // Studio est une app séparée servie sous `/studio/<slug>`).
   function handleSelectApp(slug) {
-    navigate('/studio', { state: { app: slug }, replace: onStudio });
+    openStudio(slug);
     onClose?.();
   }
 
@@ -113,31 +113,28 @@ function Sidebar({ onClose, collapsed }) {
                     </li>
                   );
                 }
-                // "Studio" entry: clicking it opens the gallery; the sub-menu
-                // below lists the recently-opened apps for quick switching.
-                if (to === '/studio') {
+                // "Applications" entry: opens the gallery (landing `/`); the
+                // sub-menu lists recently-opened apps → un clic ouvre leur Studio
+                // dans un nouvel onglet.
+                if (to === '/') {
                   return (
                     <li key={to}>
-                      <NavLink to={to} className={(s) => `${linkClass(s)} ${railRow}`}>
+                      <NavLink to={to} end className={(s) => `${linkClass(s)} ${railRow}`}>
                         <Icon className={`w-5 h-5 shrink-0${highlight ? ' text-amber-400' : ''}`} />
                         <span className={`flex-1 whitespace-nowrap ${railLabel}`}>{label}</span>
                       </NavLink>
-                      {onStudio && (
+                      {onHome && (
                         <div className={`py-0.5 ${collapsed ? "lg:hidden lg:group-hover/aside:block" : ""}`}>
                           {recentApps.map((app) => {
                             const state = (app.state || '').toLowerCase();
                             const isRunning = state === 'running';
                             const isBuilding = buildingApps.has(app.slug);
-                            const sel = app.slug === selectedSlug;
                             return (
                               <div
                                 key={app.slug}
                                 onClick={() => handleSelectApp(app.slug)}
-                                className={`group flex items-center gap-2.5 pl-11 pr-3 py-1.5 text-[13px] cursor-pointer border-l-3 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${
-                                  sel
-                                    ? 'border-amber-400 bg-gray-700/50 text-gray-50'
-                                    : 'border-transparent text-gray-400 hover:bg-gray-700/30'
-                                }`}
+                                className="group flex items-center gap-2.5 pl-11 pr-3 py-1.5 text-[13px] cursor-pointer border-l-3 border-transparent text-gray-400 hover:bg-gray-700/30 transition-[background-color,color] duration-300 ease-out hover:duration-0"
+                                title={`Ouvrir le Studio de ${app.name} (nouvel onglet)`}
                               >
                                 {isBuilding ? (
                                   <Loader2 className="w-[11px] h-[11px] shrink-0 text-blue-400 animate-spin" title="Build en cours" />
@@ -147,11 +144,11 @@ function Sidebar({ onClose, collapsed }) {
                                 <span className="flex-1 truncate">{app.name}</span>
                                 <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
                                   {isRunning ? (
-                                    <button onClick={(e) => { e.stopPropagation(); onControl?.(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
+                                    <button onClick={(e) => { e.stopPropagation(); control(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
                                       <Square className="w-3 h-3" />
                                     </button>
                                   ) : (
-                                    <button onClick={(e) => { e.stopPropagation(); onControl?.(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
+                                    <button onClick={(e) => { e.stopPropagation(); control(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
                                       <Play className="w-3 h-3" />
                                     </button>
                                   )}

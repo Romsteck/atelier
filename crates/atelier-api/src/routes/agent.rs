@@ -25,7 +25,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, instrument, warn};
 
-use atelier_common::events::{AgentEvent, AgentOpenTabsEvent, StudioSelectedAppEvent};
+use atelier_common::events::{AgentEvent, AgentOpenTabsEvent};
 
 use crate::state::ApiState;
 
@@ -163,9 +163,6 @@ pub fn global_router() -> Router<ApiState> {
     Router::new()
         .route("/sdk/version", get(sdk_version))
         .route("/sdk/update", post(sdk_update))
-        // App ouverte dans le Studio (sélection GLOBALE, sync cross-PC) : autoritaire
-        // côté serveur, poussée live via le canal WS `studio:selected-app`.
-        .route("/studio-state", get(get_studio_state).put(put_studio_state))
 }
 
 // --- État d'UI des onglets ouverts (sync cross-PC) ---
@@ -209,44 +206,6 @@ async fn put_open_tabs(
         active: body.active.clone(),
     });
     info!(slug = %slug, "open tabs updated");
-    Json(json!({ "ok": true })).into_response()
-}
-
-// --- App ouverte dans le Studio (sélection globale, sync cross-PC) ---
-// Singleton côté serveur (`studio_state`). Le front la charge au montage pour
-// restaurer l'app au refresh ET au changement de navigateur/PC (le localStorage
-// est per-browser), la PUT à chaque changement de sélection, et reçoit les
-// changements des autres PCs via le canal WS `studio:selected-app` (broadcast du PUT).
-
-#[derive(Deserialize)]
-struct StudioStateBody {
-    #[serde(default)]
-    selected_app: Option<String>,
-}
-
-#[instrument(skip(state))]
-async fn get_studio_state(State(state): State<ApiState>) -> impl IntoResponse {
-    let selected_app = state.open_tabs.get_selected_app().await;
-    Json(json!({ "selected_app": selected_app }))
-}
-
-#[instrument(skip(state, body))]
-async fn put_studio_state(
-    State(state): State<ApiState>,
-    Json(body): Json<StudioStateBody>,
-) -> impl IntoResponse {
-    // Slug vide/blanc → None (galerie) : on ne persiste pas de chaîne vide.
-    let slug = body.selected_app.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    if let Err(e) = state.open_tabs.set_selected_app(slug).await {
-        error!(error = %e, "studio_state set failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
-            .into_response();
-    }
-    // Broadcast à TOUS les clients connectés (y compris les autres PCs) → suivi live.
-    let _ = state.events.studio_selected_app.send(StudioSelectedAppEvent {
-        selected_app: slug.map(String::from),
-    });
-    info!(selected_app = ?slug, "studio selected app updated");
     Json(json!({ "ok": true })).into_response()
 }
 
