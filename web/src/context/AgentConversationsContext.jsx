@@ -173,15 +173,34 @@ function reducer(state, a) {
           order.push(key);
         }
       };
+      // Une conversation neuve vit d'abord sous une clé LOCALE (`c…`) puis acquiert son
+      // `sid` (event WS `system`) SANS changer de clé. Le descripteur d'onglet ne porte
+      // que le `sid` → on retrouve la convo vivante par son sid pour la PRÉSERVER (items,
+      // runId, running, saisie en cours) sous SA clé existante, au lieu d'en recréer une
+      // vide (perdrait le 1er message + le spinner) ou de la re-keyer (remonterait le
+      // panneau via la clé React → saisie perdue).
+      const bySid = {};
+      for (const k of state.order) {
+        const c = state.convos[k];
+        if (c?.sid) bySid[c.sid] = { key: k, convo: c };
+      }
+      const addConvo = (t) => {
+        const existing = state.convos[t.sid] ? { key: t.sid, convo: state.convos[t.sid] } : bySid[t.sid];
+        if (existing) {
+          if (!convos[existing.key]) { convos[existing.key] = existing.convo; order.push(existing.key); }
+          return;
+        }
+        addKey(t.sid, () => {
+          const c = emptyConvo(t.sid, t.sid);
+          c.loading = true;
+          if (t.fid != null) c.findingId = t.fid;
+          if (t.eff) c.effort = t.eff;
+          return c;
+        });
+      };
       for (const t of tabs) {
         if (t.t === 'c' && t.sid) {
-          addKey(t.sid, () => {
-            const c = emptyConvo(t.sid, t.sid);
-            c.loading = true;
-            if (t.fid != null) c.findingId = t.fid;
-            if (t.eff) c.effort = t.eff;
-            return c;
-          });
+          addConvo(t);
         } else if (t.t === 'f' && t.path) {
           addKey(`file:${t.path}`, () => ({ key: `file:${t.path}`, type: 'file', path: t.path, name: t.name }));
         } else if (t.t === 'g' && t.sha) {
@@ -308,7 +327,15 @@ function reducer(state, a) {
       if (!c) return state;
       const answered = new Set(c.answered);
       answered.add(a.request_id);
-      return { ...state, convos: { ...state.convos, [a.key]: { ...c, answered, running: true } } };
+      // Écrit le texte de réponse sur l'item question. WHY : sur le chemin live le
+      // tool_result (qui porte la réponse) est masqué côté runner → sans ça l'item n'a
+      // pas d'`answer` et la carte affiche « Réponse envoyée. » au lieu de la réponse
+      // fournie (notamment la réponse libre). Même format que le backend (agent.rs) →
+      // affichage identique avant/après reload.
+      const items = c.items.map((it) =>
+        it.type === 'question' && it.request_id === a.request_id ? { ...it, answered: true, answer: a.answerText } : it,
+      );
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, answered, items, running: true } } };
     }
     case 'SET_PLAN_DECIDED': {
       const c = state.convos[a.key];
@@ -516,10 +543,13 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       return c.sid ? { t: 'c', sid: c.sid, ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
     })
     .filter(Boolean);
-  // Actif persistable : un brouillon (clé locale `c…`, sans sid) n'a pas d'identité
-  // reproductible sur un autre PC → on stocke null dans ce cas.
+  // Actif persistable = identité cross-PC : le `sid` pour une conversation (sa clé peut
+  // rester locale `c…` après acquisition du sid), sinon la clé pour fichier/commit/diff.
+  // WHY le sid et pas la clé : émettre la clé locale ferait diverger l'anti-écho sur le
+  // champ `active` (la clé locale n'est jamais dans les descripteurs reçus) → PUT en
+  // boucle toutes les 400 ms. Un brouillon sans sid n'a pas d'identité reproductible → null.
   const ac = state.active ? state.convos[state.active] : null;
-  const activeKeyVal = ac && (ac.type || ac.sid) ? state.active : null;
+  const activeKeyVal = ac ? (ac.type ? state.active : (ac.sid || null)) : null;
   const tabsStr = JSON.stringify(tabsArr);
   const payloadStr = JSON.stringify({ tabs: tabsArr, active: activeKeyVal });
 
@@ -767,7 +797,15 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     async (key, request_id, payload) => {
       const c = stateRef.current.convos[key];
       if (!c) return;
-      dispatch({ type: 'SET_ANSWERED', key, request_id });
+      // Texte affiché sur l'item question, en miroir EXACT du backend (agent.rs::answer)
+      // → l'affichage live est identique à celui d'après un reload (qui lit it.answer du buffer).
+      const answerText = payload.cancelled
+        ? '(non répondu)'
+        : [
+            ...Object.entries(payload.answers || {}).map(([q, v]) => `- ${q} → ${v}`),
+            ...(payload.response && payload.response.trim() ? [payload.response.trim()] : []),
+          ].join('\n');
+      dispatch({ type: 'SET_ANSWERED', key, request_id, answerText });
       try {
         if (c.runId) {
           await answerAgentRun(slug, c.runId, { request_id, ...payload });

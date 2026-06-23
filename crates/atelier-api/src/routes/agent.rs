@@ -379,11 +379,24 @@ async fn query(
     // transcript déjà persisté sur disque pour ne rien perdre au reload.
     let mut items: Vec<Value> = Vec::new();
     if let Some(sid) = &body.resume {
+        // Précharge le buffer d'AFFICHAGE depuis le transcript persisté (le modèle, lui, a
+        // tout le contexte via le resume SDK). Un échec (timeout 30s sous charge) tronquerait
+        // l'affichage du tour relancé TANT QU'IL EST LIVE → on réessaie une fois et on logge
+        // au lieu d'avaler silencieusement. La perte n'est que transitoire : une fois le tour
+        // fini, le snapshot repasse par op:messages sur disque (= transcript complet, resume
+        // ne forkant pas la session).
         let m = json!({ "op": "messages", "sessionId": sid, "cwd": cwd.to_string_lossy() }).to_string();
-        if let Ok(v) = run_runner_op(&cwd, m).await {
-            if let Some(arr) = v.get("items").and_then(|x| x.as_array()) {
-                items = arr.clone();
+        let preload = match run_runner_op(&cwd, m.clone()).await {
+            Ok(v) => Ok(v),
+            Err(_) => run_runner_op(&cwd, m).await,
+        };
+        match preload {
+            Ok(v) => {
+                if let Some(arr) = v.get("items").and_then(|x| x.as_array()) {
+                    items = arr.clone();
+                }
             }
+            Err(e) => warn!(slug = %slug, sid = %sid, error = %e, "resume transcript preload failed (display buffer truncated until turn ends)"),
         }
     }
     items.push(user_item(&body.prompt));

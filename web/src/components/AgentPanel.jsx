@@ -221,16 +221,20 @@ function ResultFooter({ data }) {
 // réponse } à la conversation via /answer (= tour suivant dans la même session).
 function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
   const [sel, setSel] = useState(() => questions.map(() => ({ chosen: new Set(), text: '' })));
+  // Option et réponse libre sont MUTUELLEMENT EXCLUSIVES (build() priorise déjà le texte) :
+  // choisir une option efface la réponse libre, et saisir une réponse libre dé-sélectionne
+  // les options (mode « custom »), pour que l'UI reflète ce qui sera réellement envoyé.
   const setChosen = (qi, label, multi) => {
     setSel((prev) => prev.map((s, i) => {
       if (i !== qi) return s;
       const chosen = new Set(s.chosen);
       if (multi) { chosen.has(label) ? chosen.delete(label) : chosen.add(label); }
       else { chosen.clear(); chosen.add(label); }
-      return { ...s, chosen };
+      return { ...s, chosen, text: '' };
     }));
   };
-  const setText = (qi, text) => setSel((prev) => prev.map((s, i) => (i === qi ? { ...s, text } : s)));
+  const setText = (qi, text) =>
+    setSel((prev) => prev.map((s, i) => (i === qi ? { ...s, text, chosen: text.trim() ? new Set() : s.chosen } : s)));
   const build = () => {
     const answers = {};
     questions.forEach((q, i) => {
@@ -263,7 +267,11 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
           </div>
           {!answered && (
             <input value={sel[qi].text} onChange={(e) => setText(qi, e.target.value)} placeholder="Autre… (réponse libre)"
-              className="w-full bg-gray-800 border border-gray-700 rounded-sm px-2 py-1 text-[12px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-blue-500" />
+              className={`w-full bg-gray-800 border rounded-sm px-2 py-1 text-[12px] placeholder-gray-600 focus:outline-none ${
+                sel[qi].text.trim()
+                  ? 'border-blue-500/50 ring-1 ring-blue-500/30 text-blue-100' // mode custom actif
+                  : 'border-gray-700 text-gray-100 focus:border-blue-500'
+              }`} />
           )}
         </div>
       ))}
