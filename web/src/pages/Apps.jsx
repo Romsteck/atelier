@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { createApp } from '../api/client';
 import PageHeader from '../components/PageHeader';
+import ScrollableTable from '../components/ScrollableTable';
 import { useApps } from '../context/AppsContext';
 import { openStudio } from '../lib/openStudio';
 import { STACKS, SLUG_RE, slugify, stackLabel, statusDot } from '../lib/appsUi';
@@ -30,7 +31,7 @@ function CreateAppModal({ onClose, onCreated }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={onClose}>
       <div className="w-full max-w-md bg-gray-800 border border-gray-700 rounded-lg shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
           <h2 className="text-lg font-semibold text-gray-50">Nouvelle application</h2>
@@ -73,7 +74,8 @@ export default function Apps() {
         {loading ? (
           <div className="flex items-center justify-center py-20"><Loader2 className="w-8 h-8 animate-spin text-blue-400" /></div>
         ) : (
-          <table className="w-full text-[13px] border-collapse">
+          <ScrollableTable>
+          <table className="w-full min-w-max text-[13px] border-collapse">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wider text-gray-500 border-b border-gray-700">
                 <th className="w-0 py-2 pl-3 pr-2" />
@@ -139,6 +141,7 @@ export default function Apps() {
               )}
             </tbody>
           </table>
+          </ScrollableTable>
         )}
       </div>
 

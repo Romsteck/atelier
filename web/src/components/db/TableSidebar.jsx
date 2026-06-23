@@ -1,9 +1,13 @@
 import { Database, ChevronRight, ChevronLeft } from 'lucide-react';
 
-export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, onSelectTable, onChangeApp, loading }) {
+export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, onSelectTable, onChangeApp, loading, open }) {
+  // Desktop : colonne in-flow. Téléphone (<lg) : tiroir en overlay (slide), piloté
+  // par `open` ; sinon il mange ~60% de la largeur et écrase la grille.
+  const drawer = `transform transition-transform duration-200 ease-out absolute inset-y-0 left-0 z-40 w-64 max-w-[80vw] bg-gray-900 shadow-xl lg:static lg:z-auto lg:w-56 lg:max-w-none lg:shrink-0 lg:bg-transparent lg:shadow-none lg:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full'}`;
+
   if (loading) {
     return (
-      <div className="w-56 min-w-[224px] border-r border-gray-700 p-4">
+      <div className={`border-r border-gray-700 p-4 ${drawer}`}>
         <div className="animate-pulse space-y-3">
           {[1, 2, 3].map(i => <div key={i} className="h-6 bg-gray-700 rounded-sm" />)}
         </div>
@@ -12,7 +16,7 @@ export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, o
   }
 
   return (
-    <aside className="w-56 min-w-[224px] border-r border-gray-700 overflow-y-auto flex flex-col">
+    <aside className={`border-r border-gray-700 overflow-y-auto flex flex-col ${drawer}`}>
       {onChangeApp ? (
         <button
           onClick={onChangeApp}

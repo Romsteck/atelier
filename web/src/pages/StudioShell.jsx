@@ -10,6 +10,7 @@ import AgentWorkspace from '../components/AgentWorkspace';
 import EnvTab from '../components/EnvTab';
 import BuildBadge from '../components/BuildBadge';
 import ThemeToggle from '../components/ThemeToggle';
+import NotificationsToggle from '../components/NotificationsToggle';
 import {
   Code2, BookOpen, Database, ScrollText, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Play, Square, Trash2, RefreshCw,
@@ -21,6 +22,7 @@ import {
 } from '../api/client';
 import { statusDot } from '../lib/appsUi';
 import { pushRecentSlug } from '../lib/recentApps';
+import { useIsNarrow } from '../hooks/useMediaQuery';
 
 const TABS = [
   { id: 'code', label: 'Code', icon: Code2 },
@@ -210,7 +212,7 @@ export default function StudioShell({ slug }) {
     return Number.isFinite(v) && v >= 20 && v <= 80 ? v : 50;
   });
   const [dragging, setDragging] = useState(false);
-  const [isNarrow, setIsNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < 900);
+  const isNarrow = useIsNarrow(); // < lg : désactive le split (hook matchMedia partagé)
 
   // Lancement d'une conversation agent depuis l'onglet Surveillance (« Résoudre »).
   const [agentLaunch, setAgentLaunch] = useState(null);
@@ -255,13 +257,6 @@ export default function StudioShell({ slug }) {
   useEffect(() => { localStorage.setItem('studio:layoutMode', layoutMode); }, [layoutMode]);
   useEffect(() => { localStorage.setItem('studio:rightTab', rightTab); }, [rightTab]);
   useEffect(() => { localStorage.setItem('studio:splitRatio', String(leftPct)); }, [leftPct]);
-
-  // ── Détection écran étroit (désactive le split) ──
-  useEffect(() => {
-    const onResize = () => setIsNarrow(window.innerWidth < 900);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
 
   // ── L'onglet droit doit rester disponible (ex. app sans DB) → sinon preview ──
   useEffect(() => {
@@ -342,7 +337,7 @@ export default function StudioShell({ slug }) {
   }
 
   const renderModeSwitcher = () => (
-    <div className="ml-auto flex items-center gap-1 pr-3">
+    <div className="ml-auto hidden md:flex items-center gap-1 pr-3">
       {[
         { id: 'tabs', Icon: Square, title: 'Onglets' },
         { id: 'split', Icon: Columns2, title: 'Split — agent + onglets' },
@@ -395,20 +390,21 @@ export default function StudioShell({ slug }) {
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {!isRunning ? (
-            <button onClick={() => handleControl('start')} disabled={busy} className="p-1 text-green-400 hover:bg-gray-700 rounded-sm disabled:opacity-50" title="Démarrer">
+            <button onClick={() => handleControl('start')} disabled={busy} className="p-2 sm:p-1 text-green-400 hover:bg-gray-700 rounded-sm disabled:opacity-50" title="Démarrer">
               <Play className="w-3.5 h-3.5" />
             </button>
           ) : (
-            <button onClick={() => handleControl('stop')} disabled={busy} className="p-1 text-yellow-400 hover:bg-gray-700 rounded-sm disabled:opacity-50" title="Arrêter">
+            <button onClick={() => handleControl('stop')} disabled={busy} className="p-2 sm:p-1 text-yellow-400 hover:bg-gray-700 rounded-sm disabled:opacity-50" title="Arrêter">
               <Square className="w-3.5 h-3.5" />
             </button>
           )}
-          <button onClick={() => handleControl('restart')} disabled={busy} className="p-1 text-blue-400 hover:bg-gray-700 rounded-sm disabled:opacity-50" title="Redémarrer">
+          <button onClick={() => handleControl('restart')} disabled={busy} className="p-2 sm:p-1 text-blue-400 hover:bg-gray-700 rounded-sm disabled:opacity-50" title="Redémarrer">
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
       <div className="flex items-center gap-1 shrink-0">
+        <NotificationsToggle compact />
         <ThemeToggle />
       </div>
     </div>
@@ -442,13 +438,13 @@ export default function StudioShell({ slug }) {
         <div className="flex flex-col flex-1 min-w-0 h-full">
           {/* Barre d'onglets (haut) — uniquement en mode 'tabs' */}
           {effectiveMode === 'tabs' && (
-            <div className="flex items-center h-[44px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
+            <div className="flex items-center h-[44px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4 overflow-x-auto">
               {visibleTabs.map(tab => {
                 const active = tab.id === activeTab;
                 const Icon = tab.icon;
                 return (
                   <button key={tab.id} onClick={() => handleSelectTab(tab.id)}
-                    className={`relative h-full px-5 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 ${active ? 'text-gray-50 font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
+                    className={`relative h-full px-3 sm:px-5 shrink-0 border-none cursor-pointer text-[14px] bg-transparent transition-[background-color,color] duration-300 ease-out hover:duration-0 flex items-center gap-2 ${active ? 'text-gray-50 font-medium' : 'text-gray-400 hover:bg-gray-700/30 hover:text-gray-200'}`}>
                     <Icon className="w-4 h-4" />
                     {tab.label}
                     {active && <span className="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-400" />}

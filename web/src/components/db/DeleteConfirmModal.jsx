@@ -15,7 +15,7 @@ export function DeleteConfirmModal({ count, onConfirm, onClose }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
       <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-xl w-full max-w-sm">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
           <h3 className="text-sm font-semibold text-red-400 flex items-center gap-2">

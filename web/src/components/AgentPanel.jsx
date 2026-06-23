@@ -600,10 +600,10 @@ export default function AgentPanel({ panelKey }) {
           setPermissionMode à chaud). L'effort, lui, est figé au démarrage (pas d'API live) →
           verrouillé pendant une session ; ouvrir une nouvelle conversation pour le changer. */}
       <div className="flex items-center flex-wrap gap-x-4 gap-y-1 px-3 py-1.5 border-t border-gray-800 shrink-0">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 w-full sm:w-auto">
           <span className="text-[11px] text-gray-600 mr-1">Modèle</span>
           <select value={modelId} onChange={(e) => onChangeModel(e.target.value)}
-            className="bg-gray-800 border border-gray-700 rounded-sm text-[11px] text-gray-200 px-1 py-[3px] focus:outline-none focus:border-blue-500">
+            className="flex-1 sm:flex-none bg-gray-800 border border-gray-700 rounded-sm text-[11px] text-gray-200 px-1 py-[3px] focus:outline-none focus:border-blue-500">
             {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
         </div>
@@ -611,7 +611,7 @@ export default function AgentPanel({ panelKey }) {
           <span className="text-[11px] text-gray-600 mr-1">Mode</span>
           {MODES.map((m) => (
             <button key={m.id} onClick={() => onChangeMode(m.id)} title={m.title}
-              className={`px-1.5 py-0.5 rounded-sm text-[11px] ${
+              className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] ${
                 mode === m.id
                   ? m.id === 'bypass'
                     ? 'bg-amber-500/20 text-amber-300'
@@ -628,7 +628,7 @@ export default function AgentPanel({ panelKey }) {
             <span className="text-[11px] text-gray-600 mr-1">Effort</span>
             {selModel.efforts.map((e) => (
               <button key={e} disabled={live} onClick={() => chooseEffort(e)}
-                className={`px-1.5 py-0.5 rounded-sm text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${effort === e ? 'bg-blue-500/20 text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
+                className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${effort === e ? 'bg-blue-500/20 text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
                 {e}
               </button>
             ))}

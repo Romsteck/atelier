@@ -6,6 +6,7 @@ import ConversationsSplit from './agent/ConversationsSplit';
 import ConversationsHistoryPanel from './agent/ConversationsHistoryPanel';
 import { AgentConversationsProvider } from '../context/AgentConversationsContext';
 import useSourceGit from '../hooks/useSourceGit';
+import { useIsNarrow } from '../hooks/useMediaQuery';
 
 // Espace de travail de l'app, disposition VS Code (remplace l'ancien éditeur code-server) :
 //   [barre d'activité] [sidebar repliable : Explorateur / Git / Conversations] [split au centre]
@@ -30,6 +31,7 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
     return Number.isFinite(v) && v >= 220 && v <= 760 ? v : 238;
   });
   const rootRef = useRef(null);
+  const narrow = useIsNarrow(); // < lg : sidebar en overlay, chat plein écran (tactile)
   const git = useSourceGit(slug); // status partagé : badge barre d'activité + onglet Git
 
   useEffect(() => { localStorage.setItem('agent:sidebarW2', String(width)); }, [width]);
@@ -91,9 +93,23 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
           ))}
         </div>
 
-        {/* Sidebar — panneaux montés gardés montés (état préservé), un seul visible */}
+        {/* Backdrop tactile (<lg) : un tap hors de la sidebar la referme */}
+        {panel && narrow && (
+          <div className="absolute inset-0 left-12 z-30 bg-black/50" onClick={() => setPanel(null)} />
+        )}
+
+        {/* Sidebar — panneaux montés gardés montés (état préservé), un seul visible.
+            Desktop : colonne in-flow redimensionnable. Téléphone (<lg) : overlay
+            au-dessus du chat (ne mange pas la largeur du chat). */}
         {panel && (
-          <div className="shrink-0 min-h-0 border-r border-gray-800" style={{ width }}>
+          <div
+            className={
+              narrow
+                ? 'absolute inset-y-0 left-12 z-40 min-h-0 border-r border-gray-800 bg-gray-900 shadow-xl w-[80vw] max-w-[320px]'
+                : 'shrink-0 min-h-0 border-r border-gray-800'
+            }
+            style={narrow ? undefined : { width }}
+          >
             {opened.has('files') && (
               <div className={panel === 'files' ? 'h-full' : 'hidden'}>
                 <FilesTab slug={slug} active={panel === 'files'} />
@@ -112,8 +128,8 @@ export default function AgentWorkspace({ slug, launch, onLaunchConsumed }) {
           </div>
         )}
 
-        {/* Poignée de redimensionnement */}
-        {panel && (
+        {/* Poignée de redimensionnement — desktop seulement (en overlay tactile, inutile) */}
+        {panel && !narrow && (
           <div
             onPointerDown={(e) => { e.preventDefault(); setDragging(true); }}
             title="Redimensionner"

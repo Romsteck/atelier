@@ -11,6 +11,7 @@ import { openStudio } from '../lib/openStudio';
 import { useEffect } from 'react';
 import useBuildingApps from '../hooks/useBuildingApps';
 import InstallButton from './InstallButton';
+import NotificationsToggle from './NotificationsToggle';
 
 const navGroups = [
   {
@@ -142,13 +143,15 @@ function Sidebar({ onClose, collapsed }) {
                                   <span className={`w-[7px] h-[7px] rounded-full shrink-0 ${statusDot(state)}`} />
                                 )}
                                 <span className="flex-1 truncate">{app.name}</span>
-                                <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                {/* Actions toujours visibles au tactile (pas de hover) ;
+                                    révélées au survol sur desktop (lg). */}
+                                <div className="flex items-center opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
                                   {isRunning ? (
-                                    <button onClick={(e) => { e.stopPropagation(); control(app.slug, 'stop'); }} className="p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
+                                    <button onClick={(e) => { e.stopPropagation(); control(app.slug, 'stop'); }} className="p-1.5 sm:p-0.5 text-yellow-400 hover:bg-gray-600 rounded-sm" title="Stop">
                                       <Square className="w-3 h-3" />
                                     </button>
                                   ) : (
-                                    <button onClick={(e) => { e.stopPropagation(); control(app.slug, 'start'); }} className="p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
+                                    <button onClick={(e) => { e.stopPropagation(); control(app.slug, 'start'); }} className="p-1.5 sm:p-0.5 text-green-400 hover:bg-gray-600 rounded-sm" title="Start">
                                       <Play className="w-3 h-3" />
                                     </button>
                                   )}
@@ -200,6 +203,7 @@ function Sidebar({ onClose, collapsed }) {
           </div>
         )}
         <div className="mt-2">
+          <NotificationsToggle collapsed={collapsed} />
           <InstallButton collapsed={collapsed} />
         </div>
         <p className={`text-xs text-gray-500 mt-2 ${railText}`}>Atelier · v0.1.0</p>

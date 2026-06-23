@@ -5,6 +5,7 @@ import FileViewerPanel from './FileViewerPanel';
 import CommitViewerPanel from './CommitViewerPanel';
 import WorkingDiffPanel from './WorkingDiffPanel';
 import { useAgentConversations } from '../../context/AgentConversationsContext';
+import { useIsNarrow } from '../../hooks/useMediaQuery';
 
 // Vue des conversations ouvertes. Défaut = panneaux côte à côte de taille égale (CSS
 // grid `repeat(n, minmax(0,1fr))`). Repli en onglets quand il y en a trop ou que la
@@ -16,9 +17,10 @@ const MAX_SPLIT = 3;
 export default function ConversationsSplit() {
   // `active`/`setActive` sont désormais propriétés du provider (état synchronisé
   // cross-PC) : la restauration + la validité de l'actif sont gérées là-bas.
-  const { order, convos, active, setActive, convName, newConversation, closeConversation, focusReq } = useAgentConversations();
+  const { order, convos, active, unread, setActive, convName, newConversation, closeConversation, focusReq } = useAgentConversations();
   const ref = useRef(null);
   const [width, setWidth] = useState(0);
+  const narrow = useIsNarrow(); // < lg : jamais de grille multi-volets (chat mono-panneau)
 
   const typeOf = (key) => convos[key]?.type; // 'file' | 'commit' | 'diff' | undefined(=conversation)
   const renderPanel = (key) => {
@@ -61,7 +63,7 @@ export default function ConversationsSplit() {
     );
   }
 
-  const tabbed = order.length > MAX_SPLIT || (width > 0 && width / order.length < MIN_PANEL_W);
+  const tabbed = narrow || order.length > MAX_SPLIT || (width > 0 && width / order.length < MIN_PANEL_W);
   const title = (key) => {
     const c = convos[key];
     if (c?.type === 'file') return c.name || 'Fichier';
@@ -86,7 +88,11 @@ export default function ConversationsSplit() {
                 ? <GitCommit className="w-3 h-3 shrink-0 text-gray-500" />
                 : typeOf(key) === 'diff'
                 ? <FileDiff className="w-3 h-3 shrink-0 text-gray-500" />
-                : convos[key]?.running && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+                : convos[key]?.running
+                ? <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />
+                : (unread.has(key) && active !== key)
+                ? <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Réponse non lue" />
+                : null}
               <span className="truncate max-w-[140px]">{title(key)}</span>
               <X className="w-3 h-3 opacity-0 group-hover:opacity-60 hover:!opacity-100"
                 onClick={(e) => { e.stopPropagation(); closeConversation(key); }} />

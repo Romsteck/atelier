@@ -68,6 +68,9 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   const [editingRow, setEditingRow] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  // Tiroir « Tables » (mobile <lg) : la sidebar 224px déborderait à 375px.
+  const [tablesOpen, setTablesOpen] = useState(false);
+
   // Toast
   const [toast, setToast] = useState(null);
 
@@ -366,7 +369,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   return (
     <>
       {!embedded && <PageHeader title="Bases de données" icon={Database} />}
-      <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded-sm border border-gray-700'}`}>
+      <div className={`flex h-full overflow-hidden relative ${embedded ? '' : 'rounded-sm border border-gray-700'}`}>
         {showPicker ? (
           <AppPicker
             apps={apps.map(a => ({ app: a, tableCount: pickerCounts[a.slug] ?? null }))}
@@ -375,20 +378,33 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
           />
         ) : (
           <>
+            {/* Overlay tactile du tiroir Tables (<lg) */}
+            {tablesOpen && (
+              <div className="absolute inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setTablesOpen(false)} />
+            )}
+
             {/* Sidebar (scopé à l'app sélectionnée) */}
             <TableSidebar
               appsWithTables={sidebarAppsWithTables}
               selectedAppSlug={selectedAppSlug}
               selectedTable={selectedTable}
-              onSelectTable={handleSelectTable}
+              onSelectTable={(slug, name) => { setTablesOpen(false); handleSelectTable(slug, name); }}
               onChangeApp={!embedded ? handleChangeApp : undefined}
               loading={tablesLoading && appTables.length === 0}
+              open={tablesOpen}
             />
 
             {/* Main */}
             <div className="flex flex-col flex-1 min-w-0">
               {/* Toolbar */}
               <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-700 shrink-0 bg-gray-800/50">
+                <button
+                  onClick={() => setTablesOpen(true)}
+                  className="lg:hidden p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm shrink-0"
+                  title="Tables"
+                >
+                  <Database className="w-4 h-4" />
+                </button>
                 <div className="flex items-center gap-2 flex-1">
                   {selectedTable ? (
                     <>

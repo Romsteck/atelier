@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   GitBranch, GitCommit, Key, RefreshCw, ExternalLink, Copy,
   Eye, EyeOff, Settings, Loader2, Save, Clock, HardDrive,
-  GitMerge, ArrowUpCircle
+  GitMerge, ArrowUpCircle, Activity
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
@@ -38,6 +38,10 @@ function Git() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [activityLog, setActivityLog] = useState([]);
+  // Tiroirs mobiles (<lg) : les colonnes latérales (dépôts ~288px + activité ~320px)
+  // déborderaient un téléphone → on les bascule en drawers togglés.
+  const [reposOpen, setReposOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
 
   const addActivity = (action, slug = null) => {
     const id = Date.now();
@@ -89,6 +93,7 @@ function Git() {
   }, [fetchRepos, fetchSshKey, fetchConfig]);
 
   const handleSelectRepo = async (slug) => {
+    setReposOpen(false); // referme le tiroir mobile au choix d'un dépôt
     if (selectedRepo === slug) return;
     setSelectedRepo(slug);
     setLoadingDetail(true);
@@ -293,8 +298,8 @@ function Git() {
               <p className="text-xs text-gray-500 mb-2">
                 Necessaire pour creer automatiquement les repos sur GitHub lors de l'activation du mirror.
               </p>
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative flex-1 min-w-[12rem]">
                   <input
                     type={showToken ? 'text' : 'password'}
                     value={tokenInput}
@@ -314,7 +319,7 @@ function Git() {
                   value={orgInput}
                   onChange={(e) => setOrgInput(e.target.value)}
                   placeholder="Organisation GitHub"
-                  className="bg-gray-800 border border-gray-700 text-gray-300 text-sm px-3 py-2 w-48 focus:outline-hidden focus:border-blue-500"
+                  className="bg-gray-800 border border-gray-700 text-gray-300 text-sm px-3 py-2 w-full sm:w-48 focus:outline-hidden focus:border-blue-500"
                 />
                 <Button onClick={handleSaveConfig} loading={savingConfig} className="text-xs px-3 py-1.5">
                   <Save className="w-3.5 h-3.5" /> Sauvegarder
@@ -333,10 +338,18 @@ function Git() {
         </div>
       )}
 
-      {/* Main 3-column layout */}
-      <div className="flex-1 min-h-0 flex">
-        {/* Left: Repo list */}
-        <div className="w-72 shrink-0 border-r border-gray-700 bg-gray-800/50 flex flex-col">
+      {/* Main 3-column layout — téléphone : colonnes latérales en tiroirs */}
+      <div className="flex-1 min-h-0 flex relative">
+        {/* Overlays tactiles (<lg) — un tap hors du tiroir le referme */}
+        {reposOpen && (
+          <div className="fixed inset-0 bg-black/60 z-40 lg:hidden" onClick={() => setReposOpen(false)} />
+        )}
+        {activityOpen && (
+          <div className="fixed inset-0 bg-black/60 z-40 lg:hidden" onClick={() => setActivityOpen(false)} />
+        )}
+
+        {/* Left: Repo list — colonne desktop, tiroir gauche <lg */}
+        <div className={`bg-gray-800/50 flex flex-col border-r border-gray-700 transform transition-transform duration-200 ease-out fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] lg:relative lg:translate-x-0 lg:w-72 lg:max-w-none lg:shrink-0 lg:z-auto ${reposOpen ? 'translate-x-0' : '-translate-x-full'}`}>
           {/* List header */}
           <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/80">
             <div className="flex items-center justify-between">
@@ -397,6 +410,15 @@ function Git() {
 
         {/* Center: Detail panel */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* Barre mobile (<lg) : ouvre les tiroirs latéraux */}
+          <div className="lg:hidden flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-700 bg-gray-900/60 shrink-0">
+            <button onClick={() => setReposOpen(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-xs text-gray-300 bg-gray-800 hover:bg-gray-700">
+              <GitBranch className="w-4 h-4" /> Dépôts ({repos.length})
+            </button>
+            <button onClick={() => setActivityOpen(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-xs text-gray-300 bg-gray-800 hover:bg-gray-700">
+              <Activity className="w-4 h-4" /> Activité
+            </button>
+          </div>
           {!selectedRepo ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
@@ -588,8 +610,8 @@ function Git() {
           )}
         </div>
 
-        {/* Right: Activity panel */}
-        <div className="w-80 shrink-0 border-l border-gray-700 bg-gray-800/30 flex flex-col">
+        {/* Right: Activity panel — colonne desktop, tiroir droit <lg */}
+        <div className={`bg-gray-800/30 flex flex-col border-l border-gray-700 transform transition-transform duration-200 ease-out fixed inset-y-0 right-0 z-50 w-80 max-w-[85vw] lg:relative lg:translate-x-0 lg:w-80 lg:max-w-none lg:shrink-0 lg:z-auto ${activityOpen ? 'translate-x-0' : 'translate-x-full'}`}>
           <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/80">
             <span className="text-[11px] text-gray-500 uppercase tracking-wider">
               Activite ({activityLog.length})

@@ -130,7 +130,7 @@ export function DataGrid({
         </div>
       )}
       <div className={`overflow-auto h-full transition-opacity ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
-        <table className="w-full text-sm border-collapse">
+        <table className="w-full min-w-max text-sm border-collapse">
           <thead className="sticky top-0 z-10">
             <tr className="bg-gray-800">
               <th className="w-10 px-3 py-2 border-b border-gray-700">

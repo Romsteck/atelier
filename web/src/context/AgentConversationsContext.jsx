@@ -1,5 +1,6 @@
 import { createContext, useContext, useReducer, useRef, useEffect, useState, useCallback } from 'react';
 import useWebSocket from '../hooks/useWebSocket';
+import { showAgentNotification, updateBadge } from '../lib/agentNotify';
 import { appendEvent } from '../lib/agentEvents';
 import { buildSettings } from '../lib/agentModels';
 import { setOpenResolveFindings } from '../lib/resolveConvos';
@@ -399,6 +400,9 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   // → neutralise la boucle d'écho (on ne re-PUT pas ce qu'on vient de recevoir/d'envoyer).
   const loadedRef = useRef(false);
   const lastSyncedRef = useRef(null);
+  // Conversations avec une réponse non lue (clés) → point « non lu » par onglet +
+  // pastille PWA. Effacé quand la conversation devient active ET visible.
+  const [unread, setUnread] = useState(() => new Set());
 
   // Re-fetch du snapshot d'une conversation (helper partagé restore/sync).
   const fetchSnapshot = useCallback((sid) => {
@@ -412,7 +416,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
 
   // UN seul WebSocket pour tout le workspace : events de run (routés par session_id/
   // run_id) + sync de l'ensemble des onglets ouverts (changement venu d'un autre PC).
-  useWebSocket({
+  const { epoch } = useWebSocket({
     'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); },
     'agent:open-tabs': (d) => {
       if (!d || d.slug !== slug) return;
@@ -431,6 +435,25 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       }
     },
   });
+
+  // Re-sync au reconnect WS : le canal broadcast ne rejoue PAS l'historique → après
+  // une coupure (bascule d'appli, gel mobile, perte réseau), on re-fetche le snapshot
+  // serveur (autoritaire : buffer live en mémoire ou transcript disque) de chaque
+  // conversation ouverte keyée par sid — running d'abord — pour récupérer les deltas
+  // et le `done` ratés pendant la coupure. SNAPSHOT_OK remplace `items` en bloc et fait
+  // confiance au running/live/run_id serveur ; les deltas folded dédoublonnent.
+  const prevEpoch = useRef(0);
+  useEffect(() => {
+    if (epoch === 0 || epoch === prevEpoch.current) return;
+    prevEpoch.current = epoch;
+    const st = stateRef.current;
+    const sids = st.order
+      .filter((k) => { const c = st.convos[k]; return c && c.sid && k === c.sid; })
+      .map((k) => st.convos[k])
+      .sort((a, b) => Number(b.running) - Number(a.running))
+      .map((c) => c.sid);
+    for (const sid of sids) fetchSnapshot(sid);
+  }, [epoch, fetchSnapshot]);
 
   // Chargement initial (par slug) : l'état des onglets est AUTORITAIRE côté serveur
   // (sync cross-PC). On le charge, re-fetche les snapshots des conversations, et amorce
@@ -574,6 +597,49 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     },
     [allConvos],
   );
+
+  // ── Notification « réponse prête » : front montant running → fini d'une
+  // conversation qui n'est PAS active+visible. Effet (le reducer reste pur) qui
+  // détecte la transition par clé via un ref de l'état running précédent. Marque
+  // l'onglet « non lu » + déclenche une notif système (SW). Récupère aussi un
+  // `done` survenu pendant une coupure WS (via le re-sync du snapshot).
+  const prevRunning = useRef(new Map());
+  useEffect(() => {
+    const st = state;
+    for (const key of st.order) {
+      const c = st.convos[key];
+      if (!c || !c.sid) continue;
+      const was = prevRunning.current.get(key) || false;
+      const now = !!c.running;
+      if (was && !now) {
+        const activeVisible = st.active === key && document.visibilityState === 'visible';
+        if (!activeVisible) {
+          setUnread((s) => { if (s.has(key)) return s; const n = new Set(s); n.add(key); return n; });
+          showAgentNotification({ slug, sid: c.sid, title: convName(c) });
+        }
+      }
+      prevRunning.current.set(key, now);
+    }
+    for (const k of [...prevRunning.current.keys()]) if (!st.convos[k]) prevRunning.current.delete(k);
+  }, [state, slug, convName]);
+
+  // Pastille PWA = nombre de non-lus ; effacée au démontage du workspace.
+  useEffect(() => { updateBadge(unread.size); }, [unread]);
+  useEffect(() => () => updateBadge(0), []);
+
+  // Efface le « non lu » de la conversation active dès qu'elle est visible (ouverture
+  // d'onglet OU retour au premier plan sur l'onglet déjà actif).
+  useEffect(() => {
+    const active = state.active;
+    if (!active) return;
+    const clear = () => {
+      if (document.visibilityState !== 'visible') return;
+      setUnread((s) => { if (!s.has(active)) return s; const n = new Set(s); n.delete(active); return n; });
+    };
+    clear();
+    document.addEventListener('visibilitychange', clear);
+    return () => document.removeEventListener('visibilitychange', clear);
+  }, [state.active]);
 
   const newConversation = useCallback(() => {
     dispatch({ type: 'NEW_PANEL', key: newKey() });
@@ -812,6 +878,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     order: state.order,
     convos: state.convos,
     active: state.active,
+    unread,
     setActive,
     allConvos,
     convName,
