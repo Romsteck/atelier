@@ -18,7 +18,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -327,6 +327,14 @@ async fn run_runner_op(cwd: &FsPath, init_json: String) -> Result<Value, String>
     }
 }
 
+/// Image collée par l'utilisateur, transmise telle quelle au runner (qui en fait un
+/// bloc `image` du message SDK). `data` = base64 brut (sans préfixe data-URL).
+#[derive(Debug, Deserialize, Serialize)]
+struct ImageInput {
+    media_type: String,
+    data: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct QueryBody {
     prompt: String,
@@ -340,6 +348,8 @@ struct QueryBody {
     allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    images: Option<Vec<ImageInput>>,
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
@@ -352,7 +362,8 @@ async fn query(
     Path(slug): Path<String>,
     Json(body): Json<QueryBody>,
 ) -> impl IntoResponse {
-    if body.prompt.trim().is_empty() {
+    let n_images = body.images.as_ref().map(|v| v.len()).unwrap_or(0);
+    if body.prompt.trim().is_empty() && n_images == 0 {
         return err(StatusCode::BAD_REQUEST, "prompt vide");
     }
     // cwd = la source de l'app (le working tree édité par l'agent). Doit exister.
@@ -418,7 +429,11 @@ async fn query(
         "mcpToken": std::env::var("MCP_TOKEN").ok(),
         "resume": body.resume,
         "model": body.model,
+        "images": body.images, // None → null → runner omet (texte seul)
     });
+    if n_images > 0 {
+        info!(run_id = %run_id, images = n_images, "agent query with pasted image(s)");
+    }
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
@@ -491,6 +506,8 @@ async fn interrupt(
 #[derive(Deserialize)]
 struct MessageBody {
     text: String,
+    #[serde(default)]
+    images: Option<Vec<ImageInput>>,
 }
 
 #[instrument(skip(state, body), fields(slug = %slug, run_id = %run_id))]
@@ -500,14 +517,17 @@ async fn message(
     Json(body): Json<MessageBody>,
 ) -> impl IntoResponse {
     let _ = &state; // signature homogène ; état non requis
-    if body.text.trim().is_empty() {
+    let n_images = body.images.as_ref().map(|v| v.len()).unwrap_or(0);
+    if body.text.trim().is_empty() && n_images == 0 {
         return err(StatusCode::BAD_REQUEST, "message vide");
     }
-    let line = json!({ "type": "user_message", "text": body.text }).to_string();
+    let line = json!({ "type": "user_message", "text": body.text, "images": body.images }).to_string();
+    // Marqueur d'image dans le buffer d'affichage (reload) si le tour est image-only.
+    let display_text = if body.text.trim().is_empty() && n_images > 0 { "🖼 image".to_string() } else { body.text.clone() };
     if send_input(&run_id, line) {
         // Le runner ne ré-émet pas le tour user → on l'ajoute au buffer (reload).
         if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
-            r.items.push(user_item(&body.text));
+            r.items.push(user_item(&display_text));
             r.turn_active = true; // nouveau tour soumis
         }
         info!(run_id = %run_id, "agent message sent");

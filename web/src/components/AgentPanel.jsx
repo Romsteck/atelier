@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
-  Send, Square, Loader2, Bot, ChevronRight, Wrench, AlertTriangle, X,
+  Loader2, Bot, ChevronRight, ChevronDown, Wrench, AlertTriangle, X,
   FileText, FilePlus, FilePen, Terminal, FolderSearch, Search, Globe, ListChecks, NotebookPen, Plug,
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
+import Composer from './agent/Composer';
 import { getSdkVersion, updateSdk } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
-import { describeTool, formatToolResult, splitPath, diffLines, editsOf } from '../lib/toolDisplay';
+import { describeTool, splitPath } from '../lib/toolDisplay';
 import { MODELS, MODES, buildSettings } from '../lib/agentModels';
 
 // Estimation client-side du nombre de tokens d'un texte. Le flux thinking ne porte
@@ -81,56 +82,14 @@ const TOOL_ICONS = {
 };
 const TOOL_CHIP = 'shrink-0 text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/40 px-1.5 py-0.5 rounded-sm';
 
-// Chemin : basename en clair, dossier atténué, chemin complet en title. Tokens gris
-// → s'adaptent aux deux thèmes via le mirror de index.css (pas de `dark:`).
+// Chemin : basename en clair, dossier atténué, chemin complet en title.
 function PathLabel({ path, className = '' }) {
   const { dir, base } = splitPath(path);
   return (
     <span className={`font-mono truncate ${className}`} title={path}>
       {dir && <span className="text-gray-500">{dir}/</span>}
-      <span className="text-gray-200">{base}</span>
+      <span className="text-gray-300">{base}</span>
     </span>
-  );
-}
-
-function ToolHeader({ d }) {
-  const Icon = TOOL_ICONS[d.iconKey] || Wrench;
-  return (
-    <div className="text-[12px] flex items-start gap-1.5 my-1">
-      <Icon className="w-3.5 h-3.5 shrink-0 mt-0.5 text-gray-400" />
-      <span className="min-w-0 flex-1 flex items-baseline gap-1.5">
-        <span className="text-gray-300 shrink-0">{d.verb}</span>
-        {d.badge && <span className={TOOL_CHIP}>{d.badge}</span>}
-        {d.primaryPath
-          ? <PathLabel path={d.primary} className="flex-1 min-w-0" />
-          : d.primary
-            ? <span className={`flex-1 min-w-0 truncate text-gray-400 ${d.primaryMono ? 'font-mono' : ''}`} title={d.primaryTitle || d.primary}>{d.primary}</span>
-            : null}
-        {d.secondary && <span className="text-gray-600 shrink-0">{d.secondary}</span>}
-      </span>
-    </div>
-  );
-}
-
-// Diff Edit/MultiEdit : toutes les lignes `old` en « - » rouge, `new` en « + » vert.
-// Tokens identiques à git/DiffView.jsx (rendent bien dans les deux thèmes).
-function EditDiff({ input }) {
-  const edits = editsOf(input);
-  return (
-    <div className="border border-gray-700 bg-gray-900 overflow-x-auto text-[11px] font-mono leading-5 mt-1">
-      {edits.map((e, i) => (
-        <div key={i}>
-          {edits.length > 1 && (
-            <div className="px-2 py-0.5 text-gray-500 bg-gray-800/50">edit {i + 1}{e.replace_all ? ' · tout remplacer' : ''}</div>
-          )}
-          {diffLines(e.old_string, e.new_string).map((d, j) => (
-            <div key={j} className={`px-2 whitespace-pre ${d.t === '-' ? 'text-red-400 bg-red-900/15' : 'text-green-400 bg-green-900/15'}`}>
-              <span className="select-none text-gray-600 mr-1">{d.t}</span>{d.l || ' '}
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -138,65 +97,104 @@ const TODO_MARK = { pending: '○', in_progress: '◐', completed: '✓' };
 const TODO_MARK_CLS = { pending: 'text-gray-600', in_progress: 'text-blue-400', completed: 'text-green-500' };
 const TODO_TEXT_CLS = { pending: 'text-gray-400', in_progress: 'text-gray-200', completed: 'text-gray-500 line-through' };
 
-function TodoList({ todos }) {
+// Checklist ÉPINGLÉE (sticky) en haut du fil (WHY) : Claude Code réécrit sa todolist en
+// continu (N appels TodoWrite/tour). L'afficher inline la faisait « sauter » plus bas à
+// chaque MAJ (rendue à la position de la dernière occurrence). Épinglée, elle montre
+// TOUJOURS le dernier état, mise à jour en place. Repliable pour libérer de la place.
+function TodoBanner({ todos }) {
+  const [open, setOpen] = useState(true);
   const total = todos.length;
   const done = todos.filter((t) => t.status === 'completed').length;
   return (
-    <div className="text-[12px] my-1">
-      <div className="flex items-center gap-1.5 text-gray-400">
-        <ListChecks className="w-3.5 h-3.5 shrink-0" /><span className="text-gray-300">Todos</span>
-        {total > 0 && <span className="text-gray-600">{done}/{total}</span>}
-      </div>
-      <ul className="mt-1 ml-5 space-y-0.5">
-        {todos.map((t, i) => (
-          <li key={i} className="flex items-start gap-1.5">
-            <span className={`shrink-0 ${TODO_MARK_CLS[t.status] || 'text-gray-600'}`}>{TODO_MARK[t.status] || '○'}</span>
-            <span className={TODO_TEXT_CLS[t.status] || 'text-gray-400'}>
-              {t.status === 'in_progress' ? (t.activeForm || t.content) : t.content}
-            </span>
-          </li>
-        ))}
-      </ul>
+    <div className="sticky top-0 z-10 -mx-3 px-3 py-1.5 bg-gray-900/95 backdrop-blur-sm border-b border-gray-800">
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1.5 text-[12px] text-gray-400 hover:text-gray-200">
+        {open ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+        <ListChecks className="w-3.5 h-3.5 shrink-0" />
+        <span className="text-gray-300">Todos</span>
+        <span className="text-gray-600">{done}/{total}</span>
+      </button>
+      {open && (
+        <ul className="mt-1 ml-5 space-y-0.5">
+          {todos.map((t, i) => (
+            <li key={i} className="flex items-start gap-1.5 text-[12px]">
+              <span className={`shrink-0 ${TODO_MARK_CLS[t.status] || 'text-gray-600'}`}>{TODO_MARK[t.status] || '○'}</span>
+              <span className={TODO_TEXT_CLS[t.status] || 'text-gray-400'}>
+                {t.status === 'in_progress' ? (t.activeForm || t.content) : t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
 
-// Résultat formaté par outil : corps en diff / markdown / <pre> selon les drapeaux.
-// Corps vide → résumé seul (pas de section repliable).
-function ResultDisclosure({ name, input, result }) {
-  const f = formatToolResult(name, input, result.text, result.isError);
-  const tone = result.isError ? 'text-red-400' : 'text-gray-500';
-  const hasBody = f.diff || (f.body && f.body.length);
-  if (!hasBody) {
-    return <div className={`text-[11px] ${tone} pl-5`}>{f.summary}{result.isError ? ' (erreur)' : ''}</div>;
-  }
-  return (
-    <details className={`text-[11px] ${tone} pl-5`}>
-      <summary className="cursor-pointer select-none flex items-center gap-1">
-        <ChevronRight className="w-3 h-3" /> {f.summary}{result.isError ? ' (erreur)' : ''}
-      </summary>
-      {f.diff
-        ? <EditDiff input={input} />
-        : f.markdown
-          ? <div className="mt-1 text-gray-300"><MarkdownView>{f.body}</MarkdownView></div>
-          : <pre className="whitespace-pre-wrap wrap-break-word mt-1 font-mono text-gray-400">{f.body}</pre>}
-    </details>
-  );
+// Cible compacte d'un outil (basename pour les chemins, primary tronqué sinon).
+function toolTarget(d) {
+  if (!d.primary) return '';
+  if (d.primaryPath) return splitPath(d.primary).base;
+  return d.primary.length > 60 ? `${d.primary.slice(0, 59)}…` : d.primary;
 }
 
-// Un appel d'outil = en-tête formaté + son résultat (corrélé par id en amont).
-// Pas encore de résultat + tour en cours sur le dernier item → micro-spinner discret.
-function ToolCall({ name, input, result, running, isLast }) {
-  const d = describeTool(name, input);
-  if (d.todos) return <TodoList todos={d.todos} />; // ack supprimé (résultat consommé)
+// Une SUITE d'appels d'outils d'un tour (WHY) : voir l'action EN COURS est utile, revoir
+// le détail de chaque action passée ne l'est pas. Tour en cours → on montre l'action live
+// (`⚙ verbe cible…`). Sinon → une ligne repliée « N actions » (dépliable à la demande).
+function ToolActivityGroup({ tools, isTail }) {
+  const [open, setOpen] = useState(false);
+  const n = tools.length;
+  const last = tools[n - 1];
+  const lastDesc = describeTool(last.name, last.input);
+  const live = isTail && !last.result; // dernière action sans résultat = en cours
+  const anyError = tools.some((t) => t.result?.isError);
+
   return (
-    <div>
-      <ToolHeader d={d} />
-      {result
-        ? (!d.suppressResult && <ResultDisclosure name={name} input={input} result={result} />)
-        : running && isLast
-          ? <div className="pl-5 text-[11px] text-gray-600 inline-flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> …</div>
-          : null}
+    <div className="text-[12px] my-1">
+      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 max-w-full text-gray-500 hover:text-gray-300">
+        {live ? (
+          <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-gray-400" />
+        ) : open ? (
+          <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+        ) : (
+          <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+        )}
+        {live ? (
+          <span className="flex items-baseline gap-1.5 min-w-0">
+            <span className="text-gray-300 shrink-0">{lastDesc.verb}</span>
+            <span className="truncate text-gray-400 font-mono">{toolTarget(lastDesc)}</span>
+            <span className="text-gray-600 shrink-0">…</span>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5">
+            <span>{n} action{n > 1 ? 's' : ''}</span>
+            {anyError && <span className="text-red-400" title="une action a échoué">●</span>}
+          </span>
+        )}
+      </button>
+      {open && (
+        <ul className="mt-1 ml-5 space-y-0.5">
+          {tools.map((t, i) => {
+            const d = describeTool(t.name, t.input);
+            const Icon = TOOL_ICONS[d.iconKey] || Wrench;
+            const err = t.result?.isError;
+            return (
+              <li key={t.id || i} className="flex items-center gap-1.5 min-w-0">
+                <Icon className={`w-3 h-3 shrink-0 ${err ? 'text-red-400' : 'text-gray-500'}`} />
+                <span className="text-gray-400 shrink-0">{d.verb}</span>
+                {d.badge && <span className={TOOL_CHIP}>{d.badge}</span>}
+                {d.primary &&
+                  (d.primaryPath ? (
+                    <PathLabel path={d.primary} className="min-w-0" />
+                  ) : (
+                    <span className={`truncate text-gray-500 ${d.primaryMono ? 'font-mono' : ''}`} title={d.primaryTitle || d.primary}>
+                      {d.primary}
+                    </span>
+                  ))}
+                {err && <span className="text-red-400 shrink-0 text-[10px]">échec</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
@@ -331,12 +329,12 @@ function PlanReviewCard({ plan, decided, approved, onApprove, onReject }) {
 
 // Panneau d'UNE conversation. Contrôlé : tout l'état (items, running, runId, question
 // en attente) vit dans le provider, indexé par `panelKey`. Le panneau ne fait que
-// rendre + déléguer (sendMessage/answer/cancel/closeConversation).
+// rendre + déléguer (sendMessage/answer/cancel/closeConversation). La SAISIE est isolée
+// dans <Composer> (état local) pour que taper ne re-render pas la liste des messages.
 export default function AgentPanel({ panelKey }) {
   const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, closeConversation } = useAgentConversations();
   const convo = convos[panelKey];
 
-  const [input, setInput] = useState('');
   const [modelId, setModelId] = useState(() => localStorage.getItem('agent:model') || 'opus-4-8');
   // Effort de CE panneau : l'effort imposé au lancement (ex. 'max' depuis « Résoudre »)
   // prime sur la préférence stockée. Ne persiste PAS un effort synchronisé depuis la
@@ -372,42 +370,54 @@ export default function AgentPanel({ panelKey }) {
   const running = !!convo?.running;
   const live = !!convo?.runId; // session vivante → modèle/mode/effort verrouillés
 
-  // Corrélation résultat ↔ outil par `id` (et non par position : les appels d'outils
-  // sont souvent parallèles → le résultat ne suit pas forcément son tool_use). Chaque
-  // tool_use rend son résultat ; les tool_result corrélés sont sautés (consumed) dans
-  // la boucle ; les orphelins (vieux items sans id) gardent le rendu générique.
-  const { resultByUseId, consumedResultIdx } = useMemo(() => {
+  // Corrélation résultat ↔ outil par `id` (les appels d'outils sont souvent parallèles →
+  // le résultat ne suit pas forcément son tool_use). Sert au regroupement d'activité.
+  const resultByUseId = useMemo(() => {
     const byId = new Map();
-    const useIds = new Set();
-    items.forEach((it) => { if (it.type === 'tool_use' && it.id != null) useIds.add(it.id); });
-    const consumed = new Set();
-    items.forEach((it, idx) => {
-      if (it.type === 'tool_result' && it.tool_use_id != null) {
-        byId.set(it.tool_use_id, it);
-        if (useIds.has(it.tool_use_id)) consumed.add(idx);
-      }
+    items.forEach((it) => {
+      if (it.type === 'tool_result' && it.tool_use_id != null) byId.set(it.tool_use_id, it);
     });
-    return { resultByUseId: byId, consumedResultIdx: consumed };
+    return byId;
   }, [items]);
 
-  // TodoWrite est RÉÉCRIT à chaque MAJ : Claude Code l'appelle N fois par tour (création →
-  // in_progress → completed). Sans coalescing on empilerait N checklists quasi identiques.
-  // On ne garde que la DERNIÈRE occurrence de chaque tour (segment borné par un item `user`)
-  // → une seule checklist évolutive, comme le panneau du TUI (qui ne montre jamais son
-  // historique). Les tool_result associés restent "consumed" via useIds → pas d'orphelins.
-  const todoKeep = useMemo(() => {
-    const keep = new Set();
-    let prev = -1;
-    items.forEach((it, i) => {
-      if (it.type === 'user') prev = -1; // nouveau tour
-      if (it.type === 'tool_use' && it.name === 'TodoWrite') {
-        if (prev >= 0) keep.delete(prev);
-        keep.add(i);
-        prev = i;
+  // Nœuds de rendu : les suites contiguës de tool_use/tool_result (hors TodoWrite, épinglé)
+  // sont fusionnées en UN groupe d'activité (`kind:'tools'`), le reste reste tel quel.
+  const renderNodes = useMemo(() => {
+    const nodes = [];
+    let i = 0;
+    while (i < items.length) {
+      const it = items[i];
+      if (it.type === 'tool_use' || it.type === 'tool_result') {
+        const tools = [];
+        let j = i;
+        while (j < items.length && (items[j].type === 'tool_use' || items[j].type === 'tool_result')) {
+          const t = items[j];
+          if (t.type === 'tool_use' && t.name !== 'TodoWrite') {
+            tools.push({ id: t.id, name: t.name, input: t.input, result: t.id != null ? resultByUseId.get(t.id) : undefined });
+          }
+          j++;
+        }
+        if (tools.length) nodes.push({ kind: 'tools', tools, endIdx: j - 1, key: `tools-${i}` });
+        i = j;
+      } else {
+        nodes.push({ kind: 'item', it, idx: i, key: it.id || `i-${i}` });
+        i++;
       }
-    });
-    return keep;
+    }
+    return nodes;
+  }, [items, resultByUseId]);
+
+  // Checklist courante = dernière occurrence TodoWrite du fil (la plus récente).
+  const latestTodos = useMemo(() => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      const it = items[k];
+      if (it.type === 'tool_use' && it.name === 'TodoWrite') {
+        return Array.isArray(it.input?.todos) ? it.input.todos : null;
+      }
+    }
+    return null;
   }, [items]);
+
   // Tour suspendu sur une interaction (question/plan) : on remplace le spinner générique
   // par "en attente de ta réponse" pour ne pas laisser croire que le modèle calcule.
   const lastItem = items[items.length - 1];
@@ -415,6 +425,11 @@ export default function AgentPanel({ panelKey }) {
     !!lastItem &&
     ((lastItem.type === 'question' && !(convo?.answered?.has(lastItem.request_id) || lastItem.answered)) ||
       (lastItem.type === 'plan_review' && !(convo?.decided?.has(lastItem.request_id) || lastItem.decided)));
+  // Action d'outil en cours sur le dernier item → l'activité live l'affiche déjà : on évite
+  // le doublon avec le spinner générique « agent travaille… » du bas.
+  const liveTool =
+    running && lastItem?.type === 'tool_use' && lastItem.name !== 'TodoWrite' &&
+    (lastItem.id == null || !resultByUseId.get(lastItem.id));
 
   // Auto-scroll bas à chaque nouvel item.
   useEffect(() => {
@@ -441,12 +456,12 @@ export default function AgentPanel({ panelKey }) {
     if (live) changeMode(panelKey, id); // session vivante → setPermissionMode à chaud
   };
 
-  const send = useCallback(() => {
-    const prompt = input.trim();
-    if (!prompt || running) return;
-    sendMessage(panelKey, prompt, buildSettings({ modelId, effort, mode }));
-    setInput('');
-  }, [input, running, mode, modelId, effort, panelKey, sendMessage]);
+  // Envoi délégué par le Composer (texte + images). Dépend des sélecteurs (rarement) — pas
+  // de la frappe : taper ne re-render que le Composer.
+  const onSend = useCallback((text, images) => {
+    if (running) return;
+    sendMessage(panelKey, text, buildSettings({ modelId, effort, mode }), images);
+  }, [running, mode, modelId, effort, panelKey, sendMessage]);
 
   const stop = useCallback(() => cancel(panelKey), [cancel, panelKey]);
   const submitAnswer = useCallback((request_id, payload) => answer(panelKey, request_id, payload), [answer, panelKey]);
@@ -469,13 +484,64 @@ export default function AgentPanel({ panelKey }) {
     }
   }, []);
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-  };
-
   if (!convo) return null;
 
   const displayName = convName(convo);
+
+  // Rendu d'un item NON-outil (les outils passent par ToolActivityGroup).
+  const renderItem = (it, i) => {
+    if (it.type === 'user') {
+      return (
+        <div key={`i-${i}`} className="flex justify-end">
+          <div className="max-w-[85%] bg-blue-500/15 text-gray-100 rounded-lg px-3 py-1.5 text-[13px]">
+            {it.images?.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {it.images.map((src, ii) => (
+                  <img key={ii} src={src} alt="" className="max-h-32 max-w-[160px] rounded border border-blue-500/30 object-cover" />
+                ))}
+              </div>
+            )}
+            {it.text && <div className="whitespace-pre-wrap wrap-break-word">{it.text}</div>}
+          </div>
+        </div>
+      );
+    }
+    if (it.type === 'assistant') {
+      return <div key={`i-${i}`} className="text-[13px] text-gray-200"><MarkdownView>{it.text}</MarkdownView></div>;
+    }
+    if (it.type === 'thinking') return <ThinkingBlock key={`i-${i}`} text={it.text} active={running && i === items.length - 1} />;
+    if (it.type === 'result') return <ResultFooter key={`i-${i}`} data={it.data} />;
+    if (it.type === 'error') {
+      return (
+        <div key={`i-${i}`} className="text-[12px] text-red-400 flex items-start gap-1.5">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {it.message}
+        </div>
+      );
+    }
+    if (it.type === 'question') {
+      return (
+        <QuestionCard key={`i-${i}`}
+          questions={it.questions}
+          answered={convo.answered.has(it.request_id) || !!it.answered}
+          answerText={it.answer}
+          onSubmit={(answers) => submitAnswer(it.request_id, { answers })}
+          onCancel={() => submitAnswer(it.request_id, { cancelled: true })}
+        />
+      );
+    }
+    if (it.type === 'plan_review') {
+      return (
+        <PlanReviewCard key={`i-${i}`}
+          plan={it.plan}
+          decided={convo.decided.has(it.request_id) || !!it.decided}
+          approved={it.approved}
+          onApprove={(feedback) => decide(it.request_id, true, feedback)}
+          onReject={(feedback) => decide(it.request_id, false, feedback)}
+        />
+      );
+    }
+    return null;
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-gray-900">
@@ -512,6 +578,7 @@ export default function AgentPanel({ panelKey }) {
 
       {/* Fil de conversation */}
       <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2">
+        {latestTodos?.length > 0 && <TodoBanner todos={latestTodos} />}
         {items.length === 0 && !convo.loading && (
           <div className="text-[13px] text-gray-600 mt-4 text-center">
             Pose une question à l’agent sur <span className="text-gray-400">{slug}</span>.
@@ -526,73 +593,14 @@ export default function AgentPanel({ panelKey }) {
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {convo.error}
           </div>
         )}
-        {items.map((it, i) => {
-          if (it.type === 'user') {
-            return (
-              <div key={i} className="flex justify-end">
-                <div className="max-w-[85%] bg-blue-500/15 text-gray-100 rounded-lg px-3 py-1.5 text-[13px] whitespace-pre-wrap wrap-break-word">
-                  {it.text}
-                </div>
-              </div>
-            );
-          }
-          if (it.type === 'assistant') {
-            return <div key={i} className="text-[13px] text-gray-200"><MarkdownView>{it.text}</MarkdownView></div>;
-          }
-          if (it.type === 'thinking') return <ThinkingBlock key={i} text={it.text} active={running && i === items.length - 1} />;
-          if (it.type === 'tool_use') {
-            if (it.name === 'TodoWrite' && !todoKeep.has(i)) return null; // doublons de checklist supprimés
-            return (
-              <ToolCall key={it.id || i} name={it.name} input={it.input}
-                result={it.id != null ? resultByUseId.get(it.id) : undefined}
-                running={running} isLast={i === items.length - 1} />
-            );
-          }
-          if (it.type === 'tool_result') {
-            if (consumedResultIdx.has(i)) return null; // rendu sous son tool_use
-            // Orphelin (pas de tool_use corrélé) : rendu générique de secours.
-            return (
-              <details key={i} className={`text-[11px] ${it.isError ? 'text-red-400' : 'text-gray-500'} pl-5`}>
-                <summary className="cursor-pointer select-none flex items-center gap-1">
-                  <ChevronRight className="w-3 h-3" /> résultat{it.isError ? ' (erreur)' : ''}
-                </summary>
-                <pre className="whitespace-pre-wrap wrap-break-word mt-1 font-mono text-gray-400">{it.text}</pre>
-              </details>
-            );
-          }
-          if (it.type === 'result') return <ResultFooter key={i} data={it.data} />;
-          if (it.type === 'error') {
-            return (
-              <div key={i} className="text-[12px] text-red-400 flex items-start gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {it.message}
-              </div>
-            );
-          }
-          if (it.type === 'question') {
-            return (
-              <QuestionCard key={i}
-                questions={it.questions}
-                answered={convo.answered.has(it.request_id) || !!it.answered}
-                answerText={it.answer}
-                onSubmit={(answers) => submitAnswer(it.request_id, { answers })}
-                onCancel={() => submitAnswer(it.request_id, { cancelled: true })}
-              />
-            );
-          }
-          if (it.type === 'plan_review') {
-            return (
-              <PlanReviewCard key={i}
-                plan={it.plan}
-                decided={convo.decided.has(it.request_id) || !!it.decided}
-                approved={it.approved}
-                onApprove={(feedback) => decide(it.request_id, true, feedback)}
-                onReject={(feedback) => decide(it.request_id, false, feedback)}
-              />
-            );
-          }
-          return null;
-        })}
-        {running && !awaitingUser && (
+        {renderNodes.map((node) =>
+          node.kind === 'tools' ? (
+            <ToolActivityGroup key={node.key} tools={node.tools} isTail={running && node.endIdx === items.length - 1} />
+          ) : (
+            renderItem(node.it, node.idx)
+          ),
+        )}
+        {running && !awaitingUser && !liveTool && (
           <div className="flex items-center gap-1.5 text-[12px] text-gray-500">
             <Loader2 className="w-3.5 h-3.5 animate-spin" /> agent travaille…
           </div>
@@ -644,28 +652,8 @@ export default function AgentPanel({ panelKey }) {
         )}
       </div>
 
-      {/* Saisie */}
-      <div className="flex items-end gap-2 p-2 border-t border-gray-800 shrink-0">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          rows={2}
-          placeholder="Message à l'agent… (Entrée pour envoyer, Maj+Entrée = nouvelle ligne)"
-          className="flex-1 resize-none bg-gray-800 border border-gray-700 rounded-md px-2.5 py-1.5 text-[13px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-        />
-        {running ? (
-          <button onClick={stop} title="Interrompre le tour (la conversation reste ouverte)"
-            className="p-2 rounded-md bg-red-500/15 text-red-400 hover:bg-red-500/25">
-            <Square className="w-4 h-4" />
-          </button>
-        ) : (
-          <button onClick={send} disabled={!input.trim()} title="Envoyer"
-            className="p-2 rounded-md bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-30 disabled:cursor-not-allowed">
-            <Send className="w-4 h-4" />
-          </button>
-        )}
-      </div>
+      {/* Saisie (état local isolé) */}
+      <Composer onSend={onSend} running={running} onStop={stop} />
     </div>
   );
 }

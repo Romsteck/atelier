@@ -307,9 +307,10 @@ function reducer(state, a) {
     case 'OPTIMISTIC_USER': {
       const c = state.convos[a.key];
       if (!c) return state;
+      const userItem = { type: 'user', text: a.text, ...(a.images?.length ? { images: a.images } : {}) };
       return {
         ...state,
-        convos: { ...state.convos, [a.key]: { ...c, items: [...c.items, { type: 'user', text: a.text }], running: true, error: null } },
+        convos: { ...state.convos, [a.key]: { ...c, items: [...c.items, userItem], running: true, error: null } },
       };
     }
     case 'SET_RUN': {
@@ -724,34 +725,38 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     setFocusReq({ key: `diff:${file.path}`, n: focusNonce.current });
   }, []);
 
+  // `images` = [{ media_type, data(base64), url(dataURL aperçu) }]. On n'envoie au backend
+  // que { media_type, data } ; `url` ne sert qu'à la bulle optimiste (aperçu immédiat).
   const sendMessage = useCallback(
-    async (key, text, settings = {}) => {
+    async (key, text, settings = {}, images = []) => {
       const c = stateRef.current.convos[key];
       if (!c) return;
       const t = (text || '').trim();
-      if (!t || c.running) return;
-      dispatch({ type: 'OPTIMISTIC_USER', key, text: t });
+      const imgs = Array.isArray(images) ? images : [];
+      if ((!t && !imgs.length) || c.running) return;
+      const apiImages = imgs.length ? imgs.map(({ media_type, data }) => ({ media_type, data })) : undefined;
+      dispatch({ type: 'OPTIMISTIC_USER', key, text: t, images: imgs.map((i) => i.url).filter(Boolean) });
       try {
         let runId = c.runId;
         if (c.runId) {
           try {
-            await sendAgentMessage(slug, c.runId, { text: t }); // tour suivant, session vivante
+            await sendAgentMessage(slug, c.runId, { text: t, images: apiImages }); // tour suivant, session vivante
           } catch (e) {
             // runId périmé : le run est mort sans que `done` n'ait atteint ce client (ex.
             // après un deploy qui a coupé la session). On retombe sur la reprise de la session
             // sur disque → la conversation se relance au lieu de renvoyer une erreur 404.
             if (e.response?.status === 404 && c.sid) {
-              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings });
+              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...settings });
               runId = r.data?.run_id;
             } else {
               throw e;
             }
           }
         } else if (c.sid) {
-          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, ...settings }); // reprise
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...settings }); // reprise
           runId = r.data?.run_id;
         } else {
-          const r = await startAgentQuery(slug, { prompt: t, ...settings }); // session neuve
+          const r = await startAgentQuery(slug, { prompt: t, images: apiImages, ...settings }); // session neuve
           runId = r.data?.run_id;
         }
         if (runId && runId !== c.runId) dispatch({ type: 'SET_RUN', key, runId });

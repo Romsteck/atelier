@@ -104,8 +104,22 @@ function isPlanFileWrite(name, input) {
   return (name === 'Write' || name === 'Edit') && typeof input?.file_path === 'string' && input.file_path.includes('/.claude/plans/');
 }
 
-function userMsg(text) {
-  return { type: 'user', message: { role: 'user', content: String(text) }, parent_tool_use_id: null };
+// Un tour utilisateur. Sans image → `content` reste une chaîne (chemin historique).
+// Avec image(s) → `content` devient un tableau de blocs Anthropic ({text} optionnel +
+// {image, source:base64}) — forme acceptée par MessageParam du SDK (vérifié sdk.d.ts).
+function userMsg(text, images) {
+  const t = text == null ? '' : String(text);
+  if (Array.isArray(images) && images.length) {
+    const content = [];
+    if (t.trim()) content.push({ type: 'text', text: t });
+    for (const img of images) {
+      if (img && img.media_type && img.data) {
+        content.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
+      }
+    }
+    return { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null };
+  }
+  return { type: 'user', message: { role: 'user', content: t }, parent_tool_use_id: null };
 }
 // Une réponse AskUserQuestion (ou un "Passer") devient un tour utilisateur en clair :
 // le modèle reprend de façon déterministe à partir des choix, pas de l'auto-annulation.
@@ -139,7 +153,9 @@ rl.on('line', (line) => {
   try { msg = JSON.parse(s); } catch { diag('ligne stdin non-JSON ignorée'); return; }
   if (!gotInit) { gotInit = true; onInit(msg); return; }
   switch (msg.type) {
-    case 'user_message': if (typeof msg.text === 'string') pushTurn(userMsg(msg.text)); break;
+    case 'user_message':
+      if (typeof msg.text === 'string' || Array.isArray(msg.images)) pushTurn(userMsg(msg.text, msg.images));
+      break;
     // Réponse AskUserQuestion : débloque le tour suspendu dans canUseTool. Fallback (pas de
     // dialogue en attente) = session reprise depuis l'historique → on l'injecte en tour clair.
     case 'answer': {
@@ -225,7 +241,8 @@ if (op) {
   // runIntrospection sort le process ; ne revient jamais.
 }
 
-if (!prompt) fail('Champ "prompt" manquant dans l\'init.');
+// prompt vide TOLÉRÉ si des images sont jointes (tour image-only).
+if (!prompt && !(Array.isArray(init.images) && init.images.length)) fail('Champ "prompt" manquant dans l\'init.');
 
 // MCP (WHY) : le token arrive par l'init (stdin), pas par l'env — pour ne pas que
 // sudo le journalise. Fallback env pour le smoke-test standalone.
@@ -345,6 +362,57 @@ function toolResultText(content) {
   return '';
 }
 
+// RÉDUCTION DU PAYLOAD (WHY) : l'UI n'affiche qu'un libellé compact « verbe + cible » par
+// appel d'outil (l'action en cours en live, le reste replié). Envoyer l'`input` intégral
+// (le `content` complet d'un Write, les old/new_string d'un Edit…) chargeait le front pour
+// rien. On ne garde par outil que les champs nécessaires à ce libellé. SEUL TodoWrite garde
+// son `input` entier (la checklist épinglée a besoin de tous les todos).
+function truncStr(v, n = 200) {
+  const s = typeof v === 'string' ? v : '';
+  return s.length > n ? s.slice(0, n) : s;
+}
+function trimToolInput(name, input) {
+  const inp = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  switch (name) {
+    case 'TodoWrite':
+      return { todos: Array.isArray(inp.todos) ? inp.todos : [] };
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'MultiEdit':
+      return { file_path: inp.file_path };
+    case 'NotebookEdit':
+      return { notebook_path: inp.notebook_path, edit_mode: inp.edit_mode, cell_type: inp.cell_type };
+    case 'Bash':
+      return { command: truncStr(inp.command, 300), description: truncStr(inp.description, 120), run_in_background: inp.run_in_background };
+    case 'Glob':
+      return { pattern: inp.pattern, path: inp.path };
+    case 'Grep':
+      return { pattern: inp.pattern, path: inp.path, glob: inp.glob, type: inp.type };
+    case 'WebFetch':
+      return { url: inp.url, prompt: truncStr(inp.prompt, 200) };
+    case 'WebSearch':
+      return { query: inp.query };
+    case 'Task':
+    case 'Agent':
+      return { description: truncStr(inp.description, 200), subagent_type: inp.subagent_type };
+    default: {
+      // MCP/inconnu : résumé borné (≤4 clés, valeurs tronquées) — assez pour un libellé kv.
+      const out = {};
+      for (const [k, v] of Object.entries(inp).slice(0, 4)) {
+        out[k] = typeof v === 'string' ? truncStr(v, 200) : v;
+      }
+      return out;
+    }
+  }
+}
+// Le corps d'un tool_result n'est utile QUE sur erreur (diagnostic). Succès → pas de corps
+// (le front ne l'affiche de toute façon plus ; la revue de fichiers passe par l'onglet Git).
+function trimToolResultText(isError, text) {
+  if (!isError) return '';
+  return (text || '').slice(0, 800);
+}
+
 // Convertit le transcript persisté (SessionMessage[] = messages Anthropic bruts) en
 // items normalisés IDENTIQUES au flux live (user/assistant/thinking/tool_use/tool_result/
 // question) — l'UI les rend avec le même code. `getSessionMessages` rend `message`
@@ -372,7 +440,7 @@ function messagesToItems(msgs) {
           } else if (isPlanFileWrite(b.name, b.input)) {
             planFileIds.add(b.id); // masqué (le plan est surfacé via plan_review)
           } else {
-            items.push({ type: 'tool_use', name: b.name, input: b.input, id: b.id });
+            items.push({ type: 'tool_use', name: b.name, input: trimToolInput(b.name, b.input), id: b.id });
           }
         }
       }
@@ -383,7 +451,13 @@ function messagesToItems(msgs) {
       } else if (Array.isArray(content)) {
         for (const b of content) {
           if (b.type === 'text' && b.text) items.push({ type: 'user', text: b.text });
-          else if (b.type === 'tool_result') {
+          // Image collée par l'utilisateur : on ne réinjecte pas le base64 (lourd, déjà
+          // consommé par le modèle) — juste un marqueur pour que le tour ne soit pas vide.
+          else if (b.type === 'image') {
+            const lastUser = items.length && items[items.length - 1].type === 'user' ? items[items.length - 1] : null;
+            if (lastUser) lastUser.text = `${lastUser.text} 🖼`.trim();
+            else items.push({ type: 'user', text: '🖼 image' });
+          } else if (b.type === 'tool_result') {
             const txt = toolResultText(b.content);
             // Le tool_result d'AskUserQuestion porte la réponse (deny+message) → on l'accroche
             // à la question au lieu de l'afficher comme résultat brut.
@@ -401,7 +475,7 @@ function messagesToItems(msgs) {
               continue;
             }
             if (planFileIds.has(b.tool_use_id)) continue; // résultat du Write de plomberie
-            items.push({ type: 'tool_result', text: txt.slice(0, 4000), isError: !!b.is_error, tool_use_id: b.tool_use_id });
+            items.push({ type: 'tool_result', text: trimToolResultText(!!b.is_error, txt), isError: !!b.is_error, tool_use_id: b.tool_use_id });
           }
         }
       }
@@ -462,8 +536,8 @@ async function* inputGen() {
   }
 }
 
-// Le prompt d'init = premier tour utilisateur de la session.
-pushTurn(userMsg(prompt));
+// Le prompt d'init = premier tour utilisateur de la session (avec ses images éventuelles).
+pushTurn(userMsg(prompt, init.images));
 
 let sessionEmitted = false; // `system` (session_id/model) n'est émis qu'une fois
 try {
@@ -498,7 +572,7 @@ try {
           // Le mode plan natif fait écrire le plan dans ~/.claude/plans/*.md (plomberie
           // interne) : le contenu est déjà surfacé via plan_review → on masque ce Write.
           if (isPlanFileWrite(block.name, block.input)) { maskedToolUseIds.add(block.id); continue; }
-          emit({ t: 'tool_use', id: block.id, name: block.name, input: block.input });
+          emit({ t: 'tool_use', id: block.id, name: block.name, input: trimToolInput(block.name, block.input) });
         }
         if (msg.error) emit({ t: 'error', message: `assistant: ${msg.error}` });
         break;
@@ -513,7 +587,7 @@ try {
             t: 'tool_result',
             tool_use_id: block.tool_use_id,
             is_error: !!block.is_error,
-            text: toolResultText(block.content).slice(0, 4000),
+            text: trimToolResultText(!!block.is_error, toolResultText(block.content)),
           });
         }
         break;

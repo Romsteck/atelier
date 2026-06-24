@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -6,7 +7,10 @@ import rehypeHighlight from 'rehype-highlight';
 const REMARK = [remarkGfm];
 const REHYPE = [rehypeSanitize, rehypeHighlight];
 
-export default function MarkdownView({ children, className = '' }) {
+// Mémoïsé : le rendu markdown (parse + highlight) est coûteux. Dans le fil d'agent, la
+// liste se re-render à chaque delta et à chaque frappe (avant l'extraction du Composer) ;
+// sans memo, chaque message ré-parsait son markdown. Pur sur `children`/`className`.
+function MarkdownView({ children, className = '' }) {
   return (
     <div
       className={`prose dark:prose-invert prose-sm max-w-none
@@ -27,3 +31,5 @@ export default function MarkdownView({ children, className = '' }) {
     </div>
   );
 }
+
+export default memo(MarkdownView);

@@ -263,10 +263,12 @@ export const getScan = (slug) =>
 
 // ========== Agent (Claude Agent SDK chat — session streaming) ==========
 // Démarre une SESSION (1er tour) : renvoie { run_id }. Le flux arrive ensuite par
-// WebSocket (type "agent:event", filtré par run_id côté UI). body: { prompt, effort?, ... }.
+// WebSocket (type "agent:event", filtré par run_id côté UI).
+// body: { prompt, effort?, images?: [{media_type, data(base64)}], ... }.
 export const startAgentQuery = (slug, body) =>
   api.post(`/apps/${slug}/agent/query`, body);
-// Tour utilisateur suivant dans la MÊME session (mémoire conservée). body: { text }.
+// Tour utilisateur suivant dans la MÊME session (mémoire conservée).
+// body: { text, images?: [{media_type, data(base64)}] }.
 export const sendAgentMessage = (slug, runId, body) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/message`, body);
 export const cancelAgentRun = (slug, runId) =>
