@@ -343,7 +343,14 @@ async fn delete_app(
     }
     info!(slug = %slug, keep_data = q.keep_data, "AppDelete (HTTP)");
     let ctx = AppsContext::from_api_state(&state);
-    ipc_to_http(ctx.delete(slug, q.keep_data).await)
+    let resp = ctx.delete(slug.clone(), q.keep_data).await;
+    // Best-effort: drop the Homeroute hostname route + local mapping once the app
+    // is gone (its port may be reassigned, so a stale route would misroute).
+    // Non-fatal — never affects the delete result.
+    if resp.ok {
+        state.homeroute.cleanup_on_delete(&slug).await;
+    }
+    ipc_to_http(resp)
 }
 
 /// Map an `IpcResponse` (the MCP-layer result type the `AppsContext` methods

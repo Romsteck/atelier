@@ -2,7 +2,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import {
   LogOut, User, LayoutGrid, Database, Hammer,
   GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
-  Play, Square, Archive, Loader2,
+  Play, Square, Archive, Loader2, Settings2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useApps } from '../context/AppsContext';
@@ -23,6 +23,7 @@ const navGroups = [
       { to: '/git', icon: GitBranch, label: 'Git' },
       { to: '/surveillance', icon: ShieldAlert, label: 'Surveillance' },
       { to: '/backup', icon: Archive, label: 'Sauvegarde' },
+      { to: '/settings', icon: Settings2, label: 'Paramètres' },
     ],
   },
 ];

@@ -84,6 +84,47 @@ CREATE INDEX IF NOT EXISTS doc_entries_app_idx  ON doc_entries (app_id);
 CREATE INDEX IF NOT EXISTS doc_entries_type_idx ON doc_entries (app_id, doc_type);
 
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- homeroute_settings — singleton de configuration de la liaison vers le reverse
+-- proxy Homeroute (hr-api). Atelier appelle l'API EXISTANTE de Homeroute
+-- (`{base_url}/api/reverseproxy/*`, sans auth en v1) pour créer/retirer des
+-- routes hostname pour ses apps ; Homeroute se charge du reste (hot-reload du
+-- proxy, enregistrement DNS, TLS via le wildcard `*.mynetwk.biz` déjà provisionné).
+--   bearer_token = réservé v2 (auth) ; masqué en UI, stocké en clair (même
+--                  exposition que dataverse-secrets / le .env, root-only).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS homeroute_settings (
+    id            INTEGER      PRIMARY KEY DEFAULT 1,
+    enabled       BOOLEAN      NOT NULL DEFAULT false,
+    base_url      TEXT         NOT NULL DEFAULT 'http://127.0.0.1:4000',
+    bearer_token  TEXT,
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT homeroute_settings_single CHECK (id = 1)
+);
+INSERT INTO homeroute_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- homeroute_routes — liaison app Atelier (slug) → host Homeroute. C'est un CACHE
+-- de l'uuid renvoyé par Homeroute + du dernier état connu : la SOURCE DE VÉRITÉ
+-- reste la config live de Homeroute (`GET /api/reverseproxy/config`). On re-résout
+-- toujours l'uuid par `subdomain` avant un PUT/DELETE (jamais d'action sur un uuid
+-- périmé). Pas de FK vers `applications` : le hook de suppression d'app lit cette
+-- ligne PUIS supprime le host distant ; une FK ON DELETE CASCADE introduirait une
+-- dépendance d'ordre (la ligne disparaîtrait avant le nettoyage distant).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS homeroute_routes (
+    slug          TEXT         PRIMARY KEY,
+    host_id       TEXT         NOT NULL,
+    subdomain     TEXT         NOT NULL,
+    hostname      TEXT         NOT NULL,
+    target_port   INTEGER      NOT NULL,
+    require_auth  BOOLEAN      NOT NULL DEFAULT false,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- agent_open_tabs — état d'UI du Studio par app : ensemble des onglets ouverts
 -- (conversations + fichiers + diffs + commits) et onglet actif. WHY côté serveur :
 -- le Studio est utilisé depuis plusieurs PCs contre le même backend Atelier ; cet

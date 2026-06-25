@@ -13,6 +13,7 @@ import DbExplorer from './pages/DbExplorer';
 import SchemaPage from './pages/SchemaPage';
 import Surveillance from './pages/Surveillance';
 import Backup from './pages/Backup';
+import Settings from './pages/Settings';
 
 // Le Studio est désormais une app Vite SÉPARÉE servie sous `/studio/<slug>` (cf.
 // crates/atelier-api/src/lib.rs). La homepage (cette SPA) ne contient plus le
@@ -48,6 +49,7 @@ function App() {
             <Route path="/git" element={<Git />} />
             <Route path="/surveillance" element={<Surveillance />} />
             <Route path="/backup" element={<Backup />} />
+            <Route path="/settings" element={<Settings />} />
 
             {/* Tasks panel */}
             <Route path="/tasks" element={<Tasks />} />

@@ -62,22 +62,18 @@ export const forceDdnsUpdate = () => api.post('/ddns/update');
 export const updateDdnsToken = (token) => api.put('/ddns/token', { token });
 export const updateDdnsConfig = (config) => api.put('/ddns/config', config);
 
-// Reverse Proxy
-export const getReverseProxyConfig = () => api.get('/reverseproxy/config');
-export const getReverseProxyStatus = () => api.get('/reverseproxy/status');
-export const getReverseProxyHosts = () => api.get('/reverseproxy/hosts');
-export const addReverseProxyHost = (host) => api.post('/reverseproxy/hosts', host);
-export const updateReverseProxyHost = (id, updates) => api.put(`/reverseproxy/hosts/${id}`, updates);
-export const deleteReverseProxyHost = (id) => api.delete(`/reverseproxy/hosts/${id}`);
-export const toggleReverseProxyHost = (id, enabled) => api.post(`/reverseproxy/hosts/${id}/toggle`, { enabled });
-export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/domain', { baseDomain });
-export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
-export const reloadProxy = () => api.post('/reverseproxy/reload');
-export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
-export const getSystemRoutes = () => api.get('/reverseproxy/system-routes');
-
-// Rust Proxy
-export const getRustProxyStatus = () => api.get('/rust-proxy/status');
+// Homeroute — intégration reverse-proxy. Atelier appelle l'API hr-api EXISTANTE
+// de Homeroute pour attribuer des hostnames aux apps (DNS + TLS wildcard auto).
+export const getHomerouteSettings = () => api.get('/homeroute/settings');
+export const setHomerouteSettings = (body) => api.put('/homeroute/settings', body);
+export const testHomeroute = () => api.post('/homeroute/test');
+export const getHomerouteAppRoutes = () => api.get('/homeroute/app-routes');
+export const assignHomerouteRoute = (slug, body = {}) =>
+  api.post(`/homeroute/app-routes/${slug}`, body);
+export const removeHomerouteRoute = (slug) =>
+  api.delete(`/homeroute/app-routes/${slug}`);
+export const toggleHomerouteRoute = (slug) =>
+  api.post(`/homeroute/app-routes/${slug}/toggle`);
 
 // Auth - Session (login page)
 export const login = (code, remember_me = false) => api.post('/auth/login', { code, remember_me });

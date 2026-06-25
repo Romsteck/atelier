@@ -155,6 +155,18 @@ async fn main() -> Result<()> {
     // (scheduler présent mais désactivé tant que schedule_enabled=false).
     let backup = init_backup(backup_sources).await;
 
+    // Intégration Homeroute : appelle l'API reverse-proxy existante de hr-api
+    // (:4000) pour créer/retirer des routes hostname pour les apps. Réutilise le
+    // pool control-plane (settings + mapping slug→host) et le bus d'événements ;
+    // dégradé en 503 si Postgres absent. La liaison est désactivée par défaut
+    // (toggle dans la page Paramètres).
+    let homeroute = atelier_api::clients::homeroute_service::HomerouteService::new(
+        atelier_common::homeroute::HomerouteStore::new(meta_pool.clone()),
+        app_registry.clone(),
+        events.clone(),
+        atelier_api::state::parse_preserve_prefix_slugs(),
+    );
+
     let state = ApiState::new(
         docs_dir.clone(),
         docs_index,
@@ -173,6 +185,7 @@ async fn main() -> Result<()> {
         logs,
         surveillance,
         backup,
+        homeroute,
     );
     info!(
         slugs = ?state.preserve_prefix_slugs,

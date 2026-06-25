@@ -42,6 +42,9 @@ pub struct EventBus {
     /// Studio open-tabs state change (a PUT to `/agent/open-tabs` → websocket) so
     /// every connected browser (incl. other PCs) re-syncs its open tab set live.
     pub agent_open_tabs: broadcast::Sender<AgentOpenTabsEvent>,
+    /// Homeroute reverse-proxy route change (assign/remove/toggle/settings →
+    /// websocket) so the Settings page reloads its app-routes view live.
+    pub homeroute_routes: broadcast::Sender<HomerouteRoutesEvent>,
 }
 
 impl EventBus {
@@ -65,6 +68,7 @@ impl EventBus {
             app_todos: broadcast::channel(64).0,
             agent: broadcast::channel(2048).0,
             agent_open_tabs: broadcast::channel(64).0,
+            homeroute_routes: broadcast::channel(16).0,
         }
     }
 }
@@ -358,6 +362,15 @@ pub struct AgentOpenTabsEvent {
     pub tabs: serde_json::Value,
     #[serde(default)]
     pub active: Option<String>,
+}
+
+/// Homeroute route change event (homeroute service → websocket). Coarse: the
+/// front reloads its `/api/homeroute/app-routes` view on any change. `action` is
+/// "assigned" | "removed" | "toggled" | "settings".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomerouteRoutesEvent {
+    pub slug: String,
+    pub action: String,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

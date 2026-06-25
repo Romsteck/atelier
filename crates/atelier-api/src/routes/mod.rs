@@ -7,6 +7,7 @@ pub mod docs;
 pub mod dv;
 pub mod git;
 pub mod health;
+pub mod homeroute;
 pub mod hooks;
 pub mod issues;
 pub mod logs;

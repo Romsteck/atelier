@@ -39,6 +39,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut backup_rx = state.backup.subscribe();
     let mut agent_rx = state.events.agent.subscribe();
     let mut agent_open_tabs_rx = state.events.agent_open_tabs.subscribe();
+    let mut homeroute_routes_rx = state.events.homeroute_routes.subscribe();
 
     loop {
         tokio::select! {
@@ -82,6 +83,21 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "backup:live", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = homeroute_routes_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "homeroute:routes", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "homeroute:routes", dropped = n, "ws subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

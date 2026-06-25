@@ -1,0 +1,232 @@
+//! Control-plane store for the Homeroute reverse-proxy integration.
+//!
+//! Two tables in `atelier_meta`:
+//! - `homeroute_settings` (singleton id=1) — the link config (base URL of
+//!   Homeroute's hr-api, enabled flag, optional bearer token reserved for v2).
+//! - `homeroute_routes` — a slug → Homeroute-host-uuid mapping. This is a CACHE:
+//!   Homeroute's live config is the source of truth, the uuid is re-resolved by
+//!   `subdomain` before any mutation (never trusted blindly).
+//!
+//! Mirrors the singleton/COALESCE pattern of `atelier-backup::target::TargetStore`
+//! and the `Option<PgPool>` no-op-when-absent pattern of `TaskStore`.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::control_db::sqlx::{PgPool, PgRow, Pool, Postgres, Row, query};
+
+/// API view of the link settings — the bearer token is REDACTED to a boolean.
+#[derive(Debug, Clone, Serialize)]
+pub struct HomerouteSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub has_bearer_token: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Internal view (token included) — used to build authenticated HTTP requests.
+#[derive(Debug, Clone)]
+pub struct FullSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub bearer_token: Option<String>,
+}
+
+/// Body of `PUT /api/homeroute/settings`. `bearer_token` absent ⇒ kept.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    pub base_url: String,
+    /// None ⇒ keep the existing token (COALESCE); empty string ⇒ keep too.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+}
+
+impl NewSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        let url = self.base_url.trim();
+        if url.is_empty() {
+            return Err("base_url is required".into());
+        }
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("base_url must start with http:// or https://".into());
+        }
+        Ok(())
+    }
+}
+
+/// A persisted slug → Homeroute-host mapping row.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteRow {
+    pub slug: String,
+    pub host_id: String,
+    pub subdomain: String,
+    pub hostname: String,
+    pub target_port: i32,
+    pub require_auth: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Postgres-backed store. Every op degrades to a best-effort no-op / `None`
+/// when `pool` is `None` (Postgres unreachable at boot) — same contract as
+/// [`crate::task_store::TaskStore`].
+#[derive(Clone)]
+pub struct HomerouteStore {
+    pool: Option<Pool<Postgres>>,
+}
+
+impl HomerouteStore {
+    pub fn new(pool: Option<PgPool>) -> Self {
+        Self { pool }
+    }
+
+    /// Whether the control-plane pool is available (gates the `/api/homeroute/*`
+    /// endpoints — 503 when absent, since we cannot persist settings/mapping).
+    pub fn is_available(&self) -> bool {
+        self.pool.is_some()
+    }
+
+    fn pool(&self) -> Option<&Pool<Postgres>> {
+        self.pool.as_ref()
+    }
+
+    /// Redacted settings view (token → boolean). Returns `None` only when the
+    /// pool is absent; the singleton row is seeded by the migration.
+    pub async fn get_settings_redacted(&self) -> anyhow::Result<Option<HomerouteSettings>> {
+        let Some(p) = self.pool() else { return Ok(None) };
+        let row: Option<PgRow> = query(
+            r#"
+            SELECT enabled, base_url,
+                   (bearer_token IS NOT NULL AND bearer_token <> '') AS has_bearer_token,
+                   updated_at
+              FROM homeroute_settings WHERE id = 1
+            "#,
+        )
+        .fetch_optional(p)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(HomerouteSettings {
+            enabled: row.try_get("enabled")?,
+            base_url: row.try_get("base_url")?,
+            has_bearer_token: row.try_get("has_bearer_token")?,
+            updated_at: row.try_get("updated_at")?,
+        }))
+    }
+
+    /// Internal settings view (token included) — for the HTTP client.
+    pub async fn get_settings_full(&self) -> anyhow::Result<Option<FullSettings>> {
+        let Some(p) = self.pool() else { return Ok(None) };
+        let row: Option<PgRow> =
+            query("SELECT enabled, base_url, bearer_token FROM homeroute_settings WHERE id = 1")
+                .fetch_optional(p)
+                .await?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(FullSettings {
+            enabled: row.try_get("enabled")?,
+            base_url: row.try_get("base_url")?,
+            bearer_token: row.try_get("bearer_token").ok().flatten(),
+        }))
+    }
+
+    /// Update the singleton. `bearer_token` NULL/empty ⇒ preserved (COALESCE).
+    pub async fn upsert_settings(&self, s: &NewSettings) -> anyhow::Result<()> {
+        let Some(p) = self.pool() else { return Ok(()) };
+        query(
+            r#"
+            UPDATE homeroute_settings
+               SET enabled = $1,
+                   base_url = $2,
+                   bearer_token = COALESCE($3, bearer_token),
+                   updated_at = now()
+             WHERE id = 1
+            "#,
+        )
+        .bind(s.enabled)
+        .bind(s.base_url.trim())
+        .bind(s.bearer_token.as_deref().filter(|v| !v.is_empty()))
+        .execute(p)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_routes(&self) -> anyhow::Result<Vec<RouteRow>> {
+        let Some(p) = self.pool() else { return Ok(Vec::new()) };
+        let rows: Vec<PgRow> = query(
+            "SELECT slug, host_id, subdomain, hostname, target_port, require_auth, updated_at \
+             FROM homeroute_routes ORDER BY slug",
+        )
+        .fetch_all(p)
+        .await?;
+        rows.iter().map(row_to_route).collect()
+    }
+
+    pub async fn get_route(&self, slug: &str) -> anyhow::Result<Option<RouteRow>> {
+        let Some(p) = self.pool() else { return Ok(None) };
+        let row: Option<PgRow> = query(
+            "SELECT slug, host_id, subdomain, hostname, target_port, require_auth, updated_at \
+             FROM homeroute_routes WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(p)
+        .await?;
+        row.as_ref().map(row_to_route).transpose()
+    }
+
+    pub async fn upsert_route(
+        &self,
+        slug: &str,
+        host_id: &str,
+        subdomain: &str,
+        hostname: &str,
+        target_port: u16,
+        require_auth: bool,
+    ) -> anyhow::Result<()> {
+        let Some(p) = self.pool() else { return Ok(()) };
+        query(
+            r#"
+            INSERT INTO homeroute_routes
+                (slug, host_id, subdomain, hostname, target_port, require_auth, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, now())
+            ON CONFLICT (slug) DO UPDATE SET
+                host_id      = EXCLUDED.host_id,
+                subdomain    = EXCLUDED.subdomain,
+                hostname     = EXCLUDED.hostname,
+                target_port  = EXCLUDED.target_port,
+                require_auth = EXCLUDED.require_auth,
+                updated_at   = now()
+            "#,
+        )
+        .bind(slug)
+        .bind(host_id)
+        .bind(subdomain)
+        .bind(hostname)
+        .bind(target_port as i32)
+        .bind(require_auth)
+        .execute(p)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove the mapping for `slug`. Returns true if a row was deleted.
+    pub async fn delete_route(&self, slug: &str) -> anyhow::Result<bool> {
+        let Some(p) = self.pool() else { return Ok(false) };
+        let res = query("DELETE FROM homeroute_routes WHERE slug = $1")
+            .bind(slug)
+            .execute(p)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+}
+
+fn row_to_route(row: &PgRow) -> anyhow::Result<RouteRow> {
+    Ok(RouteRow {
+        slug: row.try_get("slug")?,
+        host_id: row.try_get("host_id")?,
+        subdomain: row.try_get("subdomain")?,
+        hostname: row.try_get("hostname")?,
+        target_port: row.try_get("target_port")?,
+        require_auth: row.try_get("require_auth")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}

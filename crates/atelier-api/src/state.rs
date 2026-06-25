@@ -63,6 +63,11 @@ pub struct ApiState {
     /// `/api/backup/*` ; renvoie 503 en mode noop (Postgres injoignable au boot).
     pub backup: BackupService,
 
+    /// Intégration reverse-proxy Homeroute : appelle l'API hr-api existante pour
+    /// créer/retirer des routes hostname pour les apps. Endpoints sous
+    /// `/api/homeroute/*` ; renvoie 503 si le control-plane Postgres est absent.
+    pub homeroute: crate::clients::homeroute_service::HomerouteService,
+
     /// Slugs whose `/apps/{slug}` path prefix must be PRESERVED (no-strip) when
     /// proxying to the app — required by Next.js apps whose `basePath`/`assetPrefix`
     /// expect the prefix on every request. SPA (Vite) / Axum apps want the prefix
@@ -91,6 +96,7 @@ impl ApiState {
         logs: LogIngestService,
         surveillance: SurveillanceService,
         backup: BackupService,
+        homeroute: crate::clients::homeroute_service::HomerouteService,
     ) -> Self {
         Self {
             docs_dir,
@@ -111,6 +117,7 @@ impl ApiState {
             logs,
             surveillance,
             backup,
+            homeroute,
             preserve_prefix_slugs: parse_preserve_prefix_slugs(),
         }
     }
@@ -119,7 +126,7 @@ impl ApiState {
 /// Read `ATELIER_PRESERVE_PREFIX_SLUGS` (comma-separated app slugs) into a set.
 /// Defaults to `{"www"}` when unset — `www` is the canonical path-routed Next.js
 /// app, and this mirrors the `www` default of `ATELIER_NEXTJS_FALLBACK_SLUG`.
-fn parse_preserve_prefix_slugs() -> std::collections::HashSet<String> {
+pub fn parse_preserve_prefix_slugs() -> std::collections::HashSet<String> {
     match std::env::var("ATELIER_PRESERVE_PREFIX_SLUGS") {
         Ok(raw) => raw
             .split(',')
