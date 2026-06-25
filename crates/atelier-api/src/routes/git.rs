@@ -6,7 +6,8 @@
 //! `/git-upload-pack`.
 //!
 //! Écriture : `/info/refs?service=git-receive-pack`, `/git-receive-pack`
-//! (push), `/ssh-key` (GET/POST), `/config` (GET/PUT), `/repos/{slug}/mirror`
+//! (push), `/ssh-key` (GET/POST), `/config` (GET/PUT), `/repos/{slug}` (DELETE,
+//! supprime le dépôt bare — refuse les apps actives), `/repos/{slug}/mirror`
 //! (POST/DELETE), `/repos/{slug}/mirror/sync` (POST), `/repos/sync-all` (POST).
 
 use axum::body::Bytes;
@@ -25,7 +26,7 @@ use crate::state::ApiState;
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/repos", get(list_repos))
-        .route("/repos/{slug}", get(get_repo))
+        .route("/repos/{slug}", get(get_repo).delete(delete_repo))
         .route("/repos/{slug}/commits", get(get_commits))
         .route("/repos/{slug}/commits/{sha}", get(get_commit_detail))
         .route("/repos/{slug}/activity", get(get_activity))
@@ -77,6 +78,64 @@ async fn get_repo(State(state): State<ApiState>, Path(slug): Path<String>) -> im
             Json(json!({"error": "Repository not found"})),
         )
             .into_response(),
+        Err(e) => err500(e),
+    }
+}
+
+/// Slug accepté pour la suppression : `[a-z0-9_-]+`. Endpoint destructif → on
+/// rejette tout caractère pouvant faire sortir `repo_path()` du dossier des
+/// dépôts (`.`, `/`, `..` percent-encodés). Garde-fou en amont des opérations FS.
+fn is_safe_repo_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Supprime un dépôt bare et son entrée mirror locale. Trois garde-fous :
+/// slug sûr (400), pas une app active enregistrée (409), dépôt existant (404).
+/// Suppression LOCALE uniquement — ne touche pas au miroir GitHub distant.
+#[instrument(skip(state))]
+async fn delete_repo(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
+    if !is_safe_repo_slug(&slug) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid repo slug"})),
+        )
+            .into_response();
+    }
+
+    // Le registre `applications` est la source de vérité « actif » : on refuse
+    // de supprimer le dépôt d'une app encore enregistrée.
+    if state.app_registry.get(&slug).await.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("'{slug}' est une app active — suppression refusée")})),
+        )
+            .into_response();
+    }
+
+    if !state.git.repo_exists(&slug) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Repository not found"})),
+        )
+            .into_response();
+    }
+
+    // Nettoyer l'entrée mirror locale avant de retirer le dépôt (sinon config orpheline).
+    let mut cfg = state.git.load_config().await.unwrap_or_default();
+    if cfg.mirrors.remove(&slug).is_some() {
+        if let Err(e) = state.git.save_config(&cfg).await {
+            warn!(slug, error = %e, "repo delete: mirror config cleanup failed");
+        }
+    }
+
+    match state.git.delete_repo(&slug).await {
+        Ok(()) => {
+            info!(slug, "repository deleted via API");
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => err500(e),
     }
 }

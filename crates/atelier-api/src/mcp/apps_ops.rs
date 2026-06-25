@@ -504,6 +504,19 @@ impl AppsContext {
             if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
                 warn!(slug = %slug, dir = %dir.display(), error = %e, "AppDelete: rm -rf failed");
             }
+            // L'historique git est de la donnée → suit keep_data. Sans ça, chaque
+            // suppression d'app laissait un dépôt bare (et son entrée mirror)
+            // orphelin dans /var/lib/atelier/git. Suppression LOCALE — ne touche
+            // pas au miroir GitHub distant.
+            let mut cfg = self.git.load_config().await.unwrap_or_default();
+            if cfg.mirrors.remove(&slug).is_some() {
+                if let Err(e) = self.git.save_config(&cfg).await {
+                    warn!(slug = %slug, error = %e, "AppDelete: mirror config cleanup failed");
+                }
+            }
+            if let Err(e) = self.git.delete_repo(&slug).await {
+                warn!(slug = %slug, error = %e, "AppDelete: git repo delete failed");
+            }
         } else {
             info!(slug = %slug, "AppDelete: keep_data=true, sources préservées");
         }

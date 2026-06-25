@@ -141,6 +141,7 @@ export const getEdgeStats = () => api.get('/edge/stats');
 // ========== Git ==========
 export const getGitRepos = () => api.get('/git/repos');
 export const getGitRepo = (slug) => api.get(`/git/repos/${slug}`);
+export const deleteGitRepo = (slug) => api.delete(`/git/repos/${slug}`);
 export const getGitCommits = (slug, limit = 50) => api.get(`/git/repos/${slug}/commits`, { params: { limit } });
 export const getGitCommitDetail = (slug, sha) => api.get(`/git/repos/${slug}/commits/${sha}`);
 export const getGitActivity = (slug, days = 365) => api.get(`/git/repos/${slug}/activity`, { params: { days } });

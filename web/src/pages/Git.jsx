@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   GitBranch, GitCommit, Key, RefreshCw, ExternalLink, Copy,
   Eye, EyeOff, Settings, Loader2, Save, Clock, HardDrive,
-  GitMerge, ArrowUpCircle, Activity
+  GitMerge, ArrowUpCircle, Activity, Trash2, AlertTriangle
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
@@ -13,7 +13,8 @@ import { timeAgo, formatBytes } from '../utils/gitFormat';
 import {
   getGitRepos, getGitCommits, getGitActivity, getGitBranches,
   triggerGitMirrorSync, syncAllGitRepos, getGitSshKey,
-  generateGitSshKey, getGitConfig, updateGitConfig
+  generateGitSshKey, getGitConfig, updateGitConfig,
+  deleteGitRepo, listApps
 } from '../api/client';
 
 function Git() {
@@ -38,6 +39,11 @@ function Git() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [activityLog, setActivityLog] = useState([]);
+  // Slugs des apps enregistrées (= actives) : protégées de la suppression. Le
+  // backend reste l'autorité (409) ; ici on cache juste le bouton (défense en profondeur).
+  const [activeSlugs, setActiveSlugs] = useState(new Set());
+  const [confirmDelete, setConfirmDelete] = useState(null); // slug en attente de confirmation
+  const [deletingRepo, setDeletingRepo] = useState(false);
   // Tiroirs mobiles (<lg) : les colonnes latérales (dépôts ~288px + activité ~320px)
   // déborderaient un téléphone → on les bascule en drawers togglés.
   const [reposOpen, setReposOpen] = useState(false);
@@ -86,11 +92,24 @@ function Git() {
     }
   }, []);
 
+  const fetchActiveSlugs = useCallback(async () => {
+    try {
+      const res = await listApps();
+      const d = res.data?.data || res.data;
+      const list = d?.apps || (Array.isArray(d) ? d : []);
+      setActiveSlugs(new Set((Array.isArray(list) ? list : []).map(a => a.slug).filter(Boolean)));
+    } catch {
+      // En cas d'échec, on garde un set vide → le backend protège quand même.
+      setActiveSlugs(new Set());
+    }
+  }, []);
+
   useEffect(() => {
     fetchRepos();
     fetchSshKey();
     fetchConfig();
-  }, [fetchRepos, fetchSshKey, fetchConfig]);
+    fetchActiveSlugs();
+  }, [fetchRepos, fetchSshKey, fetchConfig, fetchActiveSlugs]);
 
   const handleSelectRepo = async (slug) => {
     setReposOpen(false); // referme le tiroir mobile au choix d'un dépôt
@@ -200,6 +219,26 @@ function Git() {
       updateActivity(logId, 'error', 'Erreur lors de la synchronisation globale');
     } finally {
       setSyncingAll(false);
+    }
+  };
+
+  const handleDeleteRepo = async (slug) => {
+    const logId = addActivity('Suppression', slug);
+    setDeletingRepo(true);
+    try {
+      await deleteGitRepo(slug);
+      setMessage({ type: 'success', text: `Dépôt ${slug} supprimé` });
+      updateActivity(logId, 'ok');
+      setConfirmDelete(null);
+      if (selectedRepo === slug) setSelectedRepo(null);
+      fetchRepos();
+      fetchConfig();
+    } catch (e) {
+      const detail = e?.response?.data?.error || `Erreur lors de la suppression de ${slug}`;
+      setMessage({ type: 'error', text: detail });
+      updateActivity(logId, 'error', detail);
+    } finally {
+      setDeletingRepo(false);
     }
   };
 
@@ -476,16 +515,27 @@ function Git() {
                       )}
                     </div>
                   </div>
-                  {orgInput && config?.github_token && (
-                    <Button
-                      variant="secondary"
-                      onClick={() => handleSync(selectedRepo)}
-                      loading={syncing[selectedRepo]}
-                      className="text-xs px-3 py-1.5"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" /> Sync GitHub
-                    </Button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {orgInput && config?.github_token && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => handleSync(selectedRepo)}
+                        loading={syncing[selectedRepo]}
+                        className="text-xs px-3 py-1.5"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> Sync GitHub
+                      </Button>
+                    )}
+                    {!activeSlugs.has(selectedRepo) && (
+                      <button
+                        onClick={() => setConfirmDelete(selectedRepo)}
+                        title="Supprimer ce dépôt"
+                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 text-red-400 border border-red-900/50 bg-red-900/10 hover:bg-red-900/30 hover:text-red-300 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> Supprimer
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -652,6 +702,51 @@ function Git() {
           org={orgInput && config?.github_token ? orgInput : null}
           onClose={() => setOpenSha(null)}
         />
+      )}
+
+      {/* Confirmation de suppression — action irréversible */}
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4"
+          onClick={() => !deletingRepo && setConfirmDelete(null)}
+        >
+          <div
+            className="bg-gray-900 border border-gray-700 w-full max-w-md shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-700 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-400" />
+              <h3 className="text-sm font-semibold text-gray-100">Supprimer le dépôt</h3>
+            </div>
+            <div className="px-5 py-4 text-sm text-gray-300 space-y-2">
+              <p>
+                Supprimer définitivement le dépôt{' '}
+                <span className="font-mono text-gray-100">{confirmDelete}</span> ?
+              </p>
+              <p className="text-xs text-gray-500">
+                Le dépôt bare et son historique git sont effacés du disque. Cette action est
+                irréversible (le miroir GitHub éventuel n'est pas touché).
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-700 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                disabled={deletingRepo}
+                className="text-xs px-3 py-1.5 text-gray-300 border border-gray-700 hover:bg-gray-800 transition-colors disabled:opacity-50"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={() => handleDeleteRepo(confirmDelete)}
+                disabled={deletingRepo}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 text-red-100 bg-red-700 hover:bg-red-600 transition-colors disabled:opacity-50"
+              >
+                {deletingRepo ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                Supprimer
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
