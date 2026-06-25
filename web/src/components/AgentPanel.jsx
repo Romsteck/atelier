@@ -5,16 +5,16 @@ import {
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
 import Composer from './agent/Composer';
-import { getSdkVersion, updateSdk } from '../api/client';
+import { getSdkVersion, updateSdk, getThinking } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, splitPath } from '../lib/toolDisplay';
 import { MODELS, MODES, buildSettings } from '../lib/agentModels';
 
-// Estimation client-side du nombre de tokens d'un texte. Le flux thinking ne porte
-// pas le compte réel → heuristique ≈ caractères / 4 (ordre de grandeur usuel). Sert
-// uniquement d'indicateur de progression de la réflexion, pas de facturation.
-const estimateTokens = (text) => Math.max(0, Math.round((text?.length || 0) / 4));
+// Estimation client-side du nombre de tokens de réflexion à partir d'un nombre de
+// caractères. Le flux thinking ne porte pas le compte réel → heuristique ≈ caractères / 4
+// (ordre de grandeur usuel). Indicateur de progression, pas de facturation.
+const charsToTokens = (chars) => Math.max(0, Math.round((chars || 0) / 4));
 
 // Compteur LISSÉ : `target` saute par paliers (les tokens de réflexion arrivent en
 // lots ~50), on l'affiche en montant graduellement (≈12 %/frame + 1 min) via rAF pour
@@ -57,19 +57,59 @@ function useSmoothCount(target, active) {
   return shown;
 }
 
-function ThinkingBlock({ text, active }) {
-  const shown = useSmoothCount(estimateTokens(text), active);
+// Réflexion = compteur léger + contenu PARESSEUX. Le texte (souvent volumineux, rarement
+// lu) n'est PAS retenu en front : seul `chars` (→ count live animé) + `tidx` (ordinal) le
+// sont. Le texte n'est rapatrié (getThinking) qu'à l'expand. Exception : le bloc ACTIF
+// (tail d'un tour en cours) reçoit son `text` en direct → expand instantané, pas de fetch.
+function ThinkingBlock({ slug, sid, tidx, chars, text, active }) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(text ?? null); // texte affichable (déjà en main ou fetché)
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  const shown = useSmoothCount(charsToTokens(chars), active);
+
+  // Le bloc actif accumule son texte en direct (deltas) → on le reflète tant qu'il arrive.
+  // (Une fois le bloc dépassé, `text` repasse à undefined : on garde alors `loaded` tel quel.)
+  useEffect(() => { if (text != null) setLoaded(text); }, [text]);
+
+  const toggle = async () => {
+    const willOpen = !open;
+    setOpen(willOpen);
+    if (!willOpen || loaded != null || loading) return;
+    if (sid == null || tidx == null) { setErr('contenu indisponible'); return; }
+    setLoading(true);
+    setErr(null);
+    try {
+      const r = await getThinking(slug, sid, tidx);
+      setLoaded(r.data?.text ?? '');
+    } catch (e) {
+      setErr(apiErr(e, 'chargement de la réflexion échoué'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <details className="text-[12px] text-gray-400 border-l-2 border-gray-700 pl-2 my-1">
-      <summary className="cursor-pointer select-none text-gray-500 hover:text-gray-300 flex items-center gap-1.5">
+    <div className="text-[12px] text-gray-400 border-l-2 border-gray-700 pl-2 my-1">
+      <button onClick={toggle}
+        className="cursor-pointer select-none text-gray-500 hover:text-gray-300 flex items-center gap-1.5">
+        {open ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
         <span>Réflexion</span>
         <span className="text-gray-600 tabular-nums" title="estimation ≈ caractères / 4">
           · {shown.toLocaleString('fr-FR')} tokens
         </span>
         {active && <Loader2 className="w-3 h-3 animate-spin text-gray-600" />}
-      </summary>
-      <div className="whitespace-pre-wrap mt-1 italic">{text}</div>
-    </details>
+      </button>
+      {open && (
+        loading ? (
+          <div className="flex items-center gap-1.5 mt-1 text-gray-600"><Loader2 className="w-3 h-3 animate-spin" /> chargement…</div>
+        ) : err ? (
+          <div className="mt-1 text-red-400">{err}</div>
+        ) : (
+          <div className="whitespace-pre-wrap mt-1 italic">{loaded}</div>
+        )
+      )}
+    </div>
   );
 }
 
@@ -346,6 +386,26 @@ export default function AgentPanel({ panelKey }) {
   const [updatingSdk, setUpdatingSdk] = useState(false);
   const [sdkMsg, setSdkMsg] = useState(null); // { ok: bool, text } — retour de la MAJ SDK
   const bodyRef = useRef(null);
+  // « Collé en bas » : ref (pas de re-render à chaque pixel scrollé). showNew pilote le
+  // bouton flottant « Nouveaux messages » quand du contenu arrive alors qu'on lit plus haut.
+  const atBottomRef = useRef(true);
+  const [showNew, setShowNew] = useState(false);
+
+  const onScroll = useCallback(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40; // tolérance 40px
+    atBottomRef.current = atBottom;
+    if (atBottom) setShowNew(false); // no-op si déjà false (React bail-out)
+  }, []);
+
+  const jumpToBottom = useCallback(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    atBottomRef.current = true;
+    setShowNew(false);
+  }, []);
 
   // Choix mémorisés → défauts des prochaines conversations. (L'effort n'est PAS persisté
   // ici : seul un clic délibéré l'enregistre, cf. chooseEffort — pour ne pas que l'effort
@@ -431,10 +491,20 @@ export default function AgentPanel({ panelKey }) {
     running && lastItem?.type === 'tool_use' && lastItem.name !== 'TodoWrite' &&
     (lastItem.id == null || !resultByUseId.get(lastItem.id));
 
-  // Auto-scroll bas à chaque nouvel item.
+  // Auto-scroll bas SEULEMENT si l'utilisateur est collé en bas. S'il a scrollé pour lire,
+  // on préserve sa position et on signale « Nouveaux messages » à la place. Exception : son
+  // propre message vient d'être posté (type 'user') → on re-colle toujours en bas.
   useEffect(() => {
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const ownSend = items[items.length - 1]?.type === 'user';
+    if (atBottomRef.current || ownSend) {
+      el.scrollTop = el.scrollHeight;
+      atBottomRef.current = true;
+      setShowNew(false);
+    } else {
+      setShowNew(true);
+    }
   }, [items, running]);
 
   // Le backend peut basculer le mode en cours de session (approbation de plan → bypass).
@@ -509,7 +579,7 @@ export default function AgentPanel({ panelKey }) {
     if (it.type === 'assistant') {
       return <div key={`i-${i}`} className="text-[13px] text-gray-200"><MarkdownView>{it.text}</MarkdownView></div>;
     }
-    if (it.type === 'thinking') return <ThinkingBlock key={`i-${i}`} text={it.text} active={running && i === items.length - 1} />;
+    if (it.type === 'thinking') return <ThinkingBlock key={`i-${i}`} slug={slug} sid={convo.sid} tidx={it.tidx} chars={it.chars} text={it.text} active={running && i === items.length - 1} />;
     if (it.type === 'result') return <ResultFooter key={`i-${i}`} data={it.data} />;
     if (it.type === 'error') {
       return (
@@ -576,8 +646,10 @@ export default function AgentPanel({ panelKey }) {
         </div>
       </div>
 
-      {/* Fil de conversation */}
-      <div ref={bodyRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2">
+      {/* Fil de conversation. Wrapper `relative` : le bouton « Nouveaux messages » s'ancre
+          au bas VISIBLE du panneau (il ne défile pas avec le contenu). */}
+      <div className="relative flex-1 min-h-0">
+      <div ref={bodyRef} onScroll={onScroll} className="h-full overflow-y-auto px-3 py-2 space-y-2">
         {latestTodos?.length > 0 && <TodoBanner todos={latestTodos} />}
         {items.length === 0 && !convo.loading && (
           <div className="text-[13px] text-gray-600 mt-4 text-center">
@@ -609,6 +681,13 @@ export default function AgentPanel({ panelKey }) {
             d'attente, et l'action ne dépend que de runId (restauré au refresh). */}
         {awaitingUser && (
           <div className="text-[12px] text-gray-600 italic">En attente de ta réponse…</div>
+        )}
+      </div>
+        {showNew && (
+          <button onClick={jumpToBottom}
+            className="absolute left-1/2 -translate-x-1/2 bottom-3 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium shadow-lg bg-blue-600 text-white hover:bg-blue-500">
+            <ChevronDown className="w-3.5 h-3.5" /> Nouveaux messages
+          </button>
         )}
       </div>
 

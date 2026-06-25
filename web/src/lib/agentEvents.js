@@ -15,10 +15,18 @@ export function appendEvent(items, ev) {
       break;
     }
     case 'thinking_delta': {
+      // On ne RETIENT pas le texte de réflexion (lourd, rarement lu) : juste le compteur
+      // `chars` (→ count live animé) + l'ordinal `tidx`. Le texte du bloc EN COURS (tail)
+      // est gardé le temps qu'il est actif pour un expand instantané ; il est libéré dès
+      // qu'un autre item le supersède (cf. boucle ci-dessous) — rechargé alors via fetch.
       const text = ev.data?.text || '';
       if (last && last.type === 'thinking') {
-        next[next.length - 1] = { ...last, text: last.text + text };
-      } else next.push({ type: 'thinking', text });
+        const t = (last.text || '') + text;
+        next[next.length - 1] = { ...last, text: t, chars: t.length };
+      } else {
+        const tidx = next.reduce((n, it) => n + (it.type === 'thinking' ? 1 : 0), 0);
+        next.push({ type: 'thinking', text, chars: text.length, tidx });
+      }
       break;
     }
     case 'tool_use':
@@ -35,6 +43,14 @@ export function appendEvent(items, ev) {
       break;
     default:
       break; // system / started / done / turn_done / question : gérés par le routeur
+  }
+  // Libère le texte de réflexion dès qu'il n'est plus le dernier item : seul le bloc
+  // ACTIF (tail) garde son texte (expand instantané) ; les précédents ne conservent que
+  // `chars`+`tidx` et rechargent leur texte à la demande (getThinking).
+  for (let i = 0; i < next.length - 1; i++) {
+    if (next[i].type === 'thinking' && next[i].text != null) {
+      next[i] = { ...next[i], text: undefined };
+    }
   }
   return next;
 }
