@@ -158,6 +158,10 @@ impl ContextGenerator {
                   &render_surveillance_rule_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
                   &render_claude_md_upkeep_md())?;
+        // Canal de remontée des frictions PLATEFORME (vers CLAUDE_ISSUES.json,
+        // relu en session dev Atelier). Pilote la skill `0-report-issue`.
+        log_write(&app.slug, &src_rules_dir.join("report-issues.md"),
+                  &render_report_issues_rule_md(app))?;
 
         // Le système de flux a été éradiqué (2026-05-26) — nettoyer les
         // anciennes règles `flows-first.md` si encore présentes.
@@ -180,6 +184,15 @@ impl ContextGenerator {
         apply_rules_dir_perms(&app_deploy_dir);
         log_write(&app.slug, &app_deploy_dir.join("SKILL.md"), &render_app_deploy_skill(app))?;
         log_write(&app.slug, &app_deploy_dir.join("deploy.sh"), &render_app_deploy_script(app))?;
+
+        // Skill `0-report-issue` : paire SKILL.md + script (comme 0-build/0-deploy)
+        // car render_extra_skills n'émet que SKILL.md. Le script curle l'endpoint
+        // Atelier qui écrit CLAUDE_ISSUES.json (l'agent ne mute jamais le JSON).
+        let app_report_dir = src_skills_dir.join("0-report-issue");
+        fs::create_dir_all(&app_report_dir)?;
+        apply_rules_dir_perms(&app_report_dir);
+        log_write(&app.slug, &app_report_dir.join("SKILL.md"), &render_report_issue_skill(app))?;
+        log_write(&app.slug, &app_report_dir.join("report-issue.sh"), &render_report_issue_script(app))?;
 
         let produced: std::collections::HashSet<&'static str> = render_extra_skills(app)
             .iter()
@@ -1393,6 +1406,135 @@ fn write_if_missing(path: &Path, content: &str) -> io::Result<bool> {
     }
     fs::write(path, content)?;
     Ok(true)
+}
+
+/// Règle `report-issues.md` : QUAND/COMMENT remonter une friction PLATEFORME à
+/// Atelier (vs un bug interne de l'app). Toujours chargée par l'agent via
+/// `settingSources=['project']`. Pilote la skill `0-report-issue`.
+fn render_report_issues_rule_md(app: &Application) -> String {
+    format!(
+        "# Remonter les soucis plateforme à Atelier (`report-issues`)\n\
+         \n\
+         > Quand un souci que tu rencontres relève de **la plateforme Atelier** (et non du code de ton app `{slug}`), tu DOIS le remonter via la skill `0-report-issue`. Ces remontées sont écrites dans `CLAUDE_ISSUES.json` (à la racine du projet) et relues par le développeur d'Atelier. Sans ça le souci se perd : tu contournes en silence et personne ne le corrige jamais.\n\
+         \n\
+         ## QUAND remonter\n\
+         \n\
+         Un souci **plateforme** = quelque chose qui te bloque ou te ralentit et qui ne se corrige PAS dans le code de `{slug}` :\n\
+         \n\
+         - un **tool MCP** qui échoue, renvoie une erreur opaque, ou qui **manque** pour faire ton travail ;\n\
+         - une **doc Atelier** (rules, descriptions de skills, contexte généré) fausse, périmée ou trompeuse ;\n\
+         - un **build / deploy** (`0-build`/`0-deploy`) qui casse pour une raison **plateforme** (toolchain absente du PATH, endpoint, permission), pas pour une erreur de ton code ;\n\
+         - la **passerelle dataverse** (`dv_*` / `db_*` / REST `/api/dv`) qui se comporte mal ;\n\
+         - l'**agent / le Studio** lui-même (comportement inattendu, capacité absente).\n\
+         \n\
+         ## QUAND NE PAS remonter\n\
+         \n\
+         - Les **bugs internes de ton app** `{slug}` → corrige-les, ou note-les dans `CLAUDE.md`.\n\
+         - Les **findings de surveillance** → ils ont leur propre canal (`findings_*`, cf. `surveillance.md`).\n\
+         - Une incompréhension que la doc résout déjà → relis la doc avant de remonter.\n\
+         \n\
+         ## COMMENT remonter\n\
+         \n\
+         1. Invoque la skill **`0-report-issue`** (elle appelle un endpoint Atelier qui écrit le fichier).\n\
+         2. **N'édite JAMAIS `CLAUDE_ISSUES.json` à la main** : Atelier en est l'unique writer (id + horodatage + statut estampés côté serveur). Un edit manuel risque de corrompre le tableau JSON.\n\
+         3. **Dis-le à l'utilisateur** en une phrase (« j'ai remonté un souci plateforme : … ») — pas de remontée silencieuse.\n\
+         \n\
+         ## Barème\n\
+         \n\
+         - `severity` : `low` (gênant mais contournable) · `medium` (ralentit nettement) · `high` (bloque le travail).\n\
+         - `area` : `mcp` · `docs` · `build` · `deploy` · `dataverse` · `agent` · `studio-ui` · `platform` · `other`.\n\
+         \n\
+         Donne un `title` court et actionnable, un `context` (ce que tu faisais + le symptôme exact) et `tried` (ce que tu as tenté / le contournement en place).\n",
+        slug = app.slug,
+    )
+}
+
+/// Skill `0-report-issue` (SKILL.md). Le script associé est rendu par
+/// `render_report_issue_script`.
+fn render_report_issue_skill(app: &Application) -> String {
+    format!(
+        "---\n\
+         name: 0-report-issue\n\
+         description: Remonte un souci PLATEFORME (Atelier) rencontré en travaillant sur l'app {slug} — tool MCP, doc, build/deploy, dataverse, agent. Utilise cette skill QUAND tu butes sur une friction qui ne relève PAS du code de {slug} mais de la plateforme. NE concerne PAS les bugs internes de l'app.\n\
+         allowed-tools: Bash(bash .claude/skills/0-report-issue/report-issue.sh*)\n\
+         ---\n\
+         \n\
+         # Remonter un souci plateforme — `{slug}`\n\
+         \n\
+         Envoie une remontée à Atelier : la skill appelle `POST /api/apps/{slug}/issues` et **Atelier** écrit l'entrée dans `CLAUDE_ISSUES.json` (racine du projet). Tu ne touches jamais le JSON toi-même. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
+         \n\
+         ## Commande\n\
+         \n\
+         ```bash\n\
+         bash .claude/skills/0-report-issue/report-issue.sh \\\n\
+           --title \"docs_search renvoie 500 sur requête vide\" \\\n\
+           --area mcp \\\n\
+           --severity medium \\\n\
+           --context \"Appelé docs_search(query='') → HTTP 500.\" \\\n\
+           --tried \"query non-vide → OK ; contournement en place.\"\n\
+         ```\n\
+         \n\
+         - `--title` (**requis**) : court et actionnable.\n\
+         - `--area` : `mcp|docs|build|deploy|dataverse|agent|studio-ui|platform|other` (défaut `other`).\n\
+         - `--severity` : `low|medium|high` (défaut `medium`).\n\
+         - `--context` / `--tried` : optionnels mais utiles (symptôme exact + contournement).\n\
+         \n\
+         ## Retour\n\
+         \n\
+         Le JSON de l'entrée stockée (`id`, `ts`, `status:\"open\"`, …). Mentionne ensuite à l'utilisateur, en une phrase, que tu as remonté le souci.\n\
+         \n\
+         ## Interdits\n\
+         \n\
+         - **JAMAIS** éditer `CLAUDE_ISSUES.json` directement — Atelier en est l'unique writer.\n\
+         - Ne remonte pas un bug interne de l'app ici (corrige-le ou note-le dans `CLAUDE.md`).\n",
+        slug = app.slug,
+    )
+}
+
+/// Script `report-issue.sh` : parse des flags, construit le payload via `jq`
+/// (échappement sûr), curle l'endpoint Atelier. `jq` est disponible sur Medion.
+fn render_report_issue_script(app: &Application) -> String {
+    let template = r#"#!/usr/bin/env bash
+# Remonte un souci PLATEFORME de l'app `__SLUG__` vers Atelier.
+# Appelle POST /api/apps/__SLUG__/issues ; Atelier écrit CLAUDE_ISSUES.json (unique writer).
+# Géré par Atelier — ne pas éditer (régénéré à chaque AppUpdate).
+set -euo pipefail
+API_BASE="${API_BASE:-http://127.0.0.1:4100}"
+SLUG="__SLUG__"
+
+TITLE="" AREA="other" SEVERITY="medium" CONTEXT="" TRIED=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --title)    TITLE="${2:-}";    shift ;;
+    --area)     AREA="${2:-}";     shift ;;
+    --severity) SEVERITY="${2:-}"; shift ;;
+    --context)  CONTEXT="${2:-}";  shift ;;
+    --tried)    TRIED="${2:-}";    shift ;;
+    *) echo "argument inconnu: $1" >&2; exit 2 ;;
+  esac
+  shift || true
+done
+
+if [ -z "$TITLE" ]; then
+  echo "Usage: report-issue.sh --title <t> [--area <a>] [--severity low|medium|high] [--context <c>] [--tried <t>]" >&2
+  exit 2
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq introuvable — requis pour construire le payload JSON en toute sécurité." >&2
+  exit 3
+fi
+
+BODY="$(jq -n \
+  --arg title "$TITLE" --arg area "$AREA" --arg severity "$SEVERITY" \
+  --arg context "$CONTEXT" --arg tried "$TRIED" \
+  '{title:$title, area:$area, severity:$severity, context:$context, tried:$tried}')"
+
+curl -sS --max-time 10 -X POST "$API_BASE/api/apps/$SLUG/issues" \
+  -H 'content-type: application/json' \
+  -d "$BODY"
+echo
+"#;
+    template.replace("__SLUG__", &app.slug)
 }
 
 fn log_write(slug: &str, path: &Path, content: &str) -> io::Result<()> {

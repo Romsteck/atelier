@@ -8,6 +8,7 @@ pub mod dv;
 pub mod git;
 pub mod health;
 pub mod hooks;
+pub mod issues;
 pub mod logs;
 pub mod mcp;
 pub mod source;

@@ -197,6 +197,16 @@ Gates : (1) plafond `MAX_OPEN_FINDINGS = 6` **par (app,kind)** (constante non co
 >
 > **Driver Codex (rollback)** : `crates/atelier-watcher/src/codex.rs`. Config ops hors repo sur Medion en root : `~/.codex/{auth.json,config.toml}` (serveur MCP `atelier` + profil read-only + modèle). Args via `ATELIER_CODEX_ARGS` (`exec --json --sandbox read-only`, `--json` OBLIGATOIRE pour streamer). Cf. mémoire `atelier-surveillance-ia`.
 
+## Remontées plateforme des apps (CLAUDE_ISSUES)
+
+Boucle de feedback **app → Atelier** : quand un chat Claude Code d'app (Studio) bute sur une friction **plateforme** (tool MCP, doc, build/deploy, dataverse, agent) — et **non** un bug interne de l'app — il la remonte au lieu de contourner en silence. Romain consomme ensuite ces remontées en session dev Atelier.
+
+- **Endpoints** ([crates/atelier-api/src/routes/issues.rs](crates/atelier-api/src/routes/issues.rs), montés sous `/api/apps`, non authentifiés comme `build-event`/`ship`) : `POST /api/apps/{slug}/issues` (append, le serveur estampe `id`/`ts`/`app`/`status:open`) · `GET …/issues?status=` · `PATCH …/issues/{id}` (`status`/`note`) · `DELETE …/issues/{id}`. **Atelier est l'unique writer** du fichier `CLAUDE_ISSUES.json` (tableau JSON, racine du source de l'app) — read-modify-write atomique + sérialisé (`std::sync::Mutex`), perms `root:hr-studio 0664`. L'agent ne mute jamais le JSON lui-même.
+- **Surface agent** (générée par `context.rs` dans chaque app) : règle `.claude/rules/report-issues.md` (QUAND/quand NE PAS) + skill `0-report-issue` (SKILL.md + `report-issue.sh` qui curle l'endpoint via `jq`, calqué sur `0-build`/`0-deploy`).
+- **Côté dev Atelier** : skill `/collect-issues` ([.claude/skills/collect-issues/](.claude/skills/collect-issues/)) agrège tous les `/var/lib/atelier/apps/*/src/CLAUDE_ISSUES.json`, triés par sévérité, pour triage + clôture via `PATCH`/`DELETE`.
+
+> Distinct de la **surveillance IA** (findings générés par scan headless sur l'app) : ici c'est l'agent **interactif** qui signale un souci **de la plateforme**, pas de l'app.
+
 ## Backup (restic + rclone)
 
 Crate `atelier-backup` + `routes/backup.rs`. Backups incrémentaux, dédupliqués, chiffrés via **restic** → SMB `files.mynetwk.biz:files/atelier-backup` via le backend **rclone** de restic. Config + état en Postgres `atelier_meta` (`backup_target` singleton, `backup_runs`, `backup_run_snapshots` — 3 tags/run).
