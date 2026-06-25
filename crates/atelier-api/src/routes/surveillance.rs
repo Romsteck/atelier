@@ -28,7 +28,15 @@ pub fn global_router() -> Router<ApiState> {
 }
 
 pub fn overview_router() -> Router<ApiState> {
-    Router::new().route("/overview", get(surveillance_overview))
+    Router::new()
+        .route("/overview", get(surveillance_overview))
+        .route("/resolving", get(get_resolving))
+        .route("/sweep", get(get_sweep).post(start_sweep))
+        .route("/sweep/cancel", post(cancel_sweep))
+        .route(
+            "/sweep/schedule",
+            get(get_sweep_schedule).put(put_sweep_schedule),
+        )
 }
 
 pub fn app_router() -> Router<ApiState> {
@@ -41,6 +49,10 @@ pub fn app_router() -> Router<ApiState> {
         .route(
             "/{slug}/findings/{id}/resolve",
             post(resolve_finding),
+        )
+        .route(
+            "/{slug}/findings/{id}/delete",
+            post(delete_finding),
         )
         .route("/{slug}/surveillance/run", post(run_surveillance))
         .route(
@@ -230,6 +242,109 @@ async fn surveillance_overview(State(state): State<ApiState>) -> impl IntoRespon
     (StatusCode::OK, Json(body)).into_response()
 }
 
+/// Findings with an OPEN resolution conversation right now (across all apps),
+/// derived from `agent_open_tabs` (conversation tabs carrying a `fid`). Lets the
+/// global surveillance page flag apps/findings being resolved and gate the sweep.
+/// Enriched with kind/title/severity from the findings table when still present.
+#[instrument(skip(state))]
+async fn get_resolving(State(state): State<ApiState>) -> impl IntoResponse {
+    let pairs = state.open_tabs.resolving_pairs().await;
+    let findings = state.surveillance.findings();
+    let mut out = Vec::with_capacity(pairs.len());
+    for (slug, fid) in pairs {
+        let enriched = match findings {
+            Some(store) => store.get(fid).await.ok().flatten(),
+            None => None,
+        };
+        match enriched {
+            Some(f) => out.push(json!({
+                "slug": f.slug, "finding_id": f.id, "kind": f.kind,
+                "title": f.title, "severity": f.severity, "status": f.status,
+            })),
+            None => out.push(json!({ "slug": slug, "finding_id": fid })),
+        }
+    }
+    (StatusCode::OK, Json(json!({ "resolving": out }))).into_response()
+}
+
+// ── Automatic sweep (manual + scheduled) ──────────────────────────────────
+
+/// Current sweep state for page-load hydration (Idle when no sweep ever ran).
+#[instrument(skip(state))]
+async fn get_sweep(State(state): State<ApiState>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({ "sweep": state.surveillance.sweep_snapshot() })),
+    )
+        .into_response()
+}
+
+/// Start the automatic sweep (app-by-app, 3 scans each, forced). 409 if a sweep
+/// is already running (single-flight).
+#[instrument(skip(state))]
+async fn start_sweep(State(state): State<ApiState>) -> impl IntoResponse {
+    if state.surveillance.findings().is_none() {
+        return err503();
+    }
+    match state.surveillance.start_sweep("manual") {
+        Ok(snap) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ok": true, "sweep": snap })),
+        )
+            .into_response(),
+        Err(e) if e == "sweep already running" => {
+            (StatusCode::CONFLICT, Json(json!({ "error": e }))).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[instrument(skip(state))]
+async fn cancel_sweep(State(state): State<ApiState>) -> impl IntoResponse {
+    if state.surveillance.cancel_sweep() {
+        (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "no sweep running")
+    }
+}
+
+#[instrument(skip(state))]
+async fn get_sweep_schedule(State(state): State<ApiState>) -> impl IntoResponse {
+    match state.surveillance.sweep_schedule_get().await {
+        Some(Ok(cfg)) => (StatusCode::OK, Json(json!({ "schedule": cfg }))).into_response(),
+        Some(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        None => err503(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleBody {
+    enabled: bool,
+    hour: i32,
+    #[serde(default)]
+    cadence: Option<String>,
+}
+
+#[instrument(skip(state, body))]
+async fn put_sweep_schedule(
+    State(state): State<ApiState>,
+    Json(body): Json<ScheduleBody>,
+) -> impl IntoResponse {
+    let cadence = body.cadence.as_deref().unwrap_or("daily");
+    match state
+        .surveillance
+        .sweep_schedule_set(body.enabled, body.hour, cadence)
+        .await
+    {
+        Ok(cfg) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "schedule": cfg })),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct DismissBody {
     #[serde(default)]
@@ -246,7 +361,7 @@ async fn dismiss_finding(
         return err503();
     };
     // Ownership check + persist a `dismissed_pattern` mémoire entry by
-    // fingerprint, so Codex évite de re-suggérer le même pattern.
+    // fingerprint, so the scan-agent évite de re-suggérer le même pattern.
     let item = match findings.get(id).await {
         Ok(Some(f)) if f.slug == slug => f,
         Ok(Some(_)) => return err(StatusCode::NOT_FOUND, "slug mismatch"),
@@ -314,6 +429,33 @@ async fn resolve_finding(
     }
     state.surveillance.emit("finding", &slug, "resolve");
     (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+}
+
+/// HARD-delete a finding (human delete button in the Studio). Looks up the
+/// finding to enforce slug ownership and to derive its `kind` for the scoped
+/// delete. Irreversible — distinct from dismiss/resolve which keep the row.
+#[instrument(skip(state))]
+async fn delete_finding(
+    State(state): State<ApiState>,
+    Path((slug, id)): Path<(String, i64)>,
+) -> impl IntoResponse {
+    let Some(findings) = state.surveillance.findings() else {
+        return err503();
+    };
+    let item = match findings.get(id).await {
+        Ok(Some(f)) if f.slug == slug => f,
+        Ok(Some(_)) => return err(StatusCode::NOT_FOUND, "slug mismatch"),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "finding not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    match findings.delete(id, &slug, &item.kind).await {
+        Ok(Some(_)) => {
+            state.surveillance.emit("finding", &slug, "delete");
+            (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+        }
+        Ok(None) => err(StatusCode::NOT_FOUND, "finding not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -399,7 +541,7 @@ async fn run_surveillance(
     } else {
         None
     };
-    // Fire-and-forget: spawns Codex async, returns the run id immediately.
+    // Fire-and-forget: spawns the scan-agent async, returns the run id immediately.
     match state
         .surveillance
         .run_now(slug.clone(), kind, trigger, data_watermark)

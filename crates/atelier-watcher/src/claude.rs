@@ -1,7 +1,7 @@
 //! Claude Agent SDK scan driver. Spawns the headless read-only scan runner
 //! (`runner/src/scan.js`) as `hr-studio` (OAuth subscription, never root), feeds
-//! it one prompt on stdin, and streams its NDJSON stdout line by line — same
-//! `ScanExec` contract as the Codex driver, so `service.rs` is agnostic. The
+//! it one prompt on stdin, and streams its NDJSON stdout line by line, producing
+//! a `ScanExec` so `service.rs` stays engine-agnostic. The
 //! agent records findings via the MCP `findings_upsert` tool over
 //! `…/mcp?scope=surveillance` (read-only whitelist enforced server-side), so
 //! findings still flow without any stdout parsing here.

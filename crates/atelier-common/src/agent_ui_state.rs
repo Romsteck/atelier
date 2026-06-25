@@ -53,6 +53,41 @@ impl OpenTabsStore {
         }
     }
 
+    /// All `(slug, finding_id)` pairs that currently have an OPEN resolution
+    /// conversation tab. A conversation tab carries `fid` when it was launched
+    /// from the surveillance "Résoudre" button (cf. AgentConversationsContext
+    /// canonTabs). Lets the global surveillance page flag apps/findings being
+    /// resolved across machines — without the per-app Studio React context.
+    /// Degrades to empty on a down pool or query error.
+    pub async fn resolving_pairs(&self) -> Vec<(String, i64)> {
+        let Some(pool) = self.pool.as_ref() else {
+            return Vec::new();
+        };
+        let rows = match query(
+            r#"
+            SELECT slug, (elem->>'fid')::bigint AS fid
+              FROM agent_open_tabs, jsonb_array_elements(tabs) AS elem
+             WHERE elem->>'t' = 'c' AND elem->>'fid' IS NOT NULL
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!(error = %e, "open_tabs resolving_pairs failed");
+                return Vec::new();
+            }
+        };
+        rows.iter()
+            .filter_map(|r| {
+                let slug: String = r.try_get("slug").ok()?;
+                let fid: i64 = r.try_get("fid").ok()?;
+                Some((slug, fid))
+            })
+            .collect()
+    }
+
     /// Upsert the per-app `{tabs, active}` state (full replacement — last write
     /// wins). No-op when the pool is down.
     pub async fn set(&self, slug: &str, tabs: &Value, active: Option<&str>) -> anyhow::Result<()> {

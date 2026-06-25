@@ -36,6 +36,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut source_changed_rx = state.events.source_changed.subscribe();
     let mut surveillance_rx = state.surveillance.subscribe();
     let mut transcript_rx = state.surveillance.subscribe_transcript();
+    let mut sweep_rx = state.surveillance.subscribe_sweep();
     let mut backup_rx = state.backup.subscribe();
     let mut agent_rx = state.events.agent.subscribe();
     let mut agent_open_tabs_rx = state.events.agent_open_tabs.subscribe();
@@ -128,6 +129,21 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "surveillance:transcript", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = sweep_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "surveillance:sweep", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "surveillance:sweep", dropped = n, "ws subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

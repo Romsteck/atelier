@@ -33,6 +33,18 @@ Plafond : **au plus 2 `critical` et 4 `high`** par run.
 
 Cette app a déjà **{{OPEN_COUNT}}** finding(s) « sécurité » ouverte(s) (plafond global : {{MAX_OPEN}}). Tu peux émettre **au plus {{REMAINING}}** nouvelle(s) finding(s) — sélectionne donc UNIQUEMENT les failles les **plus importantes**, classées par gravité décroissante. Au-delà de {{REMAINING}}, n'émets rien : mieux vaut remonter les vraies failles que noyer l'essentiel. Mettre à jour une finding déjà connue (même `fingerprint`) ne compte pas dans ce plafond.
 
+# Triage des findings existantes (À FAIRE EN PREMIER — avant toute nouvelle analyse)
+
+Avant de chercher de nouvelles failles, appelle `findings_list(kind="security", status="open")` pour lire les findings « sécurité » déjà ouvertes de cette app. Pour CHACUNE, vérifie l'état réel du code et décide :
+
+- **Garder** : la faille existe toujours → ne fais rien (elle reste ouverte).
+- **Mettre à jour** : elle existe mais sa localisation / sévérité / description a changé → rappelle `findings_upsert` avec le **même `fingerprint`** (met à jour sans créer de doublon ; **ne compte PAS** dans ton budget {{REMAINING}}).
+- **Supprimer** : la faille n'existe **plus** — le fichier ou la fonction concernée a été supprimé, le code refactoré, ou c'était un faux positif que le code ne déclenche plus → `findings_delete(kind="security", id=<id>)`. La suppression est **définitive** ; n'utilise `findings_delete` que si tu as **vérifié** (Read/Grep) que le problème a réellement disparu. Supprimer une finding **libère** du budget.
+
+N'utilise `findings_resolve` que si un correctif a été committé (convention `fix(surveillance:<id>)`), et `findings_dismiss` que pour un faux positif que les runs futurs doivent **continuer d'ignorer**. `findings_delete` est pour les findings devenues **obsolètes**.
+
+Une fois ce triage fait, cherche les **nouvelles** failles réelles, dans la limite de {{REMAINING}}.
+
 # Contexte
 
 {{DIFF}}

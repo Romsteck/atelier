@@ -1,15 +1,16 @@
-/// Surveillance IA per-app via le **Claude Agent SDK** (driver Codex CLI
-/// conservé en rollback — cf. [`runner::ScanDriverConfig`]). Chaque app a TROIS
-/// scans (discriminés par `kind`) : `security` et `code_review` (plateforme,
-/// fixes, prompts en code) + `business` (possédé par l'agent du projet, défini
-/// en DONNÉES dans `app_scan`, vide par défaut).
+/// Surveillance IA per-app via le **Claude Agent SDK** (`claude.rs`). Chaque app
+/// a TROIS scans (discriminés par `kind`) : `security` et `code_review`
+/// (plateforme, fixes, prompts en code) + `business` (possédé par l'agent du
+/// projet, défini en DONNÉES dans `app_scan`, vide par défaut).
 ///
-/// Runs **manuels uniquement** (déclenchés depuis l'UI ou MCP) — pas de
-/// scheduler interne : un cron consommerait trop l'abonnement. Chaque run passe
-/// par les gates cap (`MAX_OPEN_FINDINGS`, par (app,kind)) + diff-aware, puis le
-/// scan-agent. Le git_watcher auto-résout les findings via les commits
-/// `fix(surveillance:N)`. Le scan-agent lit ses findings via le tool MCP
-/// `findings_upsert` (`…/mcp?scope=surveillance`, whitelist read-only serveur).
+/// Runs **manuels** (UI/MCP) **ou planifiés** : le *sweep* automatique
+/// (`start_sweep`) passe app par app et lance les 3 scans simultanément, à la
+/// demande ou via le scheduler interne (`sweep_scheduler`, config singleton
+/// `sweep_schedule`). Chaque run passe par les gates cap (`MAX_OPEN_FINDINGS`,
+/// par (app,kind)) + diff-aware (le sweep les **force**), puis le scan-agent. Le
+/// git_watcher auto-résout les findings via les commits `fix(surveillance:N)`.
+/// Le scan-agent écrit ses findings via le tool MCP `findings_upsert`
+/// (`…/mcp?scope=surveillance`, whitelist read-only serveur).
 #[allow(unused_imports)]
 pub(crate) mod sqlx {
     pub use sqlx_core::Error;
@@ -25,7 +26,6 @@ pub(crate) mod sqlx {
 }
 
 pub mod claude;
-pub mod codex;
 pub mod findings;
 pub mod git_watcher;
 pub mod gitutil;
@@ -35,18 +35,22 @@ pub mod runner;
 pub mod runs;
 pub mod scandef;
 pub mod service;
+pub mod sweep_scheduler;
 
 pub use claude::{ClaudeRunner, ClaudeScanConfig};
-pub use codex::{CodexConfig, CodexRunner};
 pub use findings::{Finding, FindingFilter, FindingsStore, NewFinding, OpenCountRow};
-pub use runner::{ScanDriverConfig, ScanExec, ScanRunner, build_prompt};
+pub use runner::{ScanExec, build_prompt};
 pub use memory::{Memory, MemoryStore};
 pub use runs::{Run, RunsStore};
 pub use scandef::{
     AppScanStore, Gate, ScanDef, BIZ_KIND, CODE_REVIEW_KIND, SECURITY_KIND, is_valid_kind, sha_key,
     watermark_key,
 };
-pub use service::{AppMeta, SurveillanceConfig, SurveillanceService};
+pub use service::{
+    AppMeta, RunOutcome, ScanCell, SurveillanceConfig, SurveillanceService, SweepAppRow,
+    SweepScanState, SweepSnapshot, SweepStatus,
+};
+pub use sweep_scheduler::{SweepSchedule, SweepScheduleStore};
 
 /// Per-kind cap on OPEN findings. A new scan of a kind is skipped once the kind
 /// already has this many open findings (the UI also disables the launch button),
@@ -62,7 +66,7 @@ pub struct SurveillanceEvent {
     /// "finding" | "run"
     pub kind: String,
     pub slug: String,
-    /// e.g. "upsert" | "dismiss" | "resolve" | "started" | "finished"
+    /// e.g. "upsert" | "dismiss" | "resolve" | "delete" | "started" | "finished"
     pub action: String,
 }
 

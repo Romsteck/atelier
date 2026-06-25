@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  RefreshCw, Play, Square, Terminal, X, Clock, FileText, Wrench,
+  RefreshCw, Play, Square, X, Clock, FileText, Wrench, Trash2,
   ShieldCheck, AlertOctagon, Activity,
 } from 'lucide-react';
 import {
@@ -10,8 +10,11 @@ import {
   getSurveillanceTranscript,
   listSurveillanceRuns,
   getScan,
+  deleteFinding,
 } from '../api/client';
 import MarkdownView from './docs/MarkdownView';
+import LiveScanPanel from './surveillance/LiveScanPanel';
+import { mergeLines } from './surveillance/scanFormat';
 import useWebSocket from '../hooks/useWebSocket';
 import { useOpenResolveFindings } from '../lib/resolveConvos';
 
@@ -22,22 +25,22 @@ import { useOpenResolveFindings } from '../lib/resolveConvos';
 const KINDS = [
   {
     id: 'security', label: 'Sécurité', Icon: ShieldCheck,
-    color: 'text-fuchsia-300',
-    btn: 'bg-fuchsia-500/20 text-fuchsia-200 hover:bg-fuchsia-500/30 border-fuchsia-500/30',
+    color: 'text-fuchsia-700 dark:text-fuchsia-300',
+    btn: 'bg-fuchsia-500/20 text-fuchsia-700 dark:text-fuchsia-200 hover:bg-fuchsia-500/30 border-fuchsia-500/30',
     cats: ['auth', 'injection', 'secrets', 'exposition', 'autres'],
     fixed: true,
   },
   {
     id: 'code_review', label: 'Qualité', Icon: AlertOctagon,
-    color: 'text-red-300',
-    btn: 'bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30',
+    color: 'text-red-700 dark:text-red-300',
+    btn: 'bg-red-500/20 text-red-700 dark:text-red-200 hover:bg-red-500/30 border-red-500/30',
     cats: ['bug', 'architecture', 'performance', 'composants', 'gestion_erreurs', 'autres'],
     fixed: true,
   },
   {
     id: 'business', label: 'Business', Icon: Activity,
-    color: 'text-emerald-300',
-    btn: 'bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30',
+    color: 'text-emerald-700 dark:text-emerald-300',
+    btn: 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30',
     cats: null, // from the app_scan row
     fixed: false,
   },
@@ -45,15 +48,15 @@ const KINDS = [
 const kindMeta = (id) => KINDS.find((k) => k.id === id) || KINDS[0];
 
 const SEVERITIES = [
-  { key: 'critical', label: 'Critical', color: 'text-red-300', bg: 'bg-red-500/20 border-red-500/30' },
-  { key: 'high', label: 'High', color: 'text-orange-300', bg: 'bg-orange-500/20 border-orange-500/30' },
-  { key: 'medium', label: 'Medium', color: 'text-yellow-300', bg: 'bg-yellow-500/20 border-yellow-500/30' },
-  { key: 'low', label: 'Low', color: 'text-blue-300', bg: 'bg-blue-500/20 border-blue-500/30' },
+  { key: 'critical', label: 'Critical', color: 'text-red-700 dark:text-red-300', bg: 'bg-red-500/20 border-red-500/30' },
+  { key: 'high', label: 'High', color: 'text-orange-700 dark:text-orange-300', bg: 'bg-orange-500/20 border-orange-500/30' },
+  { key: 'medium', label: 'Medium', color: 'text-yellow-700 dark:text-yellow-300', bg: 'bg-yellow-500/20 border-yellow-500/30' },
+  { key: 'low', label: 'Low', color: 'text-blue-700 dark:text-blue-300', bg: 'bg-blue-500/20 border-blue-500/30' },
 ];
 
 const STATUSES = [
-  { key: 'open', label: 'Ouvertes', color: 'text-amber-300' },
-  { key: 'resolved', label: 'Résolues', color: 'text-emerald-300' },
+  { key: 'open', label: 'Ouvertes', color: 'text-amber-700 dark:text-amber-300' },
+  { key: 'resolved', label: 'Résolues', color: 'text-emerald-700 dark:text-emerald-300' },
   { key: 'dismissed', label: 'Dismiss', color: 'text-gray-400' },
 ];
 
@@ -124,13 +127,14 @@ function FindingCard({ finding, active, onSelect, onResolve, resolving }) {
 }
 
 // Side drawer: the resolution-plan document (annex) for the selected issue.
-function AnnexDrawer({ finding, onClose, onResolve, resolving }) {
+function AnnexDrawer({ finding, onClose, onResolve, onDelete, resolving }) {
   const sev = sevMeta(finding.severity);
   return (
     <div className="w-[28rem] shrink-0 border-l border-gray-700 bg-gray-950/60 flex flex-col min-w-0">
       <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2">
         <FileText className="w-3.5 h-3.5 text-gray-300 shrink-0" />
         <span className="text-xs text-gray-300 flex-1 truncate">Annexe — Plan de résolution</span>
+        <button onClick={() => onDelete(finding)} className="text-gray-400 hover:text-red-600 dark:hover:text-red-400" title="Supprimer définitivement cette finding"><Trash2 className="w-4 h-4" /></button>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-50" title="Fermer"><X className="w-4 h-4" /></button>
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -177,9 +181,9 @@ function AnnexDrawer({ finding, onClose, onResolve, resolving }) {
 
 function RunRow({ run }) {
   const colorByStatus = {
-    success: 'text-emerald-300', success_empty: 'text-gray-400',
-    skipped: 'text-yellow-400', failed: 'text-red-400', running: 'text-blue-400',
-    cancelled: 'text-orange-300',
+    success: 'text-emerald-700 dark:text-emerald-300', success_empty: 'text-gray-400',
+    skipped: 'text-yellow-700 dark:text-yellow-400', failed: 'text-red-700 dark:text-red-400',
+    running: 'text-blue-700 dark:text-blue-400', cancelled: 'text-orange-700 dark:text-orange-300',
   };
   const kindShort = { security: 'sécu', code_review: 'qual', business: 'biz' };
   return (
@@ -189,136 +193,6 @@ function RunRow({ run }) {
       <span className={`${colorByStatus[run.status] || 'text-gray-300'} w-24 shrink-0`}>{run.status}</span>
       <span className="text-gray-400 flex-1 truncate">{run.skip_reason || run.error || `${run.findings_count} finding${run.findings_count > 1 ? 's' : ''}`}</span>
       <span className="text-gray-600 shrink-0">{timeSince(run.started_at)}</span>
-    </div>
-  );
-}
-
-// Merge transcript lines deduped by seq (a buffer replay + live WS lines can
-// overlap) and kept ordered. Capped to the last 2000.
-function mergeLines(prev, incoming) {
-  const bySeq = new Map(prev.map((l) => [l.seq, l]));
-  for (const l of incoming) bySeq.set(l.seq, l);
-  return [...bySeq.values()].sort((a, b) => a.seq - b.seq).slice(-2000);
-}
-
-// Readable one-liner for a scan-agent tool call (Claude `tool_use` event).
-function scanToolLabel(ev) {
-  const name = ev.name || 'outil';
-  const inp = ev.input || {};
-  const bare = name.startsWith('mcp__') ? name.split('__').slice(2).join('__') : name;
-  switch (bare) {
-    case 'findings_upsert': return `finding: [${inp.severity || '?'}] ${inp.title || ''}`;
-    case 'findings_dismiss': return `findings_dismiss #${inp.id ?? ''}`;
-    case 'findings_resolve': return `findings_resolve #${inp.id ?? ''}`;
-    case 'pm_query': return 'pm_query';
-    default: break;
-  }
-  if (name === 'Read') return `Read ${inp.file_path || ''}`;
-  if (name === 'Grep') return `Grep ${inp.pattern || ''}`;
-  if (name === 'Glob') return `Glob ${inp.pattern || ''}`;
-  return bare;
-}
-
-// Render one scan-agent NDJSON event into a readable {icon, text, tone} entry,
-// or null to skip pure-noise events. Falls back to the raw line if not JSON.
-// Handles the Claude Agent SDK vocabulary (`t` field, the current driver) and
-// keeps the legacy Codex JSONL vocabulary (`type` field) so a Codex run still in
-// flight during a deploy keeps rendering. Drop the Codex branch in the cleanup release.
-function formatScanEvent(raw) {
-  let ev;
-  try { ev = JSON.parse(raw); } catch { return raw.trim() ? { icon: '', text: raw, tone: 'raw' } : null; }
-
-  // Claude Agent SDK (scan.js) — current driver.
-  if (ev.t) {
-    switch (ev.t) {
-      case 'system': return { icon: '▸', text: `Session de scan démarrée${ev.model ? ` (${ev.model})` : ''}`, tone: 'meta' };
-      case 'assistant': return ev.text?.trim() ? { icon: '🗨', text: ev.text, tone: 'msg' } : null;
-      case 'thinking': return ev.text?.trim() ? { icon: '💭', text: ev.text, tone: 'dim' } : null;
-      case 'tool_use': return { icon: '🔧', text: scanToolLabel(ev), tone: 'tool' };
-      // Successful tool results are implied by the next message; surface errors only.
-      case 'tool_result': return ev.is_error ? { icon: '⚠', text: (ev.text || '').slice(0, 200), tone: 'err' } : null;
-      case 'result': {
-        const u = ev.usage || {};
-        return { icon: '✓', text: `Scan terminé — ${u.input_tokens ?? '?'} in / ${u.output_tokens ?? '?'} out tokens`, tone: 'meta' };
-      }
-      case 'error': return { icon: '⚠', text: ev.message || 'erreur', tone: 'err' };
-      default: return null; // done, etc.
-    }
-  }
-
-  // Legacy Codex JSONL (`type` field) — transition fallback.
-  const t = ev.type;
-  if (t === 'thread.started') return { icon: '▸', text: 'Session Codex démarrée', tone: 'meta' };
-  if (t === 'turn.started' || t === 'item.started') return null;
-  if (t === 'turn.completed') {
-    const u = ev.usage || {};
-    return { icon: '✓', text: `Tour terminé — ${u.input_tokens ?? '?'} in / ${u.output_tokens ?? '?'} out tokens`, tone: 'meta' };
-  }
-  if (t === 'turn.failed' || t === 'error') {
-    return { icon: '⚠', text: ev.error?.message || ev.message || JSON.stringify(ev), tone: 'err' };
-  }
-  if (t === 'item.completed') {
-    const it = ev.item || {};
-    switch (it.type) {
-      case 'agent_message': return { icon: '🗨', text: it.text || '', tone: 'msg' };
-      case 'reasoning': return { icon: '💭', text: it.text || it.summary || '', tone: 'dim' };
-      case 'command_execution': return { icon: '$', text: it.command || it.cmd || '', tone: 'cmd' };
-      case 'mcp_tool_call':
-      case 'tool_call': return { icon: '🔧', text: it.tool || it.name || it.server || 'appel outil', tone: 'tool' };
-      case 'file_change': return { icon: '✏', text: it.path || '', tone: 'tool' };
-      default: return { icon: '·', text: it.text || it.type || '', tone: 'dim' };
-    }
-  }
-  return null;
-}
-
-const TONE_CLS = {
-  msg: 'text-gray-100', meta: 'text-emerald-400/80', dim: 'text-gray-500',
-  cmd: 'text-sky-300', tool: 'text-fuchsia-300', err: 'text-red-300', raw: 'text-gray-400',
-};
-
-// Live console of the scan run in progress. Lines stream in over WebSocket;
-// the panel auto-scrolls and disappears once the run settles.
-function LiveScanPanel({ lines, kindLabel, onStop, stopping }) {
-  const bodyRef = useRef(null);
-  const entries = useMemo(
-    () => lines.map((l) => formatScanEvent(l.line)).filter((e) => e && (e.text?.trim() || e.tone === 'meta')),
-    [lines],
-  );
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [entries.length]);
-  return (
-    <div className="w-96 shrink-0 border-l border-gray-700 bg-gray-950/60 flex flex-col min-w-0">
-      <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2">
-        <Terminal className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-        <span className="text-xs text-gray-300 flex-1 truncate">
-          {stopping ? 'Arrêt en cours…' : <>Scan en cours — <span className="text-emerald-300">{kindLabel}</span></>}
-        </span>
-        <RefreshCw className={`w-3 h-3 shrink-0 animate-spin ${stopping ? 'text-red-400' : 'text-emerald-400'}`} />
-        {onStop && (
-          <button
-            onClick={onStop}
-            disabled={stopping}
-            className="px-2 py-0.5 text-xs border border-red-500/40 text-red-200 hover:bg-red-500/20 rounded-sm flex items-center gap-1 disabled:opacity-50"
-          >
-            <Square className="w-3 h-3" /> Arrêter
-          </button>
-        )}
-      </div>
-      <div ref={bodyRef} className="flex-1 overflow-y-auto p-2 space-y-1.5">
-        {entries.length === 0 ? (
-          <div className="text-xs text-gray-600 italic">En attente de la sortie du scan…</div>
-        ) : (
-          entries.map((e, i) => (
-            <div key={i} className="flex gap-1.5 text-[11px] leading-relaxed font-mono">
-              {e.icon && <span className="shrink-0 select-none">{e.icon}</span>}
-              <span className={`whitespace-pre-wrap wrap-break-word min-w-0 ${TONE_CLS[e.tone] || 'text-gray-300'}`}>{e.text}</span>
-            </div>
-          ))
-        )}
-      </div>
     </div>
   );
 }
@@ -507,6 +381,19 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
     setSelected(null);
   };
 
+  // HARD-delete a finding (irreversible) — for obsolete/stale findings a human
+  // wants gone rather than dismissed/resolved.
+  const handleDelete = async (f) => {
+    if (!window.confirm(`Supprimer définitivement cette finding ?\n\n${f.title}\n\n(Irréversible — préfère « Résoudre » ou « Dismiss » si applicable.)`)) return;
+    try {
+      await deleteFinding(slug, f.id);
+      setSelected(null);
+      await reload();
+    } catch (e) {
+      alert('Suppression a échoué : ' + (e.response?.data?.error || e.message));
+    }
+  };
+
   const atCap = openCount >= MAX_OPEN_FINDINGS;
   const blankBusiness = isBusiness && blank;
 
@@ -560,7 +447,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
                 <div className="truncate"><span className="text-gray-500">gate_sql :</span> <code>{scan.gate_sql}</code></div>
               )}
               {scan.updated_by && <div className="text-gray-500">maintenu par {scan.updated_by}</div>}
-              <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap bg-black/30 p-2 rounded-sm border border-gray-800 text-gray-400">{scan.prompt}</pre>
+              <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap bg-gray-950/50 p-2 rounded-sm border border-gray-800 text-gray-400">{scan.prompt}</pre>
             </>
           )}
         </div>
@@ -629,7 +516,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
         {/* Right side: the annex drawer (selected issue) takes priority; otherwise
             the live scan console while a run is in progress. */}
         {selected ? (
-          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onResolve={handleResolve} resolving={resolvingIds.has(selected.id)} />
+          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onResolve={handleResolve} onDelete={handleDelete} resolving={resolvingIds.has(selected.id)} />
         ) : (activeRun || transcript.length > 0) ? (
           <LiveScanPanel
             lines={transcript}

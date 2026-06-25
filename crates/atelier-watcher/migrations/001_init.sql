@@ -152,3 +152,17 @@ ALTER TABLE findings ADD  CONSTRAINT findings_status_chk CHECK (status IN ('open
 
 -- Démontage de l'ancien portail de gouvernance (remplacé par app_scan).
 DROP TABLE IF EXISTS scan_type_registry;
+
+-- Config du *sweep* automatique (surveillance app-par-app, 3 scans simultanés).
+-- Singleton (`id` toujours TRUE) calqué sur `backup_target` : le scheduler interne
+-- (sweep_scheduler) lit cette ligne ; `last_run_at` borne la fenêtre min-age pour
+-- éviter un re-déclenchement dans l'heure.
+CREATE TABLE IF NOT EXISTS sweep_schedule (
+    id          BOOLEAN     PRIMARY KEY DEFAULT TRUE CHECK (id),
+    enabled     BOOLEAN     NOT NULL DEFAULT FALSE,
+    hour        INTEGER     NOT NULL DEFAULT 3 CHECK (hour >= 0 AND hour <= 23),
+    cadence     TEXT        NOT NULL DEFAULT 'daily' CHECK (cadence IN ('daily', 'weekly')),
+    last_run_at TIMESTAMPTZ,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO sweep_schedule(id) VALUES (TRUE) ON CONFLICT DO NOTHING;

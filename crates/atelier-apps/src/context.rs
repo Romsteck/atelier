@@ -233,13 +233,6 @@ impl ContextGenerator {
             info!(slug = %app.slug, file = %claude_md_path.display(), "CLAUDE.md skeleton created");
         }
 
-        // Step 9 — AGENTS.md (Codex), write-once comme CLAUDE.md. La calibration
-        // dynamique de chaque run passe par le prompt embarqué côté atelier-watcher.
-        let agents_md_path = src_dir.join("AGENTS.md");
-        if write_if_missing(&agents_md_path, &render_agents_md(app))? {
-            info!(slug = %app.slug, file = %agents_md_path.display(), "AGENTS.md skeleton created");
-        }
-
         info!(slug = %app.slug, "context files generated");
         Ok(())
     }
@@ -1058,8 +1051,9 @@ fn render_surveillance_rule_md(app: &Application) -> String {
     format!(
         "# Surveillance IA — {slug}\n\
          \n\
-         Cette app a **trois scans** (tous tournent en lecture seule via Codex et \
-         écrivent des findings, visibles dans le tab **Surveillance** du Studio) :\n\
+         Cette app a **trois scans** (tous tournent en lecture seule via le \
+         scan-agent — Claude Agent SDK — et écrivent des findings, visibles dans le \
+         tab **Surveillance** du Studio) :\n\
          \n\
          - **Sécurité** et **Qualité** (bugs/qualité code/perf) — scans **plateforme \
          FIXES**. Tu ne les configures PAS ; tu **tries** leurs findings (résous / \
@@ -1083,10 +1077,13 @@ fn render_surveillance_rule_md(app: &Application) -> String {
          métier, pièges, schéma data) — ce que ton scan doit savoir pour être pertinent.\n\
          \n\
          > Un bon scan Business répond à une question utile et RÉCURRENTE propre à ce \
-         projet. Le `prompt` doit demander à Codex d'émettre chaque finding via \
-         `findings_upsert(kind=\"business\", category=<une de tes categories>, severity, \
-         title, summary, plan, fingerprint)`, de fingerprinter par CAUSE (mise à jour \
-         au lieu de duplication), et de rester dans le budget `{{{{REMAINING}}}}`.\n\
+         projet. Le `prompt` doit demander au scan-agent : (1) **d'abord** lire les \
+         findings existantes via `findings_list(kind=\"business\", status=\"open\")` et \
+         de les **trier** — garder / mettre à jour (`findings_upsert` même `fingerprint`) \
+         / **supprimer** (`findings_delete` si la cause n'existe plus, vérifiée) ; puis \
+         (2) émettre les nouvelles findings via `findings_upsert(kind=\"business\", \
+         category=<une de tes categories>, severity, title, summary, plan, fingerprint)`, \
+         en fingerprintant par CAUSE et en restant dans le budget `{{{{REMAINING}}}}`.\n\
          \n\
          ## Forme d'une finding (les 3 scans)\n\
          \n\
@@ -1101,7 +1098,12 @@ fn render_surveillance_rule_md(app: &Application) -> String {
          - `scan_get`, `scan_set` — lire / définir ton scan **Business** (les scans \
          Sécurité/Qualité ne se règlent pas ici).\n\
          - `surveillance_run(kind=security|code_review|business)` — lancer un scan.\n\
-         - `findings_list` (filtre kind/severity/status), `findings_dismiss`, `findings_resolve`\n\
+         - `findings_list` (filtre kind/severity/status) — **à lire en premier** \
+         pour trier l'existant.\n\
+         - `findings_dismiss` (faux positif à mémoriser), `findings_resolve` (fix \
+         committé), `findings_delete` (cause **disparue** — fichier/fonction supprimé, \
+         refactoré, faux positif que le code ne déclenche plus ; **définitif**, \
+         vérifie avant).\n\
          - `memory_get`, `memory_remember` (préférences/mémoire durables)\n\
          - `runs_list` (historique des runs), `pm_query` (SELECT read-only sur la base de l'app)\n\
          \n\
@@ -1111,65 +1113,6 @@ fn render_surveillance_rule_md(app: &Application) -> String {
          `fix(surveillance:<id>): <résumé>`. Atelier détecte ce pattern et marque la \
          finding `resolved` automatiquement. Appelle aussi `findings_resolve(id, commit_sha)`.\n",
         slug = app.slug,
-    )
-}
-
-/// AGENTS.md — instruction-file lu automatiquement par Codex CLI à la racine du
-/// workspace. Écrit une seule fois (write-once, comme CLAUDE.md) : l'utilisateur
-/// peut l'adapter sans craindre l'écrasement. La calibration dynamique de chaque
-/// run Codex passe par le prompt embarqué côté atelier-watcher.
-fn render_agents_md(app: &Application) -> String {
-    format!(
-        "# AGENTS.md — {name} ({stack})\n\
-         \n\
-         Instructions pour les agents Codex opérant sur cette app Atelier.\n\
-         \n\
-         ## Rôle\n\
-         \n\
-         Tu exécutes les scans de surveillance de cette app : **Sécurité** et \
-         **Qualité** (bugs/qualité/perf) — scans plateforme fixes — et le scan \
-         **Business** (données & comportement métier) défini par l'agent du projet. \
-         Tu ne modifies PAS le code toi-même : tu écris des findings via les tools \
-         MCP `mcp__atelier__*`. L'utilisateur les exécute ensuite dans Claude Code.\n\
-         \n\
-         ## Préférences projet (à respecter strictement)\n\
-         \n\
-         - **Code minimal.** Pas de defensive coding, pas de validation pour des cas \
-         impossibles, pas de fallback spéculatif.\n\
-         - **Pas de comments redondants.** Un comment explique le POURQUOI non-évident, \
-         jamais le QUOI.\n\
-         - **Aucune dépendance externe nouvelle.** L'utilisateur préfère du code natif.\n\
-         - **Respecte le style du codebase existant.** Pas de migration stylistique globale, \
-         pas de modernisation gratuite.\n\
-         - La doc (`docs_*`) peut être périmée : le **code est la source de vérité**.\n\
-         \n\
-         ## Sévérité (calibrée — ne pas gonfler)\n\
-         \n\
-         - `critical` : bug bloquant en prod, faille, secret hardcodé.\n\
-         - `high` : bug visible par l'utilisateur.\n\
-         - `medium` : régression silencieuse, edge case non géré.\n\
-         - `low` : cosmétique, lisibilité.\n\
-         \n\
-         Max 1 `critical` et 3 `high` par run. Si tu n'as rien de qualité à signaler, \
-         ne crée aucune finding.\n\
-         \n\
-         ## Sortie\n\
-         \n\
-         Pour chaque problème réel : `findings_upsert` avec `kind` (security | \
-         code_review | business), `category`, `severity`, `title`, `fingerprint` stable, \
-         et :\n\
-         - `summary` = **présentation** courte (quoi/où/pourquoi) — c'est ce qui \
-         s'affiche dans la liste des issues.\n\
-         - `plan` = **document de résolution complet** en markdown (annexe) : \
-         `## Contexte` / `## Cause racine` / `## Fichiers impactés` / `## Étapes de \
-         correction` / `## Validation`. Un autre agent doit pouvoir l'exécuter sans \
-         relire toute l'app. Si tu cites un fichier ou une fonction, vérifie qu'il existe.\n\
-         \n\
-         ## Convention de commit (pour la résolution côté Claude)\n\
-         \n\
-         `fix(surveillance:<id>): <résumé>`.\n",
-        name = app.name,
-        stack = app.stack.display_name(),
     )
 }
 

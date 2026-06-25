@@ -146,9 +146,9 @@ async fn main() -> Result<()> {
     source_watcher::spawn_source_watcher(events.clone(), apps_src_root.clone());
 
     // Surveillance IA (sécurité + code_review + business). Migrate schema, spawn
-    // git_watcher loop. Runs manuels uniquement (pas de scheduler). Le scan-agent
-    // par défaut est le Claude Agent SDK (runner `scan.js` en hr-studio) ; Codex
-    // reste sélectionnable en rollback. Noop si pas de DSN.
+    // git_watcher + sweep scheduler loops. Runs manuels, sweep automatique
+    // (manuel ou planifié). Le scan-agent est le Claude Agent SDK (runner
+    // `scan.js` en hr-studio, OAuth abonnement). Noop si pas de DSN.
     let surveillance = init_surveillance(&app_registry, &apps_src_root, &mcp_endpoint).await;
 
     // Sauvegarde restic+rclone vers Samba. Noop si pas de DSN ; runs manuels
@@ -253,24 +253,21 @@ async fn main() -> Result<()> {
 
 /// Bootstrap the surveillance service. Reuses `ATELIER_DV_ADMIN_URL` (the
 /// dataverse admin DSN) to CREATE DATABASE `atelier_meta` on first boot,
-/// run its migrations, and spawn the git_watcher loop. `seed_apps` carries the
-/// registry's slugs + stack hints (used for prompts + git_watcher). If the env
-/// var is missing, the service starts in noop mode.
+/// run its migrations, and spawn the git_watcher + sweep scheduler loops.
+/// `seed_apps` carries the registry's slugs + names + stack hints (used for
+/// prompts, git_watcher and the sweep app list). If the env var is missing, the
+/// service starts in noop mode.
 ///
-/// The scan AI engine is selected via env (all optional, sane defaults):
-///   - `ATELIER_SCAN_DRIVER`        ("claude" default | "codex" rollback)
-///   - `ATELIER_SCAN_MODEL`         (claude only; unset → SDK subscription default = Opus)
-///   - `ATELIER_SCAN_EFFORT`        (claude only; default "max"; "none" to omit — Haiku)
+/// The scan engine is the **Claude Agent SDK** (OAuth subscription, never an API
+/// key): `scan.js` is spawned as `hr-studio`, reusing the `ATELIER_AGENT_*`
+/// paths + `ATELIER_SCAN_RUNNER`; the agent records findings via MCP at
+/// `<ATELIER_MCP_ENDPOINT>?scope=surveillance` (read-only whitelist), MCP token
+/// from `MCP_TOKEN` (passed on the runner's stdin). The automatic *sweep*
+/// (manual or scheduled) reuses this exact path. Tunables (all optional):
+///   - `ATELIER_SCAN_MODEL`         (unset → SDK subscription default = Opus)
+///   - `ATELIER_SCAN_EFFORT`        (default "max"; "none" to omit — e.g. Haiku)
 ///   - `ATELIER_SCAN_TIMEOUT_SECS`  (default 600)
-///   - `ATELIER_SCAN_MAX_CONCURRENT`(default 2)
-///
-/// Claude driver (default): spawns `scan.js` as `hr-studio` (OAuth subscription,
-/// reusing `ATELIER_AGENT_*` paths + `ATELIER_SCAN_RUNNER`); the agent records
-/// findings via MCP at `<ATELIER_MCP_ENDPOINT>?scope=surveillance` (read-only
-/// whitelist), MCP token from `MCP_TOKEN` (passed on the runner's stdin).
-///
-/// Codex driver (rollback): `ATELIER_CODEX_{BIN,ARGS}`; the MCP server is
-/// registered once in `~/.codex/config.toml`.
+///   - `ATELIER_SCAN_MAX_CONCURRENT`(default 3 — an app's 3 scans run together)
 async fn init_surveillance(
     registry: &atelier_apps::AppRegistry,
     apps_src_root: &PathBuf,
@@ -288,62 +285,46 @@ async fn init_surveillance(
         .into_iter()
         .map(|a| atelier_watcher::AppMeta {
             slug: a.slug,
+            name: a.name,
             stack: a.stack.display_name().to_string(),
         })
         .collect();
 
-    let driver = std::env::var("ATELIER_SCAN_DRIVER")
-        .unwrap_or_else(|_| "claude".to_string())
-        .to_ascii_lowercase();
-    // Shared knobs (fall back to the legacy ATELIER_CODEX_* names for continuity).
     let timeout_secs = std::env::var("ATELIER_SCAN_TIMEOUT_SECS")
-        .or_else(|_| std::env::var("ATELIER_CODEX_TIMEOUT_SECS"))
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600u64);
+    // Default 3 so the sweep can run an app's three scans (security / code_review
+    // / business) truly simultaneously; the sweep is single-flight + barriered
+    // app-by-app, so at most 3 scan subprocesses ever run at once.
     let max_concurrent = std::env::var("ATELIER_SCAN_MAX_CONCURRENT")
-        .or_else(|_| std::env::var("ATELIER_CODEX_MAX_CONCURRENT"))
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2usize);
+        .unwrap_or(3usize);
 
-    let driver_cfg = if driver == "codex" {
-        let codex_bin = std::env::var("ATELIER_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-        let codex_args: Vec<String> = std::env::var("ATELIER_CODEX_ARGS")
-            .unwrap_or_else(|_| "exec --json --sandbox read-only".to_string())
-            .split_whitespace()
-            .map(String::from)
-            .collect();
-        atelier_watcher::ScanDriverConfig::Codex(atelier_watcher::CodexConfig {
-            bin: codex_bin,
-            args: codex_args,
-            timeout: Duration::from_secs(timeout_secs),
-        })
-    } else {
-        atelier_watcher::ScanDriverConfig::Claude(atelier_watcher::ClaudeScanConfig {
-            node_bin: std::env::var("ATELIER_AGENT_NODE_BIN")
-                .unwrap_or_else(|_| "/usr/bin/node".to_string()),
-            run_as_user: std::env::var("ATELIER_AGENT_USER")
-                .unwrap_or_else(|_| "hr-studio".to_string()),
-            claude_config_dir: std::env::var("ATELIER_AGENT_CLAUDE_CONFIG_DIR")
-                .unwrap_or_else(|_| "/var/lib/hr-studio/.claude".to_string()),
-            scan_script: std::env::var("ATELIER_SCAN_RUNNER")
-                .unwrap_or_else(|_| "/opt/atelier/runner/src/scan.js".to_string()),
-            // The scope param selects the server-side read-only whitelist.
-            mcp_endpoint: format!("{mcp_endpoint}?scope=surveillance"),
-            model: std::env::var("ATELIER_SCAN_MODEL").ok().filter(|s| !s.is_empty()),
-            // Deepest analysis by default. Set ATELIER_SCAN_EFFORT=none to omit (e.g. Haiku).
-            effort: Some(
-                std::env::var("ATELIER_SCAN_EFFORT")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "max".to_string()),
-            )
-            .filter(|s| s != "none"),
-            timeout: Duration::from_secs(timeout_secs),
-        })
+    let driver_cfg = atelier_watcher::ClaudeScanConfig {
+        node_bin: std::env::var("ATELIER_AGENT_NODE_BIN")
+            .unwrap_or_else(|_| "/usr/bin/node".to_string()),
+        run_as_user: std::env::var("ATELIER_AGENT_USER")
+            .unwrap_or_else(|_| "hr-studio".to_string()),
+        claude_config_dir: std::env::var("ATELIER_AGENT_CLAUDE_CONFIG_DIR")
+            .unwrap_or_else(|_| "/var/lib/hr-studio/.claude".to_string()),
+        scan_script: std::env::var("ATELIER_SCAN_RUNNER")
+            .unwrap_or_else(|_| "/opt/atelier/runner/src/scan.js".to_string()),
+        // The scope param selects the server-side read-only whitelist.
+        mcp_endpoint: format!("{mcp_endpoint}?scope=surveillance"),
+        model: std::env::var("ATELIER_SCAN_MODEL").ok().filter(|s| !s.is_empty()),
+        // Deepest analysis by default. Set ATELIER_SCAN_EFFORT=none to omit (e.g. Haiku).
+        effort: Some(
+            std::env::var("ATELIER_SCAN_EFFORT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "max".to_string()),
+        )
+        .filter(|s| s != "none"),
+        timeout: Duration::from_secs(timeout_secs),
     };
-    info!(driver = %driver, max_concurrent, "surveillance scan driver selected");
+    info!(max_concurrent, "surveillance scan engine: Claude Agent SDK");
 
     SurveillanceService::start(SurveillanceConfig {
         admin_dsn,

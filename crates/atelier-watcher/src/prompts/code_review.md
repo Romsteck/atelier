@@ -31,6 +31,18 @@ Plafond : **au plus 1 `critical` et 3 `high`** par run. Sois sélectif — la qu
 
 Cette app a déjà **{{OPEN_COUNT}}** finding(s) « code_review » ouverte(s) (plafond global : {{MAX_OPEN}}). Tu peux émettre **au plus {{REMAINING}}** nouvelle(s) finding(s) — sélectionne donc UNIQUEMENT les problèmes les **plus importants**, classés par gravité décroissante. Au-delà de {{REMAINING}}, n'émets rien : mieux vaut remonter les 2-3 vrais sujets que noyer l'essentiel. Mettre à jour une finding déjà connue (même `fingerprint`) ne compte pas dans ce plafond.
 
+# Triage des findings existantes (À FAIRE EN PREMIER — avant toute nouvelle analyse)
+
+Avant de chercher de nouveaux problèmes, appelle `findings_list(kind="code_review", status="open")` pour lire les findings « code_review » déjà ouvertes de cette app. Pour CHACUNE, vérifie l'état réel du code et décide :
+
+- **Garder** : le problème existe toujours → ne fais rien (il reste ouvert).
+- **Mettre à jour** : il existe mais sa localisation / sévérité / description a changé → rappelle `findings_upsert` avec le **même `fingerprint`** (met à jour sans créer de doublon ; **ne compte PAS** dans ton budget {{REMAINING}}).
+- **Supprimer** : le problème n'existe **plus** — le fichier ou la fonction concernée a été supprimé, le code refactoré, ou c'était un faux positif que le code ne déclenche plus → `findings_delete(kind="code_review", id=<id>)`. La suppression est **définitive** ; n'utilise `findings_delete` que si tu as **vérifié** (Read/Grep) que le problème a réellement disparu. Supprimer une finding **libère** du budget.
+
+N'utilise `findings_resolve` que si un correctif a été committé (convention `fix(surveillance:<id>)`), et `findings_dismiss` que pour un faux positif que les runs futurs doivent **continuer d'ignorer**. `findings_delete` est pour les findings devenues **obsolètes**.
+
+Une fois ce triage fait, cherche les **nouveaux** problèmes réels, dans la limite de {{REMAINING}}.
+
 # Contexte
 
 {{DIFF}}

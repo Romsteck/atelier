@@ -167,6 +167,30 @@ impl FindingsStore {
         Ok(res.rows_affected() > 0)
     }
 
+    /// HARD-delete a finding by id, scoped to `(slug, kind)` for ownership so a
+    /// per-app per-kind scan can only delete its own findings (a security scan
+    /// cannot delete a business finding). Returns the deleted row (for the live
+    /// event) or `None` if nothing matched. Irreversible — used by the scan-agent
+    /// to purge findings whose underlying cause no longer exists in the code
+    /// (file/function removed, refactored, or a false positive the code no longer
+    /// triggers). Distinct from dismiss/resolve, which keep the row.
+    pub async fn delete(&self, id: i64, slug: &str, kind: &str) -> anyhow::Result<Option<Finding>> {
+        let sql = r#"
+            DELETE FROM findings
+             WHERE id = $1 AND slug = $2 AND kind = $3
+            RETURNING id, slug, kind, severity, title, summary, evidence, plan,
+                      fingerprint, category, status, first_seen,
+                      last_seen, updated_at
+        "#;
+        let row: Option<PgRow> = query(sql)
+            .bind(id)
+            .bind(slug)
+            .bind(kind)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_finding).transpose()
+    }
+
     /// Count all OPEN findings for a (slug, kind). Backs the per-kind cap gate
     /// (`MAX_OPEN_FINDINGS`): a new scan is skipped once the cap is reached, and
     /// the count is injected into the prompt so the scan-agent self-limits to the

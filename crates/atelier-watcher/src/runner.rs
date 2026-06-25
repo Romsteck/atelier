@@ -1,18 +1,10 @@
-//! Driver-neutral surveillance run plumbing: the `ScanExec` outcome struct, the
-//! `ScanRunner` dispatch enum (Codex CLI or Claude Agent SDK), and the shared
-//! prompt builder. WHY a seam here: the AI engine is the only thing that swaps
-//! between drivers — gates, memory, findings delta and the transcript stream
-//! (`service.rs`) are identical regardless of who runs the scan, because findings
-//! flow through the MCP `findings_upsert` tool, not stdout parsing. An enum
-//! (not a `trait` + `async-trait`) keeps the single dynamic call site cheap and
-//! avoids a new dependency.
+//! Driver-neutral surveillance run plumbing: the `ScanExec` outcome struct and
+//! the shared prompt builder. WHY a seam here: the AI engine (the Claude Agent
+//! SDK, in `claude.rs`) is the only piece tied to the runtime — gates, memory,
+//! findings delta and the transcript stream (`service.rs`) are identical
+//! regardless of who runs the scan, because findings flow through the MCP
+//! `findings_upsert` tool, not stdout parsing.
 
-use std::path::PathBuf;
-
-use tokio::sync::oneshot;
-
-use crate::claude::{ClaudeRunner, ClaudeScanConfig};
-use crate::codex::{CodexConfig, CodexRunner};
 use crate::memory::Memory;
 use crate::scandef::{Gate, ScanDef, watermark_key};
 use crate::MAX_OPEN_FINDINGS;
@@ -20,7 +12,7 @@ use crate::MAX_OPEN_FINDINGS;
 /// Outcome of one scan subprocess invocation. The runner does NOT parse findings
 /// from stdout — the agent writes them via the MCP `findings_upsert` tool and we
 /// observe the DB delta afterwards. This struct only carries process-level
-/// signals (driver-agnostic: both Codex and Claude produce the same shape).
+/// signals.
 #[derive(Debug, Clone)]
 pub struct ScanExec {
     pub exit_ok: bool,
@@ -33,59 +25,6 @@ pub struct ScanExec {
     /// True when the run was killed via its cancel oneshot (user-requested
     /// stop). Distinct from `failed` so the caller records a clean `cancelled`.
     pub cancelled: bool,
-}
-
-/// The selected AI engine for surveillance scans. `Claude` is the default
-/// (Agent SDK, OAuth subscription — same runtime as the Studio agent); `Codex`
-/// is retained behind `ATELIER_SCAN_DRIVER=codex` as a rollback for one release.
-#[derive(Clone)]
-pub enum ScanRunner {
-    Codex(CodexRunner),
-    Claude(ClaudeRunner),
-}
-
-/// Driver selection + its config, resolved from env in main.rs. `Default` is
-/// `Claude` (the post-migration engine); `Codex` stays available behind
-/// `ATELIER_SCAN_DRIVER=codex` for one release as a rollback.
-#[derive(Debug, Clone)]
-pub enum ScanDriverConfig {
-    Codex(CodexConfig),
-    Claude(ClaudeScanConfig),
-}
-
-impl Default for ScanDriverConfig {
-    fn default() -> Self {
-        ScanDriverConfig::Claude(ClaudeScanConfig::default())
-    }
-}
-
-impl ScanDriverConfig {
-    /// Construct the concrete runner for the selected driver.
-    pub fn build(&self) -> ScanRunner {
-        match self {
-            ScanDriverConfig::Codex(c) => ScanRunner::Codex(CodexRunner::new(c.clone())),
-            ScanDriverConfig::Claude(c) => ScanRunner::Claude(ClaudeRunner::new(c.clone())),
-        }
-    }
-}
-
-impl ScanRunner {
-    /// Run a scan in `work_dir` with `prompt`. Streams each stdout line to
-    /// `on_line` (live transcript) and returns a `ScanExec`. The generic
-    /// `on_line`/`cancel` are monomorphised here and moved into the matched
-    /// variant — no boxing, no `async-trait`.
-    pub async fn exec(
-        &self,
-        work_dir: &PathBuf,
-        prompt: &str,
-        cancel: oneshot::Receiver<()>,
-        on_line: impl FnMut(&str) + Send,
-    ) -> ScanExec {
-        match self {
-            ScanRunner::Codex(r) => r.exec(work_dir, prompt, cancel, on_line).await,
-            ScanRunner::Claude(r) => r.exec(work_dir, prompt, cancel, on_line).await,
-        }
-    }
 }
 
 /// Build the full prompt for a run from the app's scan definition (its

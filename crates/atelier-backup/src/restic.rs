@@ -1,7 +1,7 @@
 //! Invocations `restic` (sous-process) + parsing du flux JSON `--json`.
 //!
 //! Le pattern subprocess (spawn + `tokio::select!` annulation + kill de groupe)
-//! est repris de `atelier-watcher/src/codex.rs`. Les secrets (RESTIC_PASSWORD,
+//! est repris de `atelier-watcher/src/claude.rs`. Les secrets (RESTIC_PASSWORD,
 //! RCLONE_CONFIG_*_PASS) sont fournis via l'env enfant uniquement.
 
 use std::process::Stdio;

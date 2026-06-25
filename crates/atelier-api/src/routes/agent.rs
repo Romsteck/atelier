@@ -1,5 +1,5 @@
 //! Agent SDK chat — pilote le runner Node (`/opt/atelier/runner`) via le même
-//! pattern de sous-process que la surveillance ([`atelier_watcher::codex`]) :
+//! pattern de sous-process que la surveillance ([`atelier_watcher::claude`]) :
 //! on spawn le runner, on lui écrit un JSON d'init sur stdin, on lit son NDJSON
 //! ligne à ligne et on republie chaque ligne (normalisée + taggée `run_id`) sur
 //! l'EventBus → WebSocket. Le runner tourne en `hr-studio` (OAuth abonnement),
@@ -1000,7 +1000,7 @@ fn publish(
 }
 
 /// Spawn le runner Node, écrit l'init sur stdin, lit le NDJSON et republie.
-/// Clone direct du pattern [`atelier_watcher::codex::CodexRunner::exec`] :
+/// Clone direct du pattern [`atelier_watcher::claude::ClaudeRunner::exec`] :
 /// process group + SIGKILL au cancel/timeout pour reaper le binaire `claude`
 /// petit-fils du SDK.
 async fn run_agent(

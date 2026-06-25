@@ -2,28 +2,162 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use tokio::sync::{Semaphore, broadcast, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::claude::{ClaudeRunner, ClaudeScanConfig};
 use crate::findings::FindingsStore;
 use crate::git_watcher::GitWatcher;
 use crate::gitutil;
 use crate::memory::MemoryStore;
 use crate::migration::{self, DEFAULT_DB_NAME};
-use crate::runner::{ScanDriverConfig, ScanRunner};
 use crate::runs::RunsStore;
-use crate::scandef::{AppScanStore, Gate, ScanDef, is_valid_kind, sha_key, watermark_key};
+use crate::scandef::{
+    AppScanStore, BIZ_KIND, CODE_REVIEW_KIND, Gate, SECURITY_KIND, ScanDef, is_valid_kind, sha_key,
+    watermark_key,
+};
 use crate::sqlx::{Pool, Postgres};
+use crate::sweep_scheduler::SweepScheduleStore;
 use crate::{MAX_OPEN_FINDINGS, SurveillanceEvent, TranscriptLine};
 
+/// Order in which the sweep launches an app's scans (all three run together).
+const SWEEP_KINDS: [&str; 3] = [SECURITY_KIND, CODE_REVIEW_KIND, BIZ_KIND];
+
 /// Minimal per-app metadata the surveillance service needs (prompt stack hint +
-/// git_watcher slug list).
+/// git_watcher slug list + display name for the sweep UI).
 #[derive(Debug, Clone)]
 pub struct AppMeta {
     pub slug: String,
+    pub name: String,
     pub stack: String,
+}
+
+/// Terminal outcome of one scan run, mapped to a sweep cell. Returned by
+/// `execute`/`execute_inner` so the sweep can show per-scan progress.
+#[derive(Debug, Clone, Copy)]
+pub enum RunOutcome {
+    Success,
+    Empty,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+impl RunOutcome {
+    fn to_cell(self) -> ScanCell {
+        match self {
+            RunOutcome::Success => ScanCell::Done,
+            RunOutcome::Empty => ScanCell::Empty,
+            RunOutcome::Skipped => ScanCell::Skipped,
+            RunOutcome::Failed => ScanCell::Failed,
+            RunOutcome::Cancelled => ScanCell::Cancelled,
+        }
+    }
+}
+
+/// Overall state of the automatic sweep (single-flight). `Idle` = never started
+/// (or reset); terminal states (`Done`/`Cancelled`/`Failed`) are retained so a
+/// page load mid/after a sweep can hydrate the live view.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SweepStatus {
+    Idle,
+    Running,
+    Cancelling,
+    Done,
+    Cancelled,
+    Failed,
+}
+
+/// Per-scan cell state within a sweep app row.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanCell {
+    Pending,
+    Running,
+    Done,
+    Empty,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepScanState {
+    pub status: ScanCell,
+    /// The run id, set once the scan is launched — the frontend subscribes to
+    /// this run's `surveillance:transcript` stream to show the live console.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<Uuid>,
+}
+
+impl SweepScanState {
+    fn pending() -> Self {
+        Self { status: ScanCell::Pending, run_id: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepAppRow {
+    pub slug: String,
+    pub name: String,
+    pub security: SweepScanState,
+    pub code_review: SweepScanState,
+    pub business: SweepScanState,
+}
+
+impl SweepAppRow {
+    fn cell_mut(&mut self, kind: &str) -> &mut SweepScanState {
+        match kind {
+            SECURITY_KIND => &mut self.security,
+            CODE_REVIEW_KIND => &mut self.code_review,
+            _ => &mut self.business,
+        }
+    }
+}
+
+/// Full sweep state, broadcast over `surveillance:sweep` on every transition and
+/// returned by `GET /api/surveillance/sweep` for page-load hydration.
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepSnapshot {
+    pub status: SweepStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Index into `apps` of the app currently being scanned.
+    pub current_index: usize,
+    pub total: usize,
+    /// Apps fully settled so far.
+    pub done: usize,
+    pub apps: Vec<SweepAppRow>,
+}
+
+impl SweepSnapshot {
+    fn idle() -> Self {
+        Self {
+            status: SweepStatus::Idle,
+            started_at: None,
+            finished_at: None,
+            current_index: 0,
+            total: 0,
+            done: 0,
+            apps: Vec::new(),
+        }
+    }
+}
+
+/// In-memory sweep state behind a mutex (separate from `running` so locks don't
+/// contend). `abort` is the master cancel flag the loop polls; `active_runs` are
+/// the in-flight run ids of the current app, killed on cancel.
+struct SweepInner {
+    snapshot: SweepSnapshot,
+    abort: bool,
+    active_runs: Vec<Uuid>,
 }
 
 #[derive(Clone)]
@@ -37,9 +171,17 @@ struct Inner {
     memory: Option<MemoryStore>,
     /// Per-app scan definitions (`app_scan` table). `None` in noop mode.
     app_scan: Option<AppScanStore>,
-    runner: ScanRunner,
+    /// Sweep schedule config store (`sweep_schedule` singleton). `None` in noop.
+    sweep_schedule: Option<SweepScheduleStore>,
+    runner: ClaudeRunner,
     apps_src_root: PathBuf,
     stacks: HashMap<String, String>,
+    /// Ordered app list (slug + name) for the automatic sweep.
+    apps: Vec<AppMeta>,
+    /// Single-flight automatic sweep state (`None` = never started).
+    sweep: Mutex<Option<SweepInner>>,
+    /// Broadcast of the full sweep snapshot on every transition (WebSocket fan-out).
+    sweep_tx: broadcast::Sender<SweepSnapshot>,
     sem: Arc<Semaphore>,
     /// Live event bus for WebSocket fan-out (findings/runs changes).
     tx: broadcast::Sender<SurveillanceEvent>,
@@ -63,8 +205,9 @@ pub struct SurveillanceConfig {
     pub seed_apps: Vec<AppMeta>,
     /// Root of app sources: `<root>/<slug>/src/`.
     pub apps_src_root: PathBuf,
-    /// AI engine for scans (Claude Agent SDK by default, Codex CLI as rollback).
-    pub driver: ScanDriverConfig,
+    /// AI engine for scans — the Claude Agent SDK (OAuth subscription, run as
+    /// `hr-studio` via `scan.js`; never an API key).
+    pub driver: ClaudeScanConfig,
     /// Max concurrent scan subprocesses (ratelimit guard).
     pub max_concurrent: usize,
 }
@@ -79,14 +222,15 @@ impl SurveillanceService {
             }
         };
         let enabled = pool.is_some();
-        let (findings, runs, memory, app_scan) = match pool.as_ref() {
+        let (findings, runs, memory, app_scan, sweep_schedule) = match pool.as_ref() {
             Some(p) => (
                 Some(FindingsStore::new(p.clone())),
                 Some(RunsStore::new(p.clone())),
                 Some(MemoryStore::new(p.clone())),
                 Some(AppScanStore::new(p.clone())),
+                Some(SweepScheduleStore::new(p.clone())),
             ),
-            None => (None, None, None, None),
+            None => (None, None, None, None, None),
         };
 
         let stacks: HashMap<String, String> = cfg
@@ -97,6 +241,7 @@ impl SurveillanceService {
 
         let (tx, _rx) = broadcast::channel::<SurveillanceEvent>(256);
         let (transcript_tx, _trx) = broadcast::channel::<TranscriptLine>(1024);
+        let (sweep_tx, _srx) = broadcast::channel::<SweepSnapshot>(64);
 
         let svc = Self {
             inner: Arc::new(Inner {
@@ -104,9 +249,13 @@ impl SurveillanceService {
                 runs,
                 memory,
                 app_scan,
-                runner: cfg.driver.build(),
+                sweep_schedule,
+                runner: ClaudeRunner::new(cfg.driver.clone()),
                 apps_src_root: cfg.apps_src_root.clone(),
                 stacks,
+                apps: cfg.seed_apps.clone(),
+                sweep: Mutex::new(None),
+                sweep_tx,
                 sem: Arc::new(Semaphore::new(cfg.max_concurrent.max(1))),
                 tx,
                 transcript_tx,
@@ -127,9 +276,12 @@ impl SurveillanceService {
                     Err(e) => warn!(?e, "surveillance: stale-run reconciliation failed"),
                 }
             }
-            // No internal scheduler — runs are manual only (a cron would burn
-            // too much GPT+ subscription). git_watcher still auto-resolves
-            // findings from `fix(surveillance:N)` commits.
+            // Automatic sweep scheduler (boucle Tokio, off par défaut — activable
+            // via PUT /api/surveillance/sweep/schedule). git_watcher auto-résout
+            // les findings depuis les commits `fix(surveillance:N)`.
+            if let Some(store) = svc.inner.sweep_schedule.clone() {
+                tokio::spawn(crate::sweep_scheduler::run_loop(svc.clone(), store));
+            }
             if let (Some(f), Some(m)) = (svc.inner.findings.clone(), svc.inner.memory.clone()) {
                 let slugs: Vec<String> = cfg.seed_apps.iter().map(|a| a.slug.clone()).collect();
                 let gw = GitWatcher::new(
@@ -153,7 +305,7 @@ impl SurveillanceService {
                     }
                 });
             }
-            info!("atelier-watcher: started (stores + git_watcher, manual runs only)");
+            info!("atelier-watcher: started (stores + git_watcher + sweep scheduler)");
         }
 
         svc
@@ -167,6 +319,249 @@ impl SurveillanceService {
     /// Subscribe to the live scan-agent stdout stream (in-progress-run console).
     pub fn subscribe_transcript(&self) -> broadcast::Receiver<TranscriptLine> {
         self.inner.transcript_tx.subscribe()
+    }
+
+    /// Subscribe to live sweep-state snapshots (the `surveillance:sweep` channel).
+    pub fn subscribe_sweep(&self) -> broadcast::Receiver<SweepSnapshot> {
+        self.inner.sweep_tx.subscribe()
+    }
+
+    /// Current sweep state for page-load hydration. `Idle` when no sweep has run
+    /// (or after a restart — the in-memory snapshot is not persisted).
+    pub fn sweep_snapshot(&self) -> SweepSnapshot {
+        self.inner
+            .sweep
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.snapshot.clone())
+            .unwrap_or_else(SweepSnapshot::idle)
+    }
+
+    fn broadcast_sweep(&self) {
+        let snap = self
+            .inner
+            .sweep
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.snapshot.clone());
+        if let Some(snap) = snap {
+            let _ = self.inner.sweep_tx.send(snap);
+        }
+    }
+
+    /// Mutate the live sweep state under lock. No-op (returns false) if no sweep.
+    fn with_sweep<F: FnOnce(&mut SweepInner)>(&self, f: F) -> bool {
+        let mut guard = self.inner.sweep.lock().unwrap();
+        match guard.as_mut() {
+            Some(s) => {
+                f(s);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn sweep_aborted(&self) -> bool {
+        self.inner
+            .sweep
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.abort)
+            .unwrap_or(false)
+    }
+
+    /// Start the automatic sweep (manual or `cron`). Single-flight: returns
+    /// `Err("sweep already running")` if one is active. Builds the app queue,
+    /// flips state to `Running`, spawns the loop, and returns the initial
+    /// snapshot. The loop reuses the exact Claude scan path (run row + `execute`
+    /// + `scan.js` as hr-studio), **forcing** every scan past the freshness/cap
+    /// gates so the triage/purge runs on every app.
+    pub fn start_sweep(&self, trigger: &str) -> Result<SweepSnapshot, String> {
+        if !self.inner.enabled {
+            return Err("surveillance disabled (postgres unreachable)".into());
+        }
+        let mut guard = self.inner.sweep.lock().unwrap();
+        if let Some(s) = guard.as_ref() {
+            if matches!(s.snapshot.status, SweepStatus::Running | SweepStatus::Cancelling) {
+                return Err("sweep already running".into());
+            }
+        }
+        let apps: Vec<SweepAppRow> = self
+            .inner
+            .apps
+            .iter()
+            .map(|a| SweepAppRow {
+                slug: a.slug.clone(),
+                name: a.name.clone(),
+                security: SweepScanState::pending(),
+                code_review: SweepScanState::pending(),
+                business: SweepScanState::pending(),
+            })
+            .collect();
+        if apps.is_empty() {
+            return Err("no apps to sweep".into());
+        }
+        let snapshot = SweepSnapshot {
+            status: SweepStatus::Running,
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            current_index: 0,
+            total: apps.len(),
+            done: 0,
+            apps,
+        };
+        *guard = Some(SweepInner {
+            snapshot: snapshot.clone(),
+            abort: false,
+            active_runs: Vec::new(),
+        });
+        drop(guard);
+        self.broadcast_sweep();
+        let svc = self.clone();
+        let trigger = trigger.to_string();
+        tokio::spawn(async move { svc.run_sweep(trigger).await });
+        info!("surveillance sweep started");
+        Ok(snapshot)
+    }
+
+    /// Cancel the active sweep: set the abort flag, kill the in-flight runs of
+    /// the current app, and flip to `Cancelling` (the loop settles it to
+    /// `Cancelled`). Returns false if no sweep is active.
+    pub fn cancel_sweep(&self) -> bool {
+        let active: Vec<Uuid> = {
+            let mut guard = self.inner.sweep.lock().unwrap();
+            let Some(s) = guard.as_mut() else {
+                return false;
+            };
+            if !matches!(s.snapshot.status, SweepStatus::Running | SweepStatus::Cancelling) {
+                return false;
+            }
+            s.abort = true;
+            s.snapshot.status = SweepStatus::Cancelling;
+            s.active_runs.clone()
+        };
+        for id in &active {
+            self.cancel_run(*id);
+        }
+        self.broadcast_sweep();
+        true
+    }
+
+    /// The sweep loop: app by app, launch the 3 scans simultaneously (forced),
+    /// await them, advance. Broadcasts a fresh snapshot on every transition.
+    async fn run_sweep(&self, trigger: String) {
+        let apps = self.inner.apps.clone();
+        let mut aborted = false;
+        for (i, app) in apps.iter().enumerate() {
+            if self.sweep_aborted() {
+                aborted = true;
+                break;
+            }
+            self.with_sweep(|s| s.snapshot.current_index = i);
+
+            // Launch the app's 3 scans simultaneously (forced past the gates).
+            let mut set: JoinSet<(Uuid, RunOutcome)> = JoinSet::new();
+            for kind in SWEEP_KINDS {
+                match self.launch_run(app.slug.clone(), kind, &trigger, true, None).await {
+                    Ok((run_id, handle)) => {
+                        self.with_sweep(|s| {
+                            if let Some(row) = s.snapshot.apps.get_mut(i) {
+                                let cell = row.cell_mut(kind);
+                                cell.status = ScanCell::Running;
+                                cell.run_id = Some(run_id);
+                            }
+                            s.active_runs.push(run_id);
+                        });
+                        set.spawn(async move {
+                            (run_id, handle.await.unwrap_or(RunOutcome::Failed))
+                        });
+                    }
+                    Err(e) => {
+                        warn!(slug = %app.slug, kind, error = %e, "sweep: scan launch failed");
+                        self.with_sweep(|s| {
+                            if let Some(row) = s.snapshot.apps.get_mut(i) {
+                                row.cell_mut(kind).status = ScanCell::Failed;
+                            }
+                        });
+                    }
+                }
+            }
+            self.broadcast_sweep();
+
+            // Await this app's runs; settle each cell as it completes.
+            while let Some(joined) = set.join_next().await {
+                if let Ok((run_id, outcome)) = joined {
+                    self.with_sweep(|s| {
+                        if let Some(row) = s.snapshot.apps.get_mut(i) {
+                            for cell in [
+                                &mut row.security,
+                                &mut row.code_review,
+                                &mut row.business,
+                            ] {
+                                if cell.run_id == Some(run_id) {
+                                    cell.status = outcome.to_cell();
+                                }
+                            }
+                        }
+                    });
+                    self.broadcast_sweep();
+                }
+            }
+
+            self.with_sweep(|s| {
+                s.active_runs.clear();
+                s.snapshot.done = i + 1;
+            });
+            self.broadcast_sweep();
+
+            if self.sweep_aborted() {
+                aborted = true;
+                break;
+            }
+        }
+
+        self.with_sweep(|s| {
+            s.snapshot.status = if aborted {
+                SweepStatus::Cancelled
+            } else {
+                SweepStatus::Done
+            };
+            s.snapshot.finished_at = Some(Utc::now());
+        });
+        self.broadcast_sweep();
+        if let Some(store) = self.inner.sweep_schedule.as_ref() {
+            if let Err(e) = store.mark_ran().await {
+                warn!(?e, "sweep: failed to record last_run_at");
+            }
+        }
+        info!(aborted, "surveillance sweep finished");
+    }
+
+    /// Read the sweep schedule config (singleton). `None` in noop mode.
+    pub async fn sweep_schedule_get(
+        &self,
+    ) -> Option<anyhow::Result<crate::sweep_scheduler::SweepSchedule>> {
+        let store = self.inner.sweep_schedule.as_ref()?;
+        Some(store.get().await)
+    }
+
+    /// Update the sweep schedule config (enabled / hour / cadence).
+    pub async fn sweep_schedule_set(
+        &self,
+        enabled: bool,
+        hour: i32,
+        cadence: &str,
+    ) -> Result<crate::sweep_scheduler::SweepSchedule, String> {
+        let Some(store) = self.inner.sweep_schedule.as_ref() else {
+            return Err("surveillance disabled (postgres unreachable)".into());
+        };
+        store
+            .set(enabled, hour, cadence)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Snapshot of the buffered transcript for a run (for replay when a client
@@ -286,6 +681,23 @@ impl SurveillanceService {
         trigger: &str,
         data_watermark: Option<String>,
     ) -> Result<Uuid, String> {
+        // Manual runs respect the gates (force=false) — same behavior as before.
+        let (run_id, _handle) = self.launch_run(slug, kind, trigger, false, data_watermark).await?;
+        Ok(run_id)
+    }
+
+    /// Create the run row and spawn `execute`, returning the run id immediately
+    /// AND a JoinHandle that resolves to the terminal `RunOutcome`. `run_now`
+    /// drops the handle (fire-and-forget); the sweep awaits it to barrier on an
+    /// app's three scans. `force=true` bypasses the freshness + cap gates.
+    async fn launch_run(
+        &self,
+        slug: String,
+        kind: &str,
+        trigger: &str,
+        force: bool,
+        data_watermark: Option<String>,
+    ) -> Result<(Uuid, JoinHandle<RunOutcome>), String> {
         if !is_valid_kind(kind) {
             return Err(format!("invalid scan kind: {kind}"));
         }
@@ -298,10 +710,10 @@ impl SurveillanceService {
             .map_err(|e| format!("failed to create run: {e}"))?;
         let svc = self.clone();
         let kind = kind.to_string();
-        tokio::spawn(async move {
-            svc.execute(run_id, slug, kind, data_watermark).await;
+        let handle = tokio::spawn(async move {
+            svc.execute(run_id, slug, kind, force, data_watermark).await
         });
-        Ok(run_id)
+        Ok((run_id, handle))
     }
 
     async fn execute(
@@ -309,8 +721,9 @@ impl SurveillanceService {
         run_id: Uuid,
         slug: String,
         kind: String,
+        force: bool,
         data_watermark: Option<String>,
-    ) {
+    ) -> RunOutcome {
         // Register a cancel channel for the whole run lifetime so a stop request
         // can kill the scan subprocess. The Sender is held in the registry
         // until the run ends, so the Receiver only fires on an explicit cancel.
@@ -322,7 +735,8 @@ impl SurveillanceService {
             .insert(run_id, cancel_tx);
 
         self.emit("run", &slug, "started");
-        self.execute_inner(run_id, &slug, &kind, data_watermark, cancel_rx)
+        let outcome = self
+            .execute_inner(run_id, &slug, &kind, force, data_watermark, cancel_rx)
             .await;
         self.inner.running.lock().unwrap().remove(&run_id);
         // Drop the buffered transcript — the run has settled (panel disappears).
@@ -330,6 +744,7 @@ impl SurveillanceService {
         // A run almost always touches findings; emit a final event so any open
         // Surveillance view refreshes once the run settles.
         self.emit("run", &slug, "finished");
+        outcome
     }
 
     async fn execute_inner(
@@ -337,9 +752,10 @@ impl SurveillanceService {
         run_id: Uuid,
         slug: &str,
         kind: &str,
+        force: bool,
         data_watermark: Option<String>,
         cancel_rx: oneshot::Receiver<()>,
-    ) {
+    ) -> RunOutcome {
         let slug = slug.to_string();
         let (Some(findings), Some(runs), Some(memory), Some(app_scan)) = (
             self.inner.findings.as_ref(),
@@ -347,7 +763,7 @@ impl SurveillanceService {
             self.inner.memory.as_ref(),
             self.inner.app_scan.as_ref(),
         ) else {
-            return;
+            return RunOutcome::Failed;
         };
 
         // Resolve the scan definition by kind. `security`/`code_review` are fixed
@@ -360,12 +776,12 @@ impl SurveillanceService {
                 Ok(_) => {
                     let _ = runs.finish_skipped(run_id, "blank (scan non défini)").await;
                     info!(slug = %slug, kind, "run skipped (blank scan)");
-                    return;
+                    return RunOutcome::Skipped;
                 }
                 Err(e) => {
                     let _ = runs.finish_failed(run_id, &format!("scan load failed: {e}")).await;
                     warn!(slug = %slug, kind, ?e, "scan load failed");
-                    return;
+                    return RunOutcome::Failed;
                 }
             },
         };
@@ -373,7 +789,9 @@ impl SurveillanceService {
         // Gate 1 — cap: skip when this (app,kind) already has MAX_OPEN_FINDINGS
         // open findings (the UI disables that kind's launch button at the same
         // threshold; this is the server-side backstop). `open_now` is reused below
-        // to budget the prompt so the scan-agent reports only the most important issues.
+        // to budget the prompt so the scan-agent reports only the most important
+        // issues. A forced sweep run bypasses the cap (so the triage/purge can run
+        // even at the ceiling) — the {{REMAINING}}=0 budget still blocks NEW findings.
         let open_now = match findings.count_open(&slug, kind).await {
             Ok(n) => n,
             Err(e) => {
@@ -381,16 +799,18 @@ impl SurveillanceService {
                 0
             }
         };
-        if open_now >= MAX_OPEN_FINDINGS {
+        if !force && open_now >= MAX_OPEN_FINDINGS {
             let reason = format!("cap: {open_now} findings open (max {MAX_OPEN_FINDINGS})");
             let _ = runs.finish_skipped(run_id, &reason).await;
             info!(slug = %slug, "run skipped (cap)");
-            return;
+            return RunOutcome::Skipped;
         }
 
         // Gate 2 — freshness, per the scan's gate. `code` → git-diff (skip when
         // HEAD unchanged); `data` → watermark from the scan's gate_sql (skip when
-        // unchanged); `manual` → always run.
+        // unchanged); `manual` → always run. A forced sweep run never skips: it
+        // runs a full review (or the diff since the last reviewed SHA, if any) so
+        // stale findings get re-examined even on an unchanged app.
         let src = self.inner.apps_src_root.join(&slug).join("src");
         let head = gitutil::head_sha(&src).await;
         let diff: Option<String> = match scan.gate {
@@ -401,48 +821,61 @@ impl SurveillanceService {
                     .ok()
                     .and_then(|v| v.into_iter().next())
                     .and_then(|m| m.value.as_str().map(String::from));
-                match (&last_sha, &head) {
-                    (Some(last), Some(h)) if last == h => {
-                        let _ = runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await;
-                        info!(slug = %slug, "run skipped (no_diff)");
-                        return;
+                if force {
+                    // Diff since the last reviewed SHA if it differs; else a full
+                    // review (None) — never skip.
+                    match (&last_sha, &head) {
+                        (Some(last), Some(h)) if last != h => gitutil::diff_since(&src, last).await,
+                        _ => None,
                     }
-                    (Some(last), Some(_)) => {
-                        let d = gitutil::diff_since(&src, last).await;
-                        if d.is_none() {
-                            let _ = runs.finish_skipped(run_id, "no_diff (empty range)").await;
-                            info!(slug = %slug, "run skipped (no_diff empty)");
-                            return;
+                } else {
+                    match (&last_sha, &head) {
+                        (Some(last), Some(h)) if last == h => {
+                            let _ = runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await;
+                            info!(slug = %slug, "run skipped (no_diff)");
+                            return RunOutcome::Skipped;
                         }
-                        d
+                        (Some(last), Some(_)) => {
+                            let d = gitutil::diff_since(&src, last).await;
+                            if d.is_none() {
+                                let _ = runs.finish_skipped(run_id, "no_diff (empty range)").await;
+                                info!(slug = %slug, "run skipped (no_diff empty)");
+                                return RunOutcome::Skipped;
+                            }
+                            d
+                        }
+                        // First run (no recorded SHA) → full review, no diff.
+                        _ => None,
                     }
-                    // First run (no recorded SHA) → full review, no diff.
-                    _ => None,
                 }
             }
             Gate::Data => {
                 // The watermark is the latest "material" the scan would analyse.
                 // Empty ⇒ nothing to analyse; unchanged vs last run ⇒ no new material.
-                match &data_watermark {
-                    None => None, // caller couldn't compute it → run unconditionally
-                    Some(w) if w.is_empty() => {
-                        let _ = runs.finish_skipped(run_id, "no_new_data").await;
-                        info!(slug = %slug, "run skipped (no_new_data)");
-                        return;
-                    }
-                    Some(w) => {
-                        let last = memory
-                            .get(&slug, Some("last_run"), Some(&watermark_key(kind)))
-                            .await
-                            .ok()
-                            .and_then(|v| v.into_iter().next())
-                            .and_then(|m| m.value.as_str().map(String::from));
-                        if last.as_deref() == Some(w.as_str()) {
+                if force {
+                    None
+                } else {
+                    match &data_watermark {
+                        None => None, // caller couldn't compute it → run unconditionally
+                        Some(w) if w.is_empty() => {
                             let _ = runs.finish_skipped(run_id, "no_new_data").await;
                             info!(slug = %slug, "run skipped (no_new_data)");
-                            return;
+                            return RunOutcome::Skipped;
                         }
-                        None
+                        Some(w) => {
+                            let last = memory
+                                .get(&slug, Some("last_run"), Some(&watermark_key(kind)))
+                                .await
+                                .ok()
+                                .and_then(|v| v.into_iter().next())
+                                .and_then(|m| m.value.as_str().map(String::from));
+                            if last.as_deref() == Some(w.as_str()) {
+                                let _ = runs.finish_skipped(run_id, "no_new_data").await;
+                                info!(slug = %slug, "run skipped (no_new_data)");
+                                return RunOutcome::Skipped;
+                            }
+                            None
+                        }
                     }
                 }
             }
@@ -498,13 +931,13 @@ impl SurveillanceService {
         if exec.cancelled {
             let _ = runs.finish_cancelled(run_id).await;
             info!(slug = %slug, "scan run cancelled by user");
-            return;
+            return RunOutcome::Cancelled;
         }
         if let Some(err) = exec.spawn_error {
             let _ = runs.finish_failed(run_id, &err).await;
             self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, %err, "scan spawn failed");
-            return;
+            return RunOutcome::Failed;
         }
         if !exec.exit_ok {
             let msg = if exec.stderr.is_empty() {
@@ -515,7 +948,7 @@ impl SurveillanceService {
             let _ = runs.finish_failed(run_id, &msg).await;
             self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, "scan run failed");
-            return;
+            return RunOutcome::Failed;
         }
 
         // Success — measure how many findings the scan touched during the run.
@@ -574,6 +1007,11 @@ impl SurveillanceService {
             .await;
 
         info!(slug = %slug, findings = delta, empty, "scan run success");
+        if empty {
+            RunOutcome::Empty
+        } else {
+            RunOutcome::Success
+        }
     }
 
     /// Track consecutive failures. After 3 in a row we just log loudly — a

@@ -254,9 +254,22 @@ export const getSurveillanceTranscript = (slug, runId) =>
   api.get(`/apps/${slug}/surveillance/runs/${runId}/transcript`);
 export const listSurveillanceRuns = (slug, params = {}) =>
   api.get(`/apps/${slug}/surveillance/runs`, { params });
+// HARD-delete a finding (irreversible — distinct from dismiss/resolve).
+export const deleteFinding = (slug, id) =>
+  api.post(`/apps/${slug}/findings/${id}/delete`);
 // The app's BUSINESS scan definition (label/prompt/cadence/gate/categories).
 export const getScan = (slug) =>
   api.get(`/apps/${slug}/surveillance/scan`);
+
+// Findings with an open resolution conversation right now (across all apps).
+export const getResolvingFindings = () => api.get('/surveillance/resolving');
+
+// ── Automatic sweep (app-by-app, 3 scans each; manual + scheduled) ──
+export const getSurveillanceSweep = () => api.get('/surveillance/sweep');
+export const startSurveillanceSweep = () => api.post('/surveillance/sweep');
+export const cancelSurveillanceSweep = () => api.post('/surveillance/sweep/cancel');
+export const getSweepSchedule = () => api.get('/surveillance/sweep/schedule');
+export const putSweepSchedule = (body) => api.put('/surveillance/sweep/schedule', body);
 
 // ========== Agent (Claude Agent SDK chat — session streaming) ==========
 // Démarre une SESSION (1er tour) : renvoie { run_id }. Le flux arrive ensuite par
