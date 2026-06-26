@@ -9,12 +9,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use atelier_apps::{AppRegistry, Visibility};
 use atelier_common::events::{EventBus, HomerouteRoutesEvent};
 use atelier_common::homeroute::{
-    FullSettings, HomerouteSettings, HomerouteStore, NewSettings, RouteRow,
+    FullSettings, HomerouteSettings, HomerouteStore, NewSettings, RouteRow, effective_env_name,
+    effective_public_url,
 };
 
 use super::homeroute::{CreateHost, HomerouteClient, HomerouteError};
@@ -56,11 +57,19 @@ impl std::fmt::Display for HrServiceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unavailable => write!(f, "homeroute integration unavailable (postgres down)"),
-            Self::Disabled => write!(f, "homeroute integration disabled — enable it in settings"),
+            Self::Disabled => write!(
+                f,
+                "liaison Homeroute non configurée — renseignez le token dans les Paramètres"
+            ),
             Self::NotFound(m) | Self::Ineligible(m) | Self::BadRequest(m) | Self::Upstream(m)
             | Self::Internal(m) => write!(f, "{m}"),
         }
     }
+}
+
+/// The link is "active" iff a bearer token is configured. No separate flag.
+fn linked(s: &FullSettings) -> bool {
+    s.bearer_token.as_deref().map(|t| !t.is_empty()).unwrap_or(false)
 }
 
 fn upstream(e: HomerouteError) -> HrServiceError {
@@ -80,6 +89,17 @@ pub struct TestResult {
     pub host_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Result of `POST /api/homeroute/register`.
+#[derive(Debug, Serialize)]
+pub struct RegistrationStatus {
+    pub registered: bool,
+    pub environment_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
 }
 
 /// One app's hostname state in the Settings table.
@@ -112,7 +132,9 @@ pub struct AppRouteView {
 /// Response of `GET /api/homeroute/app-routes`.
 #[derive(Debug, Serialize)]
 pub struct AppRoutesResponse {
-    pub enabled: bool,
+    /// True when a bearer token is configured (the link is "active"). There is
+    /// no separate enable flag — configured ⇒ active.
+    pub linked: bool,
     pub reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_domain: Option<String>,
@@ -190,13 +212,64 @@ impl HomerouteService {
         });
     }
 
-    /// Redacted link settings.
+    /// Redacted link settings. `environment_name` / `public_url` are filled with
+    /// their effective defaults so the UI always shows concrete values.
     pub async fn settings(&self) -> Result<HomerouteSettings, HrServiceError> {
-        self.store
+        let mut s = self
+            .store
             .get_settings_redacted()
             .await
             .map_err(internal)?
-            .ok_or(HrServiceError::Unavailable)
+            .ok_or(HrServiceError::Unavailable)?;
+        s.environment_name = Some(effective_env_name(s.environment_name.as_deref()));
+        s.public_url = Some(effective_public_url(s.public_url.as_deref()));
+        Ok(s)
+    }
+
+    /// Register (or refresh) this environment with Homeroute (`POST /api/atelier/register`).
+    /// Requires a bearer token configured (the link is "active"). Stamps `registered_at`.
+    pub async fn register(&self) -> Result<RegistrationStatus, HrServiceError> {
+        let settings = self.full_settings().await?;
+        if !linked(&settings) {
+            return Err(HrServiceError::BadRequest(
+                "token de liaison manquant — générez-le dans Homeroute → Environnements \
+                 puis collez-le ici"
+                    .into(),
+            ));
+        }
+        let name = effective_env_name(settings.environment_name.as_deref());
+        let url = effective_public_url(settings.public_url.as_deref());
+        let res = self
+            .client(&settings)
+            .register(&name, Some(&url), env!("CARGO_PKG_VERSION"))
+            .await
+            .map_err(upstream)?;
+        self.store.touch_registered().await.map_err(internal)?;
+        self.broadcast("", "registered");
+        Ok(RegistrationStatus {
+            registered: true,
+            environment_name: name,
+            base_domain: Some(res.base_domain).filter(|s| !s.is_empty()),
+            environment_id: res.environment_id,
+        })
+    }
+
+    /// Periodic registration loop (boot + every ~5 min). Silent no-op when the
+    /// link is disabled / no token / Postgres down; warns only on real upstream
+    /// failures. Spawned from `main` so this environment shows up "online" in
+    /// Homeroute's Environnements page.
+    pub async fn heartbeat_loop(&self) {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        loop {
+            match self.register().await {
+                Ok(s) => debug!(env = %s.environment_name, "homeroute heartbeat ok"),
+                Err(HrServiceError::Disabled)
+                | Err(HrServiceError::BadRequest(_))
+                | Err(HrServiceError::Unavailable) => {}
+                Err(e) => warn!(error = %e, "homeroute heartbeat failed"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        }
     }
 
     /// Update link settings (validated). Keeps the bearer token if absent.
@@ -231,7 +304,7 @@ impl HomerouteService {
     }
 
     /// List every Atelier app with its hostname state, reconciled against
-    /// Homeroute's live config when the integration is enabled.
+    /// Homeroute's live config when the link is configured (token present).
     pub async fn list_app_routes(&self) -> Result<AppRoutesResponse, HrServiceError> {
         let settings = self.full_settings().await?;
         let apps = self.registry.list().await;
@@ -244,7 +317,8 @@ impl HomerouteService {
             .map(|r| (r.slug.clone(), r))
             .collect();
 
-        let (reachable, base_domain, cfg, error) = if settings.enabled {
+        let is_linked = linked(&settings);
+        let (reachable, base_domain, cfg, error) = if is_linked {
             match self.client(&settings).get_config().await {
                 Ok(c) => (true, Some(c.base_domain.clone()), Some(c), None),
                 Err(e) => (false, None, None, Some(e.to_string())),
@@ -311,7 +385,7 @@ impl HomerouteService {
         }
 
         Ok(AppRoutesResponse {
-            enabled: settings.enabled,
+            linked: is_linked,
             reachable,
             base_domain,
             error,
@@ -327,7 +401,7 @@ impl HomerouteService {
         body: AssignBody,
     ) -> Result<AppRouteView, HrServiceError> {
         let settings = self.full_settings().await?;
-        if !settings.enabled {
+        if !linked(&settings) {
             return Err(HrServiceError::Disabled);
         }
         let app = self
@@ -350,6 +424,8 @@ impl HomerouteService {
             .to_string();
         validate_subdomain(&subdomain)?;
         let require_auth = body.require_auth;
+        // Label stamped on the host so Homeroute shows it as Atelier-managed.
+        let env_name = effective_env_name(settings.environment_name.as_deref());
 
         let client = self.client(&settings);
         let cfg = client.get_config().await.map_err(upstream)?;
@@ -363,6 +439,8 @@ impl HomerouteService {
                         "targetPort": app.port,
                         "requireAuth": require_auth,
                         "enabled": true,
+                        "managedBy": "atelier",
+                        "environmentName": env_name,
                     }),
                 )
                 .await
@@ -376,6 +454,8 @@ impl HomerouteService {
                     target_port: app.port,
                     require_auth,
                     enabled: true,
+                    managed_by: "atelier".to_string(),
+                    environment_name: env_name.clone(),
                 })
                 .await
                 .map_err(upstream)?
@@ -408,7 +488,7 @@ impl HomerouteService {
     /// Remove the hostname for `slug` (re-resolves the uuid by subdomain first).
     pub async fn remove(&self, slug: &str) -> Result<(), HrServiceError> {
         let settings = self.full_settings().await?;
-        if !settings.enabled {
+        if !linked(&settings) {
             return Err(HrServiceError::Disabled);
         }
         let subdomain = self.subdomain_for(slug).await?;
@@ -425,7 +505,7 @@ impl HomerouteService {
     /// Toggle the live `enabled` flag of `slug`'s hostname.
     pub async fn toggle(&self, slug: &str) -> Result<(), HrServiceError> {
         let settings = self.full_settings().await?;
-        if !settings.enabled {
+        if !linked(&settings) {
             return Err(HrServiceError::Disabled);
         }
         let subdomain = self.subdomain_for(slug).await?;
@@ -451,7 +531,7 @@ impl HomerouteService {
             _ => return,
         };
         if let Ok(Some(settings)) = self.store.get_settings_full().await {
-            if settings.enabled {
+            if linked(&settings) {
                 let client = self.client(&settings);
                 if let Ok(cfg) = client.get_config().await {
                     if let Some(host) = cfg.find_by_subdomain(&local.subdomain) {

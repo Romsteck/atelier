@@ -98,6 +98,10 @@ impl RpConfig {
 }
 
 /// Body of `POST /api/reverseproxy/hosts` (camelCase).
+///
+/// `managed_by`/`environment_name` are extra keys Homeroute persists verbatim
+/// (its `add_host` does `let mut host = body`) and the proxy/edge ignore — they
+/// only flag the host as Atelier-owned so Homeroute's UI can badge + lock it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateHost {
@@ -106,6 +110,10 @@ pub struct CreateHost {
     pub target_port: u16,
     pub require_auth: bool,
     pub enabled: bool,
+    /// Always `"atelier"`.
+    pub managed_by: String,
+    /// This environment's label (never empty — resolved by the service).
+    pub environment_name: String,
 }
 
 #[derive(Clone)]
@@ -202,6 +210,38 @@ impl HomerouteClient {
             .await
             .map(|_| ())
     }
+
+    /// `POST /api/atelier/register` — announce this environment (token-gated by
+    /// Homeroute ⇒ 401 here if no/invalid bearer). Doubles as a heartbeat.
+    pub async fn register(
+        &self,
+        name: &str,
+        url: Option<&str>,
+        version: &str,
+    ) -> Result<RegisterResult, HomerouteError> {
+        let endpoint = format!("{}/api/atelier/register", self.base_url);
+        let body = serde_json::json!({ "name": name, "url": url, "version": version });
+        let v = self.send(self.http.post(endpoint).json(&body)).await?;
+        Ok(RegisterResult {
+            environment_id: v
+                .get("environment")
+                .and_then(|e| e.get("id"))
+                .and_then(|x| x.as_str())
+                .map(String::from),
+            base_domain: v
+                .get("baseDomain")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+}
+
+/// Result of `POST /api/atelier/register`.
+#[derive(Debug, Clone)]
+pub struct RegisterResult {
+    pub environment_id: Option<String>,
+    pub base_domain: String,
 }
 
 fn truncate(s: &str) -> String {

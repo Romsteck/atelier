@@ -23,6 +23,7 @@ pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/settings", get(get_settings).put(set_settings))
         .route("/test", post(test))
+        .route("/register", post(register))
         .route("/app-routes", get(list_app_routes))
         .route(
             "/app-routes/{slug}",
@@ -77,6 +78,17 @@ async fn test(State(state): State<ApiState>) -> impl IntoResponse {
     }
     match state.homeroute.test().await {
         Ok(r) => (StatusCode::OK, Json(json!(r))).into_response(),
+        Err(e) => svc_err(e),
+    }
+}
+
+#[instrument(skip(state))]
+async fn register(State(state): State<ApiState>) -> impl IntoResponse {
+    if !state.homeroute.is_available() {
+        return err503();
+    }
+    match state.homeroute.register().await {
+        Ok(s) => (StatusCode::OK, Json(json!({ "status": s }))).into_response(),
         Err(e) => svc_err(e),
     }
 }

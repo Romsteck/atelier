@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS homeroute_settings (
     CONSTRAINT homeroute_settings_single CHECK (id = 1)
 );
 INSERT INTO homeroute_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+-- environment_name (v2 allégée) : étiquette de CET environnement Atelier, estampillée
+-- sur chaque host créé côté Homeroute (`managedBy:"atelier"` + `environmentName`) pour
+-- qu'il s'affiche comme « géré » dans l'UI revprox. NULL ⇒ fallback hostname au runtime.
+ALTER TABLE homeroute_settings ADD COLUMN IF NOT EXISTS environment_name TEXT;
+-- public_url : URL publique annoncée à Homeroute lors de l'enregistrement (lien
+-- retour cliquable dans la page Environnements). registered_at : dernier
+-- enregistrement réussi (affiché dans la page Paramètres). NULL ⇒ valeurs par défaut.
+ALTER TABLE homeroute_settings ADD COLUMN IF NOT EXISTS public_url TEXT;
+ALTER TABLE homeroute_settings ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------------
 -- homeroute_routes — liaison app Atelier (slug) → host Homeroute. C'est un CACHE

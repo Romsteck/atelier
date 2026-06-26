@@ -192,6 +192,15 @@ async fn main() -> Result<()> {
         "apps_proxy: prefix-preserving (no-strip) slugs"
     );
 
+    // Heartbeat Homeroute : enregistre CET environnement auprès de Homeroute au
+    // boot puis toutes les ~5 min, pour qu'il apparaisse « en ligne » dans la page
+    // Environnements. No-op silencieux si la liaison est désactivée / sans token /
+    // Postgres indisponible (la boucle vit jusqu'au shutdown du process).
+    {
+        let hr = state.homeroute.clone();
+        tokio::spawn(async move { hr.heartbeat_loop().await });
+    }
+
     // Boot env reconcile sweep. Renders each app's `.env` as a clean projection
     // of (platform-computed + user) env: injects the dataverse/logging contract,
     // GCs vestigial vars (HR_FLOW_*, …), imports any residual hand-seeded vars

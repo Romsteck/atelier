@@ -67,6 +67,7 @@ export const updateDdnsConfig = (config) => api.put('/ddns/config', config);
 export const getHomerouteSettings = () => api.get('/homeroute/settings');
 export const setHomerouteSettings = (body) => api.put('/homeroute/settings', body);
 export const testHomeroute = () => api.post('/homeroute/test');
+export const registerHomeroute = () => api.post('/homeroute/register');
 export const getHomerouteAppRoutes = () => api.get('/homeroute/app-routes');
 export const assignHomerouteRoute = (slug, body = {}) =>
   api.post(`/homeroute/app-routes/${slug}`, body);

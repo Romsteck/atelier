@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Settings2, RefreshCw, Globe, Link2, Plug, CheckCircle2, XCircle,
-  AlertTriangle, ExternalLink, Power, Trash2, RotateCw,
+  AlertTriangle, ExternalLink, Power, Trash2, RotateCw, Server, KeyRound,
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
 import useWebSocket from '../hooks/useWebSocket';
 import {
-  getHomerouteSettings, setHomerouteSettings, testHomeroute,
+  getHomerouteSettings, setHomerouteSettings, testHomeroute, registerHomeroute,
   getHomerouteAppRoutes, assignHomerouteRoute, removeHomerouteRoute, toggleHomerouteRoute,
 } from '../api/client';
 
@@ -17,13 +17,22 @@ const FIELD = 'w-full rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2
 const LBL = 'mb-1 block text-xs font-medium text-gray-400';
 const CARD = 'rounded-xl border border-gray-700/70 bg-gray-800/50 p-5';
 
+function fmtTime(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d.toLocaleString() : null;
+}
+
 export default function Settings() {
   const [settings, setSettings] = useState(null);
   const [routes, setRoutes] = useState(null);
-  const [form, setForm] = useState({ base_url: '', enabled: false });
+  const [form, setForm] = useState({
+    base_url: '', environment_name: '', public_url: '', bearer_token: '',
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [registering, setRegistering] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState({});            // per-slug action in flight
@@ -45,7 +54,13 @@ export default function Settings() {
       if (sd) {
         setSettings(sd);
         // Sync the form from the server unless the user has unsaved edits.
-        setForm((f) => (f._touched ? f : { base_url: sd.base_url, enabled: sd.enabled }));
+        // bearer_token is write-only → never seeded back (stays blank).
+        setForm((f) => (f._touched ? f : {
+          base_url: sd.base_url || '',
+          environment_name: sd.environment_name || '',
+          public_url: sd.public_url || '',
+          bearer_token: '',
+        }));
       }
       if (r?.data) setRoutes(r.data);
     } finally {
@@ -55,7 +70,7 @@ export default function Settings() {
 
   useEffect(() => { reload(); }, [reload]);
 
-  // Live: any route/settings change rebroadcasts → reload the table.
+  // Live: any route/settings/registration change rebroadcasts → reload.
   useWebSocket({ 'homeroute:routes': () => reload() });
 
   // Seed per-row subdomain inputs from the server once (don't clobber edits).
@@ -74,8 +89,13 @@ export default function Settings() {
   async function saveSettings() {
     setSaving(true);
     try {
-      await setHomerouteSettings({ base_url: form.base_url, enabled: form.enabled });
-      setForm((f) => ({ ...f, _touched: false }));
+      await setHomerouteSettings({
+        base_url: form.base_url,
+        environment_name: form.environment_name,
+        public_url: form.public_url,
+        bearer_token: form.bearer_token, // empty ⇒ serveur conserve l'existant
+      });
+      setForm((f) => ({ ...f, _touched: false, bearer_token: '' }));
       flash('ok', 'Liaison enregistrée');
       await reload();
     } catch (e) {
@@ -95,6 +115,20 @@ export default function Settings() {
       setTestResult({ reachable: false, error: apiErr(e) });
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function doRegister() {
+    setRegistering(true);
+    try {
+      const res = await registerHomeroute();
+      const name = res.data?.status?.environment_name || form.environment_name;
+      flash('ok', `Rattaché à Homeroute en tant que « ${name} »`);
+      await reload();
+    } catch (e) {
+      flash('error', apiErr(e));
+    } finally {
+      setRegistering(false);
     }
   }
 
@@ -118,12 +152,13 @@ export default function Settings() {
   const toggle = (a) => withBusy(a.slug, () => toggleHomerouteRoute(a.slug));
 
   const baseDomain = routes?.base_domain || '';
-  const integrationOn = !!routes?.enabled;
   const reachable = !!routes?.reachable;
+  const hasToken = !!settings?.has_bearer_token;
+  const configured = hasToken;            // configuré ⇒ actif (pas de toggle séparé)
+  const registeredAt = fmtTime(settings?.registered_at);
 
   const sortedApps = useMemo(() => {
     if (!routes?.apps) return [];
-    // Éligibles d'abord, puis par nom.
     return [...routes.apps].sort((x, y) =>
       (Number(y.eligible) - Number(x.eligible)) || x.name.localeCompare(y.name));
   }, [routes]);
@@ -153,49 +188,107 @@ export default function Settings() {
         </div>
       )}
 
-      {/* ── Liaison Homeroute ─────────────────────────────────────────── */}
+      {/* ── Identité & liaison ─────────────────────────────────────────── */}
       <section className={CARD}>
         <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
-          <Plug className="h-4 w-4 text-blue-400" /> Liaison Reverse Proxy Homeroute
+          <Server className="h-4 w-4 text-blue-400" /> Identité & liaison Homeroute
         </h2>
         <p className="mb-4 text-xs text-gray-500">
-          Atelier appelle l'API de Homeroute pour publier les apps en sous-domaine
-          (DNS + TLS <code>*.{baseDomain || 'mynetwk.biz'}</code> automatiques).
+          Cet environnement Atelier se déclare auprès du reverse proxy Homeroute et publie
+          les apps en sous-domaine (DNS + TLS <code>*.{baseDomain || 'mynetwk.biz'}</code> auto).
+          Le <strong>token</strong> s'obtient dans Homeroute → <em>Environnements</em>.
         </p>
 
-        <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-end">
-          <div>
-            <label className={LBL}>URL de hr-api</label>
-            <input
-              className={FIELD}
-              value={form.base_url}
-              onChange={setField('base_url')}
-              placeholder="http://127.0.0.1:4000"
-              spellCheck={false}
-            />
+        <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className={LBL}>Nom de cet environnement</label>
+              <input className={FIELD} value={form.environment_name} onChange={setField('environment_name')}
+                placeholder="medion" spellCheck={false} />
+            </div>
+            <div>
+              <label className={LBL}>URL publique (lien retour)</label>
+              <input className={FIELD} value={form.public_url} onChange={setField('public_url')}
+                placeholder="https://atelier.mynetwk.biz" spellCheck={false} />
+            </div>
+            <div>
+              <label className={LBL}>URL de hr-api</label>
+              <input className={FIELD} value={form.base_url} onChange={setField('base_url')}
+                placeholder="http://127.0.0.1:4000" spellCheck={false} />
+            </div>
+            <div>
+              <label className={LBL}>
+                Token de liaison
+                {hasToken && (
+                  <span className="ml-2 inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-300">
+                    <KeyRound className="h-3 w-3" /> configuré
+                  </span>
+                )}
+              </label>
+              <input className={FIELD} type="password" autoComplete="off" value={form.bearer_token}
+                onChange={setField('bearer_token')}
+                placeholder={hasToken ? '•••••••• (laisser vide pour conserver)' : 'collez le token de Homeroute'}
+                spellCheck={false} />
+            </div>
           </div>
-          <label className="flex items-center gap-2 pb-2 text-sm text-gray-200">
-            <input type="checkbox" checked={!!form.enabled} onChange={setField('enabled')} className="h-4 w-4" />
-            Activer la liaison
-          </label>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+        <div className="mt-4 flex items-center gap-3">
           <Button onClick={saveSettings} loading={saving}>Enregistrer</Button>
+          <span className="text-xs text-gray-500">
+            La liaison est active dès qu'un token est renseigné.
+          </span>
+        </div>
+      </section>
+
+      {/* ── Connexion / rattachement ───────────────────────────────────── */}
+      <section className={CARD}>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
+          <Plug className="h-4 w-4 text-blue-400" /> Connexion
+        </h2>
+        <p className="mb-4 text-xs text-gray-500">
+          S'enregistrer rattache cet environnement à Homeroute (visible dans sa page
+          <em> Environnements</em>). Un heartbeat le maintient « en ligne ».
+        </p>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={doRegister} loading={registering} disabled={!configured}>
+            <Plug className="h-4 w-4" /> Connecter / S'enregistrer
+          </Button>
           <Button onClick={doTest} variant="secondary" loading={testing}>
-            <Plug className="h-4 w-4" /> Tester la connexion
+            <RotateCw className="h-4 w-4" /> Tester la connexion
           </Button>
           {testResult && (
             testResult.reachable ? (
               <span className="inline-flex items-center gap-1.5 text-sm text-emerald-700 dark:text-emerald-300">
                 <CheckCircle2 className="h-4 w-4" />
-                Connecté — domaine <code>{testResult.base_domain}</code>, {testResult.host_count} route(s)
+                Joignable — domaine <code>{testResult.base_domain}</code>, {testResult.host_count} route(s)
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 text-sm text-red-700 dark:text-red-300">
                 <XCircle className="h-4 w-4" /> Injoignable — {testResult.error}
               </span>
             )
+          )}
+        </div>
+
+        {/* Bandeau de statut de rattachement */}
+        <div className="mt-4 text-sm">
+          {!configured ? (
+            <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="h-4 w-4" /> Non configuré — générez le token dans Homeroute → Environnements et collez-le ci-dessus.
+            </span>
+          ) : registeredAt ? (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-4 w-4" />
+              Rattaché en tant que <code>{settings?.environment_name}</code>
+              {baseDomain && <> · domaine <code>{baseDomain}</code></>}
+              <span className="text-gray-500">· enregistré {registeredAt}</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-gray-400">
+              <XCircle className="h-4 w-4" /> Non rattaché — cliquez sur « Connecter ».
+            </span>
           )}
         </div>
       </section>
@@ -207,15 +300,15 @@ export default function Settings() {
         </h2>
         <p className="mb-4 text-xs text-gray-500">
           Publie chaque app sur <code>{'{sous-domaine}'}.{baseDomain || 'mynetwk.biz'}</code> →
-          <code> 127.0.0.1:{'{port}'}</code> via Homeroute.
+          <code> 127.0.0.1:{'{port}'}</code> via Homeroute (route gérée par cet environnement).
         </p>
 
-        {!integrationOn && (
+        {!configured && (
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-200">
-            <AlertTriangle className="h-4 w-4 shrink-0" /> Liaison désactivée — activez-la ci-dessus pour gérer les hostnames.
+            <AlertTriangle className="h-4 w-4 shrink-0" /> Aucun token configuré — renseignez-le ci-dessus pour gérer les hostnames.
           </div>
         )}
-        {integrationOn && !reachable && (
+        {configured && !reachable && (
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-700 dark:text-red-200">
             <XCircle className="h-4 w-4 shrink-0" /> Homeroute injoignable{routes?.error ? ` — ${routes.error}` : ''}. Vérifiez l'URL et que hr-api tourne.
           </div>
@@ -234,10 +327,9 @@ export default function Settings() {
             <tbody className="divide-y divide-gray-800">
               {sortedApps.map((a) => {
                 const rowBusy = !!busy[a.slug];
-                const canAct = integrationOn && reachable && a.eligible;
+                const canAct = configured && reachable && a.eligible;
                 return (
                   <tr key={a.slug} className={a.eligible ? '' : 'opacity-60'}>
-                    {/* App */}
                     <td className="py-3 pr-3 align-top">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-gray-100">{a.name}</span>
@@ -251,7 +343,6 @@ export default function Settings() {
                       </div>
                     </td>
 
-                    {/* Subdomain / hostname */}
                     <td className="py-3 pr-3 align-top">
                       {a.eligible ? (
                         <div className="flex items-center gap-1">
@@ -279,7 +370,6 @@ export default function Settings() {
                       )}
                     </td>
 
-                    {/* State */}
                     <td className="py-3 pr-3 align-top">
                       {a.assigned ? (
                         <div className="flex flex-col gap-1">
@@ -300,7 +390,6 @@ export default function Settings() {
                       )}
                     </td>
 
-                    {/* Actions */}
                     <td className="py-3 pl-3 align-top">
                       <div className="flex items-center justify-end gap-1.5">
                         {a.assigned ? (
