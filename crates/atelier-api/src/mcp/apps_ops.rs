@@ -105,6 +105,9 @@ pub struct AppsContext {
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Broadcast channel for build progress events.
     pub app_build_tx: broadcast::Sender<AppBuildEvent>,
+    /// Remontées plateforme (`atelier_meta.platform_issues`) — purgées au delete
+    /// d'app pour ne pas laisser de remontées orphelines dans le triage dev.
+    pub issues: atelier_common::issue_store::PlatformIssueStore,
 }
 
 impl AppsContext {
@@ -126,6 +129,7 @@ impl AppsContext {
             base_domain: state.context_generator.base_domain.clone(),
             build_locks: state.build_locks.clone(),
             app_build_tx: state.events.app_build.clone(),
+            issues: state.issues.clone(),
         }
     }
 
@@ -499,6 +503,10 @@ impl AppsContext {
         if let Err(e) = self.supervisor.port_registry.release(&slug).await {
             warn!(slug = %slug, error = %e, "AppDelete: port release failed");
         }
+        // 5. Purge des remontées plateforme de l'app (best-effort). WHY même quand
+        // keep_data : ce sont des frictions PLATEFORME, pas de la donnée d'app ;
+        // une app supprimée n'a plus de chat qui les contextualise.
+        self.issues.delete_by_slug(&slug).await;
         if !keep_data {
             let dir = app.app_dir();
             if let Err(e) = tokio::fs::remove_dir_all(&dir).await {

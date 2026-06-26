@@ -84,6 +84,35 @@ CREATE INDEX IF NOT EXISTS doc_entries_app_idx  ON doc_entries (app_id);
 CREATE INDEX IF NOT EXISTS doc_entries_type_idx ON doc_entries (app_id, doc_type);
 
 -- ---------------------------------------------------------------------------
+-- platform_issues — remontées de frictions PLATEFORME signalées par les chats
+-- Claude Code des apps (Studio) via la skill `0-report-issue`. WHY centralisé
+-- ici (et non dans `{app}/src/CLAUDE_ISSUES.json`) : la feature concerne des
+-- bugs de la PLATEFORME, pas des apps — le store appartient donc au control-
+-- plane Atelier, pas à l'arbre source d'une app. L'ancien fichier per-app a été
+-- rapatrié ici une fois puis supprimé (cf. issue_store::backfill_from_files).
+--   slug     = app émettrice (pas de FK : même raison que homeroute_routes —
+--              le hook AppDelete purge explicitement, évite une dépendance
+--              d'ordre au boot/backfill).
+--   status   = open | resolved | dismissed
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS platform_issues (
+    id          TEXT         PRIMARY KEY,
+    slug        TEXT         NOT NULL,
+    area        TEXT         NOT NULL DEFAULT 'other',
+    severity    TEXT         NOT NULL DEFAULT 'medium',
+    title       TEXT         NOT NULL,
+    context     TEXT,
+    tried       TEXT,
+    status      TEXT         NOT NULL DEFAULT 'open',
+    note        TEXT,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS platform_issues_status_idx ON platform_issues (status);
+CREATE INDEX IF NOT EXISTS platform_issues_slug_idx   ON platform_issues (slug);
+
+-- ---------------------------------------------------------------------------
 -- ---------------------------------------------------------------------------
 -- homeroute_settings — singleton de configuration de la liaison vers le reverse
 -- proxy Homeroute (hr-api). Atelier appelle l'API EXISTANTE de Homeroute

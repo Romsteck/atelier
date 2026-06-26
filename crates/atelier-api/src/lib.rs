@@ -94,6 +94,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/apps", routes::agent::app_router())
         .nest("/apps", routes::source::app_router())
         .nest("/apps", routes::issues::app_router())
+        .nest("/issues", routes::issues::platform_router())
         .nest("/agent", routes::agent::global_router())
         .nest("/backup", routes::backup::router())
         .nest("/homeroute", routes::homeroute::router())

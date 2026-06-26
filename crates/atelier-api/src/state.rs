@@ -8,6 +8,7 @@ use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
 use atelier_common::agent_ui_state::OpenTabsStore;
 use atelier_common::events::EventBus;
+use atelier_common::issue_store::PlatformIssueStore;
 use atelier_common::task_store::TaskStore;
 
 #[derive(Clone)]
@@ -31,6 +32,12 @@ pub struct ApiState {
     /// per app, in `atelier_meta`. Source of truth for cross-PC tab sync; pairs
     /// with the `agent_open_tabs` WS broadcast. No-op when Postgres is down.
     pub open_tabs: OpenTabsStore,
+
+    /// Remontées plateforme (CLAUDE_ISSUES) signalées par les chats Claude Code
+    /// des apps, centralisées dans `atelier_meta.platform_issues` (plus aucun
+    /// fichier per-app). Endpoints `POST /api/apps/{slug}/issues` (report) +
+    /// `/api/issues*` (triage dev). No-op/vide quand Postgres est down.
+    pub issues: PlatformIssueStore,
 
     // Dataverse
     pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
@@ -86,6 +93,7 @@ impl ApiState {
         dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
         task_store: Arc<TaskStore>,
         open_tabs: OpenTabsStore,
+        issues: PlatformIssueStore,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
         events: Arc<EventBus>,
@@ -107,6 +115,7 @@ impl ApiState {
             apps_runtime_root,
             task_store,
             open_tabs,
+            issues,
             dv,
             events,
             app_registry,

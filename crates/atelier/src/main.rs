@@ -94,6 +94,12 @@ async fn main() -> Result<()> {
         Arc::new(atelier_common::task_store::TaskStore::new(meta_pool.clone()).await);
     // Studio open-tabs store (cross-PC tab sync). Degrades to no-op without the pool.
     let open_tabs = atelier_common::agent_ui_state::OpenTabsStore::new(meta_pool.clone());
+    // Remontées plateforme (CLAUDE_ISSUES) — store central dans atelier_meta.
+    // One-shot : rapatrie les anciens fichiers per-app `{slug}/src/CLAUDE_ISSUES.json`
+    // vers la base PUIS les supprime (la feature concerne des bugs plateforme,
+    // pas des apps → rien ne doit subsister au niveau projet). Idempotent.
+    let issues = atelier_common::issue_store::PlatformIssueStore::new(meta_pool.clone());
+    issues.backfill_from_files(&apps_src_root).await;
     let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
     // Apps supervisor wiring. The registries (apps + ports) live in the shared
@@ -175,6 +181,7 @@ async fn main() -> Result<()> {
         dv,
         task_store,
         open_tabs,
+        issues,
         apps_src_root,
         apps_runtime_root,
         events,

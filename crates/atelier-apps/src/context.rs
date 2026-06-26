@@ -1358,7 +1358,7 @@ fn render_report_issues_rule_md(app: &Application) -> String {
     format!(
         "# Remonter les soucis plateforme à Atelier (`report-issues`)\n\
          \n\
-         > Quand un souci que tu rencontres relève de **la plateforme Atelier** (et non du code de ton app `{slug}`), tu DOIS le remonter via la skill `0-report-issue`. Ces remontées sont écrites dans `CLAUDE_ISSUES.json` (à la racine du projet) et relues par le développeur d'Atelier. Sans ça le souci se perd : tu contournes en silence et personne ne le corrige jamais.\n\
+         > Quand un souci que tu rencontres relève de **la plateforme Atelier** (et non du code de ton app `{slug}`), tu DOIS le remonter via la skill `0-report-issue`. Ces remontées sont **centralisées côté Atelier** (dans son control-plane, **hors de ton dépôt**) et relues par le développeur d'Atelier. Sans ça le souci se perd : tu contournes en silence et personne ne le corrige jamais.\n\
          \n\
          ## QUAND remonter\n\
          \n\
@@ -1378,8 +1378,8 @@ fn render_report_issues_rule_md(app: &Application) -> String {
          \n\
          ## COMMENT remonter\n\
          \n\
-         1. Invoque la skill **`0-report-issue`** (elle appelle un endpoint Atelier qui écrit le fichier).\n\
-         2. **N'édite JAMAIS `CLAUDE_ISSUES.json` à la main** : Atelier en est l'unique writer (id + horodatage + statut estampés côté serveur). Un edit manuel risque de corrompre le tableau JSON.\n\
+         1. Invoque la skill **`0-report-issue`** (elle appelle un endpoint Atelier qui enregistre la remontée côté plateforme).\n\
+         2. **Ne stocke rien toi-même** (pas de fichier dans ton dépôt) : Atelier est l'unique writer, il estampe id + horodatage + statut côté serveur, dans son control-plane centralisé.\n\
          3. **Dis-le à l'utilisateur** en une phrase (« j'ai remonté un souci plateforme : … ») — pas de remontée silencieuse.\n\
          \n\
          ## Barème\n\
@@ -1404,7 +1404,7 @@ fn render_report_issue_skill(app: &Application) -> String {
          \n\
          # Remonter un souci plateforme — `{slug}`\n\
          \n\
-         Envoie une remontée à Atelier : la skill appelle `POST /api/apps/{slug}/issues` et **Atelier** écrit l'entrée dans `CLAUDE_ISSUES.json` (racine du projet). Tu ne touches jamais le JSON toi-même. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
+         Envoie une remontée à Atelier : la skill appelle `POST /api/apps/{slug}/issues` et **Atelier** l'enregistre dans son control-plane (centralisé, **hors de ton dépôt**). Tu ne stockes rien toi-même. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
          \n\
          ## Commande\n\
          \n\
@@ -1428,7 +1428,7 @@ fn render_report_issue_skill(app: &Application) -> String {
          \n\
          ## Interdits\n\
          \n\
-         - **JAMAIS** éditer `CLAUDE_ISSUES.json` directement — Atelier en est l'unique writer.\n\
+         - **Ne stocke pas la remontée toi-même** (aucun fichier dans le dépôt) — Atelier la centralise côté plateforme.\n\
          - Ne remonte pas un bug interne de l'app ici (corrige-le ou note-le dans `CLAUDE.md`).\n",
         slug = app.slug,
     )
@@ -1439,7 +1439,7 @@ fn render_report_issue_skill(app: &Application) -> String {
 fn render_report_issue_script(app: &Application) -> String {
     let template = r#"#!/usr/bin/env bash
 # Remonte un souci PLATEFORME de l'app `__SLUG__` vers Atelier.
-# Appelle POST /api/apps/__SLUG__/issues ; Atelier écrit CLAUDE_ISSUES.json (unique writer).
+# Appelle POST /api/apps/__SLUG__/issues ; Atelier centralise la remontée (control-plane, hors dépôt).
 # Géré par Atelier — ne pas éditer (régénéré à chaque AppUpdate).
 set -euo pipefail
 API_BASE="${API_BASE:-http://127.0.0.1:4100}"
