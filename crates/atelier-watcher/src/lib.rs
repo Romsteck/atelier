@@ -81,6 +81,9 @@ pub struct TranscriptLine {
     pub kind: String,
     /// Monotonic line index within the run (lets the UI order/dedup).
     pub seq: u64,
+    /// Wall-clock emit time (unix millis). Lets the UI compute per-step duration
+    /// even when replaying a buffered transcript (where client arrival time is lost).
+    pub ts: i64,
     pub line: String,
 }
 

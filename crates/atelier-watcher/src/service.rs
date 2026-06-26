@@ -912,6 +912,7 @@ impl SurveillanceService {
                     slug: slug_line.clone(),
                     kind: run_kind.clone(),
                     seq,
+                    ts: Utc::now().timestamp_millis(),
                     line: line.to_string(),
                 };
                 {

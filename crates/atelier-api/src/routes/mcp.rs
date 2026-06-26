@@ -242,6 +242,7 @@ fn tool_definitions_surveillance() -> Value {
         { "name": "findings_resolve", "description": "Mark a finding resolved (records applied_fix memory).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "id": { "type": "integer" }, "commit_sha": { "type": "string" } }, "required": ["slug", "id"] } },
         { "name": "findings_delete", "description": "HARD-delete an obsolete finding (the underlying cause no longer exists: file/function removed, refactored away, or a false positive the code no longer triggers). Irreversible — prefer findings_resolve when a fix was committed, findings_dismiss for a false positive worth remembering. Scoped to the given app + scan kind.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["security", "code_review", "business"] }, "id": { "type": "integer" } }, "required": ["slug", "kind", "id"] } },
         { "name": "surveillance_run", "description": "Trigger a scan run for one of the app's three scans (`kind`: security | code_review | business). Async — findings appear via findings_list once the scan finishes.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string", "enum": ["security", "code_review", "business"] } }, "required": ["slug", "kind"] } },
+        { "name": "scan_progress", "description": "Report your current step to the live surveillance UI. Call it at the START of each phase, before doing that phase's work. Pure progress signpost — NO side effect; it only drives the live step list the user watches. step=ordinal (1,2,…), total=your planned step count, label=short step name (≤40 chars, e.g. 'Triage des findings', 'Analyse sécurité', 'Rapport').", "inputSchema": { "type": "object", "properties": { "step": { "type": "integer", "minimum": 1 }, "total": { "type": "integer", "minimum": 1 }, "label": { "type": "string" } }, "required": ["step", "label"] } },
         { "name": "memory_get", "description": "Read an app's surveillance memory.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" } }, "required": ["slug"] } },
         { "name": "memory_remember", "description": "Store a surveillance memory entry for an app (upsert by kind+key).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" }, "key": { "type": "string" }, "value": {} }, "required": ["slug", "kind", "key", "value"] } },
         { "name": "runs_list", "description": "List recent surveillance runs for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } },
@@ -467,7 +468,8 @@ fn is_readonly_tool(name: &str) -> bool {
         // Surveillance surface (meta-DB only) + forensic read
         "findings_list" | "findings_upsert" | "findings_dismiss" | "findings_resolve"
             | "findings_delete"
-            | "surveillance_run" | "memory_get" | "memory_remember" | "runs_list" | "pm_query"
+            | "surveillance_run" | "scan_progress" | "memory_get" | "memory_remember"
+            | "runs_list" | "pm_query"
             | "scan_get"
             // Read-only schema/counts (no row data except via pm_query)
             | "db_tables" | "db_schema" | "db_overview" | "db_count_rows" | "db_get_schema"
@@ -784,6 +786,7 @@ async fn handle_tools_call(
         "findings_resolve" => tool_findings_resolve(id, &arguments, state).await,
         "findings_delete" => tool_findings_delete(id, &arguments, state).await,
         "surveillance_run" => tool_surveillance_run(id, &arguments, state).await,
+        "scan_progress" => tool_scan_progress(id, &arguments).await,
         "memory_get" => tool_memory_get(id, &arguments, state).await,
         "memory_remember" => tool_memory_remember(id, &arguments, state).await,
         "runs_list" => tool_runs_list(id, &arguments, state).await,
@@ -2647,6 +2650,18 @@ async fn tool_findings_delete(id: Value, args: &Value, state: &McpState) -> Valu
         Ok(None) => tool_error(id, "finding not found for this app + kind"),
         Err(e) => tool_error(id, &format!("findings_delete failed: {e}")),
     }
+}
+
+/// Pure progress signpost for the live surveillance UI. There is NO DB side
+/// effect: the value of this tool is the `tool_use` event itself flowing into
+/// the run's `surveillance:transcript` stream, which the frontend parses to
+/// render a step list. Only reachable in the read-only surveillance scope (the
+/// scan-agent) — `slug` is irrelevant, so it takes none.
+async fn tool_scan_progress(id: Value, args: &Value) -> Value {
+    let step = args.get("step").and_then(|v| v.as_i64()).unwrap_or(0);
+    let total = args.get("total").and_then(|v| v.as_i64());
+    let label = args.get("label").and_then(|v| v.as_str()).unwrap_or("");
+    tool_success(id, json!({ "ok": true, "step": step, "total": total, "label": label }))
 }
 
 async fn tool_surveillance_run(id: Value, args: &Value, state: &McpState) -> Value {

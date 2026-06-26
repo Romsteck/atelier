@@ -9,6 +9,32 @@ use crate::memory::Memory;
 use crate::scandef::{Gate, ScanDef, watermark_key};
 use crate::MAX_OPEN_FINDINGS;
 
+/// Universal progress-reporting preamble prepended to EVERY scan prompt
+/// (security, code_review, AND the agent-authored business scan). WHY here and
+/// not in each prompt file: `build_prompt` is the single chokepoint that also
+/// wraps the business prompt — which the project's agent authors and we don't
+/// control — so injecting it here guarantees all three kinds drive the live
+/// step-list UI. The agent reports each phase via the `scan_progress` MCP tool;
+/// its `tool_use` events flow through the run's transcript stream, which the
+/// frontend parses into a step list (no other side effect).
+const PROGRESS_PREAMBLE: &str = r#"# Progression (OBLIGATOIRE — appelle `scan_progress`)
+
+Au **début de chaque étape** de ton travail, appelle le tool `scan_progress(step, total, label)` AVANT d'en faire le travail :
+- `step` = numéro de l'étape (1, 2, 3, …) ;
+- `total` = ton nombre d'étapes prévu (estimation, ajustable) ;
+- `label` = nom court de l'étape (≤ 40 caractères, ex. « Triage des findings », « Analyse sécurité », « Rapport »).
+
+L'utilisateur ne voit en direct QUE ces étapes — sans ces appels, ta progression est invisible. Découpage recommandé (adapte le nombre et les libellés à TON scan) :
+1. **Triage** des findings déjà ouvertes ;
+2. **Analyse** du code / des données ;
+3. **Rapport** des nouvelles findings.
+
+Appelle `scan_progress` au plus tôt (l'étape 1 dès le démarrage), puis à chaque transition d'étape.
+
+---
+
+"#;
+
 /// Outcome of one scan subprocess invocation. The runner does NOT parse findings
 /// from stdout — the agent writes them via the MCP `findings_upsert` tool and we
 /// observe the DB delta afterwards. This struct only carries process-level
@@ -67,7 +93,8 @@ pub fn build_prompt(
     };
     let memory_block = format_memory(memory);
     let remaining = (MAX_OPEN_FINDINGS - open_now).max(0);
-    scan.prompt
+    let body = scan
+        .prompt
         .replace("{{SLUG}}", &scan.slug)
         .replace("{{STACK}}", stack)
         .replace("{{CATEGORIES}}", &categories_block)
@@ -75,7 +102,8 @@ pub fn build_prompt(
         .replace("{{MEMORY}}", &memory_block)
         .replace("{{MAX_OPEN}}", &MAX_OPEN_FINDINGS.to_string())
         .replace("{{OPEN_COUNT}}", &open_now.to_string())
-        .replace("{{REMAINING}}", &remaining.to_string())
+        .replace("{{REMAINING}}", &remaining.to_string());
+    format!("{PROGRESS_PREAMBLE}{body}")
 }
 
 /// Render the relevant memory entries as a context block, capped to ~5KB.
