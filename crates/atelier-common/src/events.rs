@@ -42,6 +42,9 @@ pub struct EventBus {
     /// Studio open-tabs state change (a PUT to `/agent/open-tabs` → websocket) so
     /// every connected browser (incl. other PCs) re-syncs its open tab set live.
     pub agent_open_tabs: broadcast::Sender<AgentOpenTabsEvent>,
+    /// Studio top-level tab selection change (a PUT to `/studio/tab` → websocket)
+    /// so an already-open Studio tab switches live (homepage deep-link path).
+    pub studio_tab: broadcast::Sender<StudioTabEvent>,
     /// Homeroute reverse-proxy route change (assign/remove/toggle/settings →
     /// websocket) so the Settings page reloads its app-routes view live.
     pub homeroute_routes: broadcast::Sender<HomerouteRoutesEvent>,
@@ -68,6 +71,7 @@ impl EventBus {
             app_todos: broadcast::channel(64).0,
             agent: broadcast::channel(2048).0,
             agent_open_tabs: broadcast::channel(64).0,
+            studio_tab: broadcast::channel(64).0,
             homeroute_routes: broadcast::channel(16).0,
         }
     }
@@ -362,6 +366,20 @@ pub struct AgentOpenTabsEvent {
     pub tabs: serde_json::Value,
     #[serde(default)]
     pub active: Option<String>,
+}
+
+/// Studio TOP-LEVEL tab selection for one app (code/preview/db/…/surveillance),
+/// persisted per app in `agent_open_tabs.studio_tab`. Emitted on every
+/// `PUT /api/apps/{slug}/studio/tab` so an ALREADY-OPEN Studio tab (which holds a
+/// live WS connection) switches instantly — this is how a homepage deep-link
+/// reaches a Studio tab without any URL/cross-tab trick. `kind` carries the
+/// surveillance sub-scan when the deep-link targets it (else None).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudioTabEvent {
+    pub slug: String,
+    pub tab: String,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// Homeroute route change event (homeroute service → websocket). Coarse: the

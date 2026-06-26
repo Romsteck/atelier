@@ -25,7 +25,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, instrument, warn};
 
-use atelier_common::events::{AgentEvent, AgentOpenTabsEvent};
+use atelier_common::events::{AgentEvent, AgentOpenTabsEvent, StudioTabEvent};
 
 use crate::state::ApiState;
 
@@ -156,6 +156,13 @@ pub fn app_router() -> Router<ApiState> {
             "/{slug}/agent/open-tabs",
             get(get_open_tabs).put(put_open_tabs),
         )
+        // Onglet TOP-NIVEAU du Studio par app (code/preview/…/surveillance) :
+        // source de vérité serveur + porte le deep-link homepage→Studio via le
+        // broadcast WS `studio:tab` (un onglet déjà ouvert bascule live).
+        .route(
+            "/{slug}/studio/tab",
+            get(get_studio_tab).put(put_studio_tab),
+        )
 }
 
 /// Routes globales, montées sous `/api/agent` :
@@ -208,6 +215,50 @@ async fn put_open_tabs(
         active: body.active.clone(),
     });
     info!(slug = %slug, "open tabs updated");
+    Json(json!({ "ok": true })).into_response()
+}
+
+// --- Onglet top-niveau du Studio (sync cross-PC + deep-link homepage→Studio) ---
+// Le front seed l'onglet depuis son cache localStorage (rendu instantané), lit
+// CET état au montage (autoritaire, cross-PC), et reçoit les changements live via
+// `studio:tab` (un onglet DÉJÀ ouvert bascule sans rechargement). La homepage PUT
+// cet état avant d'ouvrir le Studio = le deep-link.
+
+#[derive(Deserialize)]
+struct StudioTabBody {
+    tab: String,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+#[instrument(skip(state))]
+async fn get_studio_tab(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
+    let (tab, kind) = state.open_tabs.get_studio_tab(&slug).await;
+    Json(json!({ "tab": tab, "kind": kind }))
+}
+
+#[instrument(skip(state, body))]
+async fn put_studio_tab(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(body): Json<StudioTabBody>,
+) -> impl IntoResponse {
+    if body.tab.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "tab is required" })))
+            .into_response();
+    }
+    if let Err(e) = state.open_tabs.set_studio_tab(&slug, &body.tab, body.kind.as_deref()).await {
+        error!(slug = %slug, error = %e, "studio_tab set failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            .into_response();
+    }
+    // Broadcast → un onglet Studio déjà ouvert de cette app bascule en direct.
+    let _ = state.events.studio_tab.send(StudioTabEvent {
+        slug: slug.clone(),
+        tab: body.tab.clone(),
+        kind: body.kind.clone(),
+    });
+    info!(slug = %slug, tab = %body.tab, "studio tab updated");
     Json(json!({ "ok": true })).into_response()
 }
 

@@ -20,16 +20,15 @@ import Settings from './pages/Settings';
 // Studio : la galerie d'apps est la landing `/`, et ouvrir une app se fait via
 // `openStudio` (nouvel onglet focalisé). Plus aucun lien client-side vers `/studio`.
 
-// Redirection « dure » (document) vers une URL hors de cette SPA (ex. l'app Studio).
-function HardRedirect({ to }) {
-  useEffect(() => { window.location.replace(to); }, [to]);
-  return null;
-}
-
-// Legacy : `/docs/:appId` → onglet Docs du Studio de l'app (même onglet).
+// Legacy : `/docs/:appId` → onglet Docs du Studio de l'app. Navigation document
+// (hors SPA) : on ne peut pas PUT-puis-attendre proprement, donc on cible l'onglet
+// par `?tab=docs` (lu en fallback par StudioShell).
 function DocsRedirect() {
   const { appId } = useParams();
-  return <HardRedirect to={appId ? `/studio/${appId}?tab=docs` : '/'} />;
+  useEffect(() => {
+    window.location.replace(appId ? `/studio/${appId}?tab=docs` : '/');
+  }, [appId]);
+  return null;
 }
 
 function App() {

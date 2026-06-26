@@ -225,8 +225,10 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
     VALID_KINDS.includes(initialKind) ? initialKind : 'security'
   );
 
-  // Deep-link hint (?kind= from the global dashboard) — also applies when the
-  // Studio is already mounted. Manual tab clicks afterwards take precedence.
+  // Deep-link hint (kind from the global dashboard, propagé par le backend
+  // `studio_tab` + broadcast WS `studio:tab` → StudioShell `pendingKind`) —
+  // re-applies live when it changes (onglet Studio déjà ouvert qui bascule).
+  // Manual kind clicks afterwards take precedence.
   useEffect(() => {
     if (VALID_KINDS.includes(initialKind)) setActiveKind(initialKind);
   }, [initialKind]);

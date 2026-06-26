@@ -88,6 +88,61 @@ impl OpenTabsStore {
             .collect()
     }
 
+    /// Read the persisted Studio TOP-LEVEL tab `(tab, kind)` for an app
+    /// (code/preview/…/surveillance + the surveillance sub-scan). `(None, None)`
+    /// when the row is absent or the pool is down. Independent of `(tabs, active)`
+    /// — those are the AgentWorkspace's conversation tabs.
+    pub async fn get_studio_tab(&self, slug: &str) -> (Option<String>, Option<String>) {
+        let Some(pool) = self.pool.as_ref() else {
+            return (None, None);
+        };
+        match query("SELECT studio_tab, studio_kind FROM agent_open_tabs WHERE slug = $1")
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some(row)) => (
+                row.try_get("studio_tab").ok().flatten(),
+                row.try_get("studio_kind").ok().flatten(),
+            ),
+            Ok(None) => (None, None),
+            Err(e) => {
+                error!(slug, error = %e, "studio_tab get failed");
+                (None, None)
+            }
+        }
+    }
+
+    /// Upsert ONLY the Studio top-level tab/kind, preserving the row's
+    /// conversation `tabs`/`active` (a fresh row defaults `tabs` to `'[]'`).
+    /// No-op when the pool is down.
+    pub async fn set_studio_tab(
+        &self,
+        slug: &str,
+        tab: &str,
+        kind: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(pool) = self.pool.as_ref() else {
+            return Ok(());
+        };
+        query(
+            r#"
+            INSERT INTO agent_open_tabs (slug, studio_tab, studio_kind, updated_at)
+            VALUES ($1, $2, $3, now())
+            ON CONFLICT (slug) DO UPDATE SET
+                studio_tab  = EXCLUDED.studio_tab,
+                studio_kind = EXCLUDED.studio_kind,
+                updated_at  = now()
+            "#,
+        )
+        .bind(slug)
+        .bind(tab)
+        .bind(kind)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     /// Upsert the per-app `{tabs, active}` state (full replacement — last write
     /// wins). No-op when the pool is down.
     pub async fn set(&self, slug: &str, tabs: &Value, active: Option<&str>) -> anyhow::Result<()> {

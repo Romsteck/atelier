@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
 import DbExplorer from './DbExplorer';
 import PreviewTab from '../components/PreviewTab';
@@ -19,10 +18,24 @@ import {
 import {
   controlApp, deleteApp, updateApp,
   getApp, getAppStatus, getAppLogs, getLogs,
+  getStudioTab, setStudioTab,
 } from '../api/client';
 import { statusDot } from '../lib/appsUi';
 import { pushRecentSlug } from '../lib/recentApps';
+import { readStudioTabCache, writeStudioTabCache } from '../lib/openStudio';
 import { useIsNarrow } from '../hooks/useMediaQuery';
+
+// Onglet top-niveau : SOURCE DE VÉRITÉ = backend (`agent_open_tabs.studio_tab`).
+// Le deep-link homepage→Studio passe par un PUT + broadcast WS `studio:tab` : un
+// onglet déjà ouvert (connexion WS établie) bascule en direct, sans URL ni astuce
+// cross-tab. localStorage n'est qu'un cache de rendu (graine anti-flash).
+
+// Fallback : `?tab=`/`?kind=` en query. `openStudio` n'en met PLUS, mais on les
+// LIT encore pour le service worker (clic notif agent → `/studio/<slug>?tab=code`)
+// et d'anciens favoris / liens directs.
+function urlParam(name) {
+  try { return new URLSearchParams(window.location.search).get(name); } catch { return null; }
+}
 
 const TABS = [
   { id: 'code', label: 'Code', icon: Code2 },
@@ -186,15 +199,14 @@ function SettingsTab({ app, onUpdate, onDelete }) {
 // ══════════════════════════════════════════════════════════════════
 
 export default function StudioShell({ slug }) {
-  const [searchParams, setSearchParams] = useSearchParams();
-
-  // Onglet actif : graine = URL `?tab=` (deep-link inter-onglet) puis localStorage,
-  // sinon 'code'. Le `?kind=` (one-shot) cible l'onglet Surveillance.
+  // Onglet actif : graine = query de fallback (SW/favori), sinon cache localStorage
+  // par app (graine instantanée anti-flash), sinon 'code'. Le backend (autoritaire)
+  // est lu/appliqué dans un effet ci-dessous + à chaud via WS `studio:tab`.
   const [activeTab, setActiveTabState] = useState(
-    () => searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'code',
+    () => urlParam('tab') || readStudioTabCache(slug)?.tab || 'code',
   );
-  // `?kind=` est un deep-link one-shot (vers l'onglet Surveillance) → lu une fois.
-  const [pendingKind] = useState(() => searchParams.get('kind') || null);
+  // Kind cible (onglet Surveillance) ; idem, confirmé par le backend / WS.
+  const [pendingKind, setPendingKind] = useState(() => urlParam('kind') || readStudioTabCache(slug)?.kind || null);
 
   const [app, setApp] = useState(null);
   const [status, setStatus] = useState(null);
@@ -206,7 +218,13 @@ export default function StudioShell({ slug }) {
   // ── Disposition (mode 'tabs' classique vs 'split' agent+onglets) ──
   const contentRef = useRef(null);
   const [layoutMode, setLayoutMode] = useState(() => localStorage.getItem('studio:layoutMode') || 'tabs');
-  const [rightTab, setRightTab] = useState(() => localStorage.getItem('studio:rightTab') || 'preview');
+  // En mode split, l'onglet VISIBLE (panneau droit) est `rightTab`, PAS `activeTab`.
+  // Un deep-link doit donc le viser aussi → on graine depuis le cache d'onglet
+  // (anti-flash), sinon le dernier onglet droit mémorisé, sinon 'preview'.
+  const [rightTab, setRightTab] = useState(() => {
+    const t = urlParam('tab') || readStudioTabCache(slug)?.tab;
+    return t && t !== 'code' ? t : (localStorage.getItem('studio:rightTab') || 'preview');
+  });
   const [leftPct, setLeftPct] = useState(() => {
     const v = parseFloat(localStorage.getItem('studio:splitRatio'));
     return Number.isFinite(v) && v >= 20 && v <= 80 ? v : 50;
@@ -228,17 +246,41 @@ export default function StudioShell({ slug }) {
     document.title = `${app?.name || slug} · Studio`;
   }, [app?.name, slug]);
 
+  // Changement d'onglet INITIÉ ICI (clic utilisateur, normalisation) → persiste au
+  // backend (source de vérité, broadcast `studio:tab`) + cache local de rendu.
   const setActiveTab = useCallback((tab) => {
     setActiveTabState(tab);
-    try { localStorage.setItem('studio:activeTab', tab); } catch {}
-    // Reflète l'onglet dans l'URL (refresh/partage), sans le `kind` one-shot.
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev);
-      next.set('tab', tab);
-      next.delete('kind');
-      return next;
-    }, { replace: true });
-  }, [setSearchParams]);
+    writeStudioTabCache(slug, tab, null);
+    setStudioTab(slug, { tab, kind: null }).catch(() => { /* offline → cache local seul */ });
+  }, [slug]);
+
+  // Application d'un onglet venu d'AILLEURS (fetch backend au montage, ou broadcast
+  // `studio:tab` = deep-link / autre PC) → met à jour l'état + le cache SANS re-PUT
+  // (sinon boucle d'écho). On vise les DEUX états d'affichage pour être agnostique
+  // au mode : `activeTab` (mode 'tabs') ET `rightTab` (panneau droit du mode
+  // 'split', où les onglets non-'code' vivent). `kind` ne réinitialise jamais le
+  // kind manuel de SurveillanceTab (son effet ignore un kind non valide / null).
+  const applyRemoteTab = useCallback((tab, kind) => {
+    if (!tab) return;
+    setActiveTabState(tab);
+    if (tab !== 'code') setRightTab(tab);
+    setPendingKind(kind || null);
+    writeStudioTabCache(slug, tab, kind || null);
+  }, [slug]);
+
+  // ── Onglet top-niveau : le backend est autoritaire ──
+  // Au montage (onglet neuf / rechargement / autre PC) on lit l'état persisté et
+  // on l'applique — sauf si l'URL force un onglet (SW notif / favori), qui gagne
+  // pour ce chargement. Le cas « onglet déjà ouvert » est couvert par le WS
+  // `studio:tab` (cf. useWebSocket plus bas) : bascule live sans rechargement.
+  useEffect(() => {
+    if (urlParam('tab')) return;
+    let cancelled = false;
+    getStudioTab(slug)
+      .then((r) => { const d = r.data || {}; if (!cancelled && d.tab) applyRemoteTab(d.tab, d.kind); })
+      .catch(() => { /* backend down → cache local seul */ });
+    return () => { cancelled = true; };
+  }, [slug, applyRemoteTab]);
 
   // ── Fetch app detail + status ──
   useEffect(() => {
@@ -270,12 +312,18 @@ export default function StudioShell({ slug }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
-  // ── Real-time via WS (statut + build, filtrés sur notre slug) ──
+  // ── Real-time via WS (statut + build + onglet, filtrés sur notre slug) ──
   useWebSocket({
     'app:state': (data) => {
       if (data.slug !== slug) return;
       setStatus(prev => ({ ...prev, ...data }));
       setApp(prev => prev ? { ...prev, state: data.state } : prev);
+    },
+    // Deep-link homepage→Studio (ou changement d'onglet d'un autre PC) : un onglet
+    // DÉJÀ ouvert reçoit le broadcast et bascule en direct (aucun rechargement).
+    'studio:tab': (data) => {
+      if (data?.slug !== slug) return;
+      applyRemoteTab(data.tab, data.kind);
     },
     'app:build': (data) => {
       if (data?.slug !== slug) return;
@@ -294,7 +342,13 @@ export default function StudioShell({ slug }) {
 
   function handleSelectTab(tab) { setActiveTab(tab); }
   function handleSetLayoutMode(mode) { if (mode === 'split' && isNarrow) return; setLayoutMode(mode); }
-  function handleSelectRightTab(tab) { setRightTab(tab); }
+  // En mode split, le panneau droit EST l'onglet visible → persiste comme tel
+  // (backend + cache) pour que le state d'onglet par app reflète bien la vue.
+  function handleSelectRightTab(tab) {
+    setRightTab(tab);
+    writeStudioTabCache(slug, tab, null);
+    setStudioTab(slug, { tab, kind: null }).catch(() => { /* offline → cache local seul */ });
+  }
 
   // Lance une conversation agent pré-remplie (bouton « Résoudre » surveillance).
   function openAgentWithPrompt(arg) {

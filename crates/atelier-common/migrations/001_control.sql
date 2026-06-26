@@ -140,6 +140,14 @@ CREATE TABLE IF NOT EXISTS agent_open_tabs (
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
+-- Onglet TOP-NIVEAU du Studio (code/preview/db/…/surveillance) sélectionné par
+-- app, + le sous-scan surveillance ciblé par un éventuel deep-link. Source de
+-- vérité serveur (suit l'utilisateur entre PCs) + porte le deep-link homepage→
+-- Studio via le broadcast WS `studio:tab` (un onglet déjà ouvert bascule live).
+-- Colonnes ajoutées à la table existante (idempotent : ce blob rejoue au boot).
+ALTER TABLE agent_open_tabs ADD COLUMN IF NOT EXISTS studio_tab  TEXT;
+ALTER TABLE agent_open_tabs ADD COLUMN IF NOT EXISTS studio_kind TEXT;
+
 -- ---------------------------------------------------------------------------
 -- studio_state — RETIRÉE (2026-06-21). Le singleton « app ouverte » n'a plus de
 -- sens depuis que le Studio est une app Vite séparée, ouverte en un onglet par

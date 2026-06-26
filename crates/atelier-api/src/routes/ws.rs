@@ -40,6 +40,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut backup_rx = state.backup.subscribe();
     let mut agent_rx = state.events.agent.subscribe();
     let mut agent_open_tabs_rx = state.events.agent_open_tabs.subscribe();
+    let mut studio_tab_rx = state.events.studio_tab.subscribe();
     let mut homeroute_routes_rx = state.events.homeroute_routes.subscribe();
 
     loop {
@@ -69,6 +70,21 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "agent:open-tabs", dropped = n, "ws subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = studio_tab_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "studio:tab", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "studio:tab", dropped = n, "ws subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

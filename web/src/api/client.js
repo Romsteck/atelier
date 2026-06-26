@@ -323,6 +323,13 @@ export const getAgentOpenTabs = (slug) =>
   api.get(`/apps/${slug}/agent/open-tabs`);
 export const setAgentOpenTabs = (slug, body) =>
   api.put(`/apps/${slug}/agent/open-tabs`, body);
+// Onglet top-niveau du Studio par app ({ tab, kind }). Autoritaire côté serveur
+// (suit l'utilisateur entre PCs) ; le PUT broadcast `studio:tab` → un onglet
+// Studio déjà ouvert bascule en direct (= le deep-link homepage→Studio).
+export const getStudioTab = (slug) =>
+  api.get(`/apps/${slug}/studio/tab`);
+export const setStudioTab = (slug, body) =>
+  api.put(`/apps/${slug}/studio/tab`, body);
 // Version SDK installée vs dernière (npm) + MAJ in-place (éphémère) du runner.
 export const getSdkVersion = () => api.get('/agent/sdk/version');
 // timeout long : `npm install` côté serveur peut dépasser les 30 s par défaut du client.
