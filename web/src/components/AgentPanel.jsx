@@ -611,7 +611,15 @@ export default function AgentPanel({ panelKey }) {
       // (le bouton disparaît) et l'UI reflète l'état réel post-install.
       const v = await getSdkVersion();
       setSdk(v.data);
-      setSdkMsg({ ok: true, text: `SDK à jour (${r.data?.installed ?? v.data?.installed ?? ''})` });
+      const ver = r.data?.installed ?? v.data?.installed ?? '';
+      if (r.data?.source_pinned) {
+        // Pin source bumpé → durable : survit aux make deploy (pense à committer le pin).
+        setSdkMsg({ ok: true, text: `SDK à jour (${ver}) — pin source mis à jour (à committer)` });
+      } else {
+        // MAJ appliquée au déployé mais pin source non bumpé → reviendra au prochain deploy.
+        const note = r.data?.source_note ? ` (${r.data.source_note})` : '';
+        setSdkMsg({ ok: false, text: `MAJ ${ver} appliquée mais pin source non mis à jour${note} — reviendra au prochain deploy` });
+      }
     } catch (e) {
       setSdkMsg({ ok: false, text: apiErr(e, 'MAJ SDK échouée') });
     } finally {

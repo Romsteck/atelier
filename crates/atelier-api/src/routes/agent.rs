@@ -299,6 +299,19 @@ fn runner_script() -> String {
 fn run_as_user() -> String {
     std::env::var("ATELIER_AGENT_USER").unwrap_or_else(|_| "hr-studio".into())
 }
+/// Arbre SOURCE du runner (dépôt dev, sur Medion). La MAJ SDK y bumpe le pin durablement :
+/// `make deploy` resynchronise /opt/atelier/runner DEPUIS cet arbre, donc sans bump source la MAJ
+/// serait éphémère. Absent sur un hôte non-dev → la MAJ reste éphémère (signalé à l'UI).
+fn source_runner_dir() -> PathBuf {
+    std::env::var("ATELIER_RUNNER_SOURCE_DIR")
+        .unwrap_or_else(|_| "/home/romain/atelier/runner".into())
+        .into()
+}
+/// User propriétaire du dépôt source : on (ré)installe en SON nom pour préserver l'ownership git
+/// (un `npm install` en root polluerait l'arbre de fichiers root-owned).
+fn source_runner_user() -> String {
+    std::env::var("ATELIER_RUNNER_SOURCE_USER").unwrap_or_else(|_| "romain".into())
+}
 fn claude_config_dir() -> String {
     std::env::var("ATELIER_AGENT_CLAUDE_CONFIG_DIR")
         .unwrap_or_else(|_| "/var/lib/hr-studio/.claude".into())
@@ -1300,11 +1313,16 @@ async fn fetch_latest_sdk() -> Option<String> {
     v.get("version").and_then(|x| x.as_str()).map(String::from)
 }
 
-fn installed_sdk_version() -> Option<String> {
-    let pkg = runner_dir()?.join("node_modules/@anthropic-ai/claude-agent-sdk/package.json");
+/// Version du SDK installée dans `dir` (lue depuis son `node_modules`). Sert au déployé ET au source.
+fn sdk_version_in(dir: &FsPath) -> Option<String> {
+    let pkg = dir.join("node_modules/@anthropic-ai/claude-agent-sdk/package.json");
     let s = std::fs::read_to_string(pkg).ok()?;
     let v: Value = serde_json::from_str(&s).ok()?;
     v.get("version").and_then(|x| x.as_str()).map(String::from)
+}
+
+fn installed_sdk_version() -> Option<String> {
+    sdk_version_in(&runner_dir()?)
 }
 
 /// Le paquet SDK et sa dep native optionnelle (linux-x64), relatifs à `node_modules`.
@@ -1365,11 +1383,28 @@ fn restore_sdk(dir: &FsPath) {
     }
 }
 
-/// `npm install <spec>` dans le runner. Retourne le log combiné (Ok) ou un message d'échec (Err).
-/// WHY env : sous `ProtectSystem=strict` `/root` est read-only → on force HOME/cache npm vers `/tmp`
-/// (writable). `--omit=dev` (jamais `--omit=optional` : la dep native linux-x64 est requise au runtime).
-async fn run_npm_install(dir: &FsPath, spec: &str) -> Result<String, String> {
-    let mut cmd = Command::new(npm_bin());
+/// `npm install <spec>` dans `dir`. `as_user=None` → exécution directe (process service = root,
+/// arbre DÉPLOYÉ /opt/atelier/runner). `as_user=Some(u)` → `sudo -n -u u` (arbre SOURCE, écrit en
+/// `u` pour préserver l'ownership du dépôt git). Retourne le log combiné (Ok) ou un échec (Err).
+/// WHY env : sous `ProtectSystem=strict` les HOME réels sont read-only → HOME/cache npm forcés vers
+/// `/tmp` (writable) ; cache SÉPARÉ par cas (le cache root n'est pas writable par le user source).
+/// Via sudo, `--preserve-env` est requis (env_reset stripe sinon HOME/npm_config_cache/CI).
+/// `--omit=dev` (jamais `--omit=optional` : la dep native linux-x64 est requise au runtime).
+async fn run_npm_install(dir: &FsPath, spec: &str, as_user: Option<&str>) -> Result<String, String> {
+    let npm = npm_bin();
+    let (cache, mut cmd) = match as_user {
+        Some(user) => {
+            let mut c = Command::new("sudo");
+            c.arg("-n")
+                .arg("-u")
+                .arg(user)
+                .arg("--preserve-env=HOME,npm_config_cache,CI")
+                .arg("--")
+                .arg(&npm);
+            ("/tmp/.npm-atelier-src", c)
+        }
+        None => ("/tmp/.npm-atelier", Command::new(&npm)),
+    };
     cmd.arg("install")
         .arg(spec)
         .arg("--no-audit")
@@ -1379,7 +1414,7 @@ async fn run_npm_install(dir: &FsPath, spec: &str) -> Result<String, String> {
         .current_dir(dir)
         .stdin(Stdio::null())
         .env("HOME", "/tmp")
-        .env("npm_config_cache", "/tmp/.npm-atelier")
+        .env("npm_config_cache", cache)
         .env("CI", "true")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1393,6 +1428,24 @@ async fn run_npm_install(dir: &FsPath, spec: &str) -> Result<String, String> {
         Ok(log)
     } else {
         Err(format!("npm install: {}\n{log}", out.status))
+    }
+}
+
+/// Bump DURABLE du pin SOURCE après une MAJ déployée réussie. WHY : `make deploy` resynchronise
+/// /opt/atelier/runner DEPUIS l'arbre source — sans ce bump la MAJ serait écrasée au prochain
+/// deploy. (Ré)installe en `source_runner_user()` (ownership git préservé). Best-effort : si ceci
+/// échoue, l'appelant NE rollback PAS le déployé (déjà effectif), il signale juste `source_pinned:false`.
+async fn pin_sdk_source(target: &str) -> Result<(), String> {
+    let src = source_runner_dir();
+    if !src.join("package.json").is_file() {
+        return Err("arbre source absent (MAJ éphémère)".into());
+    }
+    let user = source_runner_user();
+    let spec = format!("{SDK_PKG}@{target}");
+    run_npm_install(&src, &spec, Some(user.as_str())).await?;
+    match sdk_version_in(&src) {
+        Some(v) if v == target => Ok(()),
+        other => Err(format!("pin source inattendu: {other:?} (attendu {target})")),
     }
 }
 
@@ -1414,11 +1467,12 @@ struct SdkUpdateBody {
     version: Option<String>,
 }
 
-/// MAJ in-place (ÉPHÉMÈRE) du Claude Agent SDK dans le runner installé : snapshot → `npm install`
-/// → vérif (version cible + dep native) → smoke-test (`op:list`, charge le SDK sous l'exec réel
-/// hr-studio) → rollback si échec. L'effet porte sur la PROCHAINE session agent (runner spawné
-/// frais) — pas de restart. Annulé au prochain `make deploy` (resync depuis le pin source) ;
-/// `sdk_version` lisant la version live sur disque, l'UI reste cohérente.
+/// MAJ DURABLE du Claude Agent SDK dans le runner installé : snapshot → `npm install` → vérif
+/// (version cible + dep native) → smoke-test (`op:list`, charge le SDK sous l'exec réel hr-studio)
+/// → rollback si échec. L'effet déployé porte sur la PROCHAINE session agent (runner spawné frais)
+/// — pas de restart. En cas de succès, le pin SOURCE est aussi bumpé (`pin_sdk_source`) pour
+/// survivre aux `make deploy` (qui resynchronisent le déployé depuis la source) ; ce bump source
+/// est best-effort (non-fatal, reporté via `source_pinned`/`source_note`).
 #[instrument(skip(body))]
 async fn sdk_update(body: Option<Json<SdkUpdateBody>>) -> axum::response::Response {
     if SDK_UPDATING
@@ -1467,7 +1521,7 @@ async fn sdk_update(body: Option<Json<SdkUpdateBody>>) -> axum::response::Respon
     }
 
     let spec = format!("{SDK_PKG}@{target}");
-    let outcome: Result<(), String> = match run_npm_install(&dir, &spec).await {
+    let outcome: Result<(), String> = match run_npm_install(&dir, &spec, None).await {
         Err(log) => Err(log),
         Ok(_) => {
             let now = installed_sdk_version();
@@ -1490,10 +1544,28 @@ async fn sdk_update(body: Option<Json<SdkUpdateBody>>) -> axum::response::Respon
     match outcome {
         Ok(()) => {
             cleanup_sdk_bak(&dir);
-            info!(version = %target, "MAJ SDK : succès");
+            // Bump DURABLE du pin source (survit aux make deploy). Non-fatal : le déployé est déjà
+            // à jour et effectif — un échec ici ne fait que ramener à l'état éphémère (signalé UI).
+            let (source_pinned, source_note) = match pin_sdk_source(&target).await {
+                Ok(()) => {
+                    info!(version = %target, "MAJ SDK : pin source mis à jour");
+                    (true, None)
+                }
+                Err(e) => {
+                    warn!(error = %tail(&e, 500), "MAJ SDK : pin source NON mis à jour (reviendra au prochain deploy)");
+                    (false, Some(tail(&e, 500)))
+                }
+            };
+            info!(version = %target, source_pinned, "MAJ SDK : succès");
             (
                 StatusCode::OK,
-                Json(json!({ "installed": target, "latest": target, "updated": true })),
+                Json(json!({
+                    "installed": target,
+                    "latest": target,
+                    "updated": true,
+                    "source_pinned": source_pinned,
+                    "source_note": source_note,
+                })),
             )
                 .into_response()
         }

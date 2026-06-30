@@ -35,10 +35,13 @@ ProtectSystem=strict
 # read-only hors ReadWritePaths, et le namespace mount est hérité par les descendants
 # (sudo→node→claude) : sans cette entrée, la CLI échoue SILENCIEUSEMENT à écrire le
 # transcript (EROFS) → pas de reprise/historique de conversation. Cf. multi-conversations.
-# /opt/atelier/runner : même contrainte. La MAJ in-place du Claude Agent SDK (bouton UI →
+# /opt/atelier/runner : même contrainte. La MAJ du Claude Agent SDK (bouton UI →
 # POST /api/agent/sdk/update) lance `npm install` en root avec cwd=/opt/atelier/runner ; sans
 # cette entrée → EROFS. Les node_modules réécrits restent root-owned (lu/exécuté par hr-studio).
-ReadWritePaths=/run /var/lib/atelier /var/lib/hr-studio /opt/atelier/data /opt/atelier/runner /tmp
+# /home/romain/atelier/runner : la MÊME MAJ bumpe ENSUITE le pin SOURCE (sinon le prochain
+# `make deploy` resynchronise le déployé depuis la source et écrase la MAJ → éphémère). Le bump
+# source tourne en `romain` (sudo -u, ownership git préservé) et doit pouvoir écrire cet arbre.
+ReadWritePaths=/run /var/lib/atelier /var/lib/hr-studio /opt/atelier/data /opt/atelier/runner /home/romain/atelier/runner /tmp
 ProtectHome=false
 
 [Install]
