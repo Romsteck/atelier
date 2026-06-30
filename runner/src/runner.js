@@ -431,15 +431,14 @@ function messagesToItems(msgs) {
   const askIds = new Set(); // tool_use AskUserQuestion → leur tool_result porte la réponse
   const planIds = new Set(); // tool_use ExitPlanMode → leur tool_result porte la décision
   const planFileIds = new Set(); // tool_use Write ~/.claude/plans/*.md → masqué (plomberie)
-  let tidx = 0; // ordinal du bloc de réflexion dans la conversation (clé de fetch paresseux)
   for (const m of msgs || []) {
     const message = m?.message;
     if (m?.type === 'assistant') {
       for (const b of message?.content || []) {
         if (b.type === 'text' && b.text) items.push({ type: 'assistant', text: b.text });
-        // Réflexion : on ne charge QUE le compteur (chars) + l'ordinal (tidx). Le texte
-        // (souvent volumineux, rarement lu) est rapatrié à la demande via op:thinking.
-        else if (b.type === 'thinking' && b.thinking) items.push({ type: 'thinking', chars: b.thinking.length, tidx: tidx++ });
+        // Réflexion : on n'expose QUE le compteur (chars) — jamais le texte (le front n'affiche
+        // qu'un count, on ne charge donc jamais le détail des réflexions).
+        else if (b.type === 'thinking' && b.thinking) items.push({ type: 'thinking', chars: b.thinking.length });
         else if (b.type === 'tool_use') {
           if (b.name === 'AskUserQuestion') {
             askIds.add(b.id);
@@ -495,22 +494,6 @@ function messagesToItems(msgs) {
   return items;
 }
 
-// Texte du tidx-ième bloc de réflexion. MÊME ordre de parcours que messagesToItems
-// (messages assistant, blocs content) → l'ordinal `tidx` y est cohérent.
-function nthThinkingText(msgs, tidx) {
-  let n = 0;
-  for (const m of msgs || []) {
-    if (m?.type !== 'assistant') continue;
-    for (const b of m?.message?.content || []) {
-      if (b.type === 'thinking' && b.thinking) {
-        if (n === tidx) return b.thinking;
-        n++;
-      }
-    }
-  }
-  return null;
-}
-
 // Mode introspection one-shot : exécute l'op SDK, émet UN objet NDJSON, puis sort.
 // WHY le write+callback : un transcript volumineux dépasse le buffer du pipe ; un
 // `process.exit(0)` immédiat TRONQUE l'écriture async (stdout pas vidé). On sort donc
@@ -524,13 +507,6 @@ async function runIntrospection(op, init) {
     } else if (op === 'messages') {
       if (!init?.sessionId) throw new Error('sessionId manquant');
       result = { t: 'transcript', items: messagesToItems(await getSessionMessages(init.sessionId, { dir })) };
-    } else if (op === 'thinking') {
-      // Texte d'UN bloc de réflexion (chargé à la demande quand l'utilisateur l'expand).
-      if (!init?.sessionId) throw new Error('sessionId manquant');
-      const tidx = Number(init?.tidx);
-      if (!Number.isInteger(tidx) || tidx < 0) throw new Error('tidx invalide');
-      const text = nthThinkingText(await getSessionMessages(init.sessionId, { dir }), tidx);
-      result = { t: 'thinking', text: text ?? '' };
     } else if (op === 'rename') {
       if (!init?.sessionId) throw new Error('sessionId manquant');
       await renameSession(init.sessionId, String(init.title || ''), { dir });

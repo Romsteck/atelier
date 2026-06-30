@@ -310,10 +310,6 @@ export const listConversations = (slug) =>
 // Snapshot d'une conversation : { items, live, run_id }. items = transcript normalisé.
 export const getConversation = (slug, sid) =>
   api.get(`/apps/${slug}/agent/conversations/${sid}`);
-// Texte d'UN bloc de réflexion (chargé à la demande à l'expand ; le snapshot ne porte
-// que le compteur). Renvoie { text }.
-export const getThinking = (slug, sid, tidx) =>
-  api.get(`/apps/${slug}/agent/conversations/${sid}/thinking/${tidx}`);
 export const renameConversation = (slug, sid, title) =>
   api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
 export const deleteConversation = (slug, sid) =>

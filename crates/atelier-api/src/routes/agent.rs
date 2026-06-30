@@ -72,18 +72,30 @@ fn user_item(text: &str) -> Value {
 /// côté frontend : deltas consécutifs coalescés dans le dernier item, autres kinds =
 /// items discrets. started/system/turn_done/done ne sont pas rendus.
 fn fold_item(items: &mut Vec<Value>, kind: &str, data: &Value) {
-    let text = data.get("text").and_then(|x| x.as_str()).unwrap_or("");
     match kind {
-        "assistant_delta" | "thinking_delta" => {
-            let ty = if kind == "assistant_delta" { "assistant" } else { "thinking" };
+        "assistant_delta" => {
+            let text = data.get("text").and_then(|x| x.as_str()).unwrap_or("");
             if let Some(last) = items.last_mut() {
-                if last.get("type").and_then(|x| x.as_str()) == Some(ty) {
+                if last.get("type").and_then(|x| x.as_str()) == Some("assistant") {
                     let prev = last.get("text").and_then(|x| x.as_str()).unwrap_or("");
                     last["text"] = json!(format!("{prev}{text}"));
                     return;
                 }
             }
-            items.push(json!({ "type": ty, "text": text }));
+            items.push(json!({ "type": "assistant", "text": text }));
+        }
+        // Réflexion : on n'accumule QUE le compteur de caractères (jamais le texte) — le front
+        // n'affiche qu'un count, donc le buffer/snapshot ne porte aucun détail de réflexion.
+        "thinking_delta" => {
+            let dchars = data.get("chars").and_then(|x| x.as_u64()).unwrap_or(0);
+            if let Some(last) = items.last_mut() {
+                if last.get("type").and_then(|x| x.as_str()) == Some("thinking") {
+                    let prev = last.get("chars").and_then(|x| x.as_u64()).unwrap_or(0);
+                    last["chars"] = json!(prev + dchars);
+                    return;
+                }
+            }
+            items.push(json!({ "type": "thinking", "chars": dchars }));
         }
         "tool_use" => items.push(json!({ "type": "tool_use", "name": data.get("name").cloned(), "input": data.get("input").cloned(), "id": data.get("id").cloned() })),
         "tool_result" => items.push(json!({
@@ -148,8 +160,6 @@ pub fn app_router() -> Router<ApiState> {
             "/{slug}/agent/conversations/{sid}",
             get(get_conversation).patch(rename_conversation).delete(delete_conversation),
         )
-        // Texte d'un bloc de réflexion, chargé à la demande (paresseux).
-        .route("/{slug}/agent/conversations/{sid}/thinking/{tidx}", get(get_thinking))
         // État d'UI des onglets ouverts (sync cross-PC) : autoritaire côté serveur,
         // poussé live via le canal WS `agent:open-tabs`.
         .route(
@@ -867,44 +877,6 @@ async fn list_conversations(
     }
 }
 
-/// Allège un transcript pour le réseau/front : un bloc `thinking` (souvent volumineux,
-/// rarement lu) n'expose que `chars` + `tidx` (ordinal), le texte étant rapatrié à la
-/// demande via [`get_thinking`]. Miroir du strip côté runner (`messagesToItems`).
-fn strip_thinking(items: &[Value]) -> Vec<Value> {
-    let mut tidx: u64 = 0;
-    items
-        .iter()
-        .map(|it| {
-            if it.get("type").and_then(|x| x.as_str()) == Some("thinking") {
-                // Préserver un `chars` DÉJÀ calculé : les blocs préchargés en reprise
-                // (seed via `messagesToItems`) portent `chars` mais PAS de `text` ; recalculer
-                // depuis `text` les remettrait à 0. On ne dérive du texte que les blocs live
-                // (accumulés en deltas, qui n'ont pas encore de `chars`).
-                let chars = it
-                    .get("chars")
-                    .and_then(|x| x.as_u64())
-                    .map(|c| c as usize)
-                    .unwrap_or_else(|| it.get("text").and_then(|x| x.as_str()).unwrap_or("").chars().count());
-                let v = json!({ "type": "thinking", "chars": chars, "tidx": tidx });
-                tidx += 1;
-                v
-            } else {
-                it.clone()
-            }
-        })
-        .collect()
-}
-
-/// Texte du `tidx`-ième bloc de réflexion dans un buffer d'items (même ordre que
-/// [`strip_thinking`] / `messagesToItems` → ordinal cohérent).
-fn nth_thinking(items: &[Value], tidx: usize) -> Option<String> {
-    items
-        .iter()
-        .filter(|it| it.get("type").and_then(|x| x.as_str()) == Some("thinking"))
-        .nth(tidx)
-        .and_then(|it| it.get("text").and_then(|x| x.as_str()).map(|s| s.to_string()))
-}
-
 /// `GET /api/apps/{slug}/agent/conversations/{sid}` — snapshot : transcript (runner
 /// `op:messages`) + `live`/`run_id` pour que le frontend se rebranche au WS.
 #[instrument(skip(state), fields(slug = %slug, sid = %sid))]
@@ -925,9 +897,8 @@ async fn get_conversation(
             // frontend de restaurer l'indicateur de réflexion / la carte d'attente après
             // un refresh (le WS broadcast ne rejoue pas `started`/`question`).
             let pending = pending_dialog(&items);
-            // Réflexion allégée (texte rapatrié à la demande). `pending_dialog` est calculé
-            // sur les items COMPLETS avant strip (il n'inspecte de toute façon pas thinking).
-            let items = strip_thinking(&items);
+            // Le buffer ne porte déjà que des réflexions allégées (compteur `chars`, pas de
+            // texte — cf. fold_item) → servi tel quel.
             return Json(json!({ "items": items, "live": true, "run_id": rid, "mode": mode, "running": turn_active, "pending": pending })).into_response();
         }
     }
@@ -997,37 +968,6 @@ async fn delete_conversation(
             (StatusCode::OK, Json(json!({"deleted": true}))).into_response()
         }
         Ok(v) => runner_bad_gateway(&v, "runner: échec delete"),
-        Err(e) => err(StatusCode::BAD_GATEWAY, e),
-    }
-}
-
-/// `GET /api/apps/{slug}/agent/conversations/{sid}/thinking/{tidx}` — texte d'UN bloc de
-/// réflexion, chargé à la demande (le snapshot/transcript ne porte que `chars`+`tidx`).
-/// Session vivante → servi depuis le buffer mémoire (texte complet, même en cours de tour) ;
-/// sinon → disque via le runner (`op:thinking`).
-#[instrument(skip(state), fields(slug = %slug, sid = %sid, tidx = tidx))]
-async fn get_thinking(
-    State(state): State<ApiState>,
-    Path((slug, sid, tidx)): Path<(String, String, usize)>,
-) -> impl IntoResponse {
-    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
-    if !cwd.is_dir() {
-        return err(StatusCode::NOT_FOUND, "app source introuvable");
-    }
-    let rid = SID_RUN.lock().unwrap().get(&sid).cloned();
-    if let Some(rid) = rid {
-        let text = RUNS.lock().unwrap().get(&rid).and_then(|r| nth_thinking(&r.items, tidx));
-        if let Some(text) = text {
-            return Json(json!({ "text": text })).into_response();
-        }
-        // Bloc pas (encore) dans le buffer live → repli disque ci-dessous.
-    }
-    let init = json!({ "op": "thinking", "sessionId": sid, "tidx": tidx, "cwd": cwd.to_string_lossy() }).to_string();
-    match run_runner_op(&cwd, init).await {
-        Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("thinking") => {
-            Json(json!({ "text": v.get("text").cloned().unwrap_or_else(|| json!("")) })).into_response()
-        }
-        Ok(v) => runner_bad_gateway(&v, "runner: réponse inattendue"),
         Err(e) => err(StatusCode::BAD_GATEWAY, e),
     }
 }
@@ -1134,7 +1074,14 @@ async fn run_agent(
                  pending_kind: &mut Option<String>| {
         if let Some(kind) = pending_kind.take() {
             if !pending_text.is_empty() {
-                publish(events, run_id, session_id, slug, seq, &kind, json!({"text": pending_text.clone()}));
+                // Réflexion : on ne diffuse au front QUE le compteur (jamais le texte). Le texte
+                // transite seulement runner→API (pipe interne) ; il s'arrête ici.
+                let data = if kind == "thinking_delta" {
+                    json!({ "chars": pending_text.chars().count() })
+                } else {
+                    json!({ "text": pending_text.clone() })
+                };
+                publish(events, run_id, session_id, slug, seq, &kind, data);
             }
             pending_text.clear();
         }

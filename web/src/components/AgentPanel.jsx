@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
 import Composer from './agent/Composer';
-import { getSdkVersion, updateSdk, getThinking } from '../api/client';
+import { getSdkVersion, updateSdk } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, splitPath } from '../lib/toolDisplay';
@@ -66,59 +66,14 @@ function useSmoothCount(target, active) {
   return shown;
 }
 
-// Réflexion = compteur léger + contenu PARESSEUX. Le texte (souvent volumineux, rarement
-// lu) n'est PAS retenu en front : seul `chars` (→ count live animé) + `tidx` (ordinal) le
-// sont. Le texte n'est rapatrié (getThinking) qu'à l'expand. Exception : le bloc ACTIF
-// (tail d'un tour en cours) reçoit son `text` en direct → expand instantané, pas de fetch.
-function ThinkingBlock({ slug, sid, tidx, chars, text, active }) {
-  const [open, setOpen] = useState(false);
-  const [loaded, setLoaded] = useState(text ?? null); // texte affichable (déjà en main ou fetché)
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState(null);
-  const shown = useSmoothCount(charsToTokens(chars), active);
-
-  // Le bloc actif accumule son texte en direct (deltas) → on le reflète tant qu'il arrive.
-  // (Une fois le bloc dépassé, `text` repasse à undefined : on garde alors `loaded` tel quel.)
-  useEffect(() => { if (text != null) setLoaded(text); }, [text]);
-
-  const toggle = async () => {
-    const willOpen = !open;
-    setOpen(willOpen);
-    if (!willOpen || loaded != null || loading) return;
-    if (sid == null || tidx == null) { setErr('contenu indisponible'); return; }
-    setLoading(true);
-    setErr(null);
-    try {
-      const r = await getThinking(slug, sid, tidx);
-      setLoaded(r.data?.text ?? '');
-    } catch (e) {
-      setErr(apiErr(e, 'chargement de la réflexion échoué'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
+// Réflexion = compteur SEUL (jamais le texte). Le front ne reçoit que `chars` (le serveur
+// n'envoie aucun détail), affiché en tokens (≈ chars/4). Non interactif, rien à déplier.
+function ThinkingCount({ chars }) {
   return (
-    <div className={`text-[12px] text-gray-400 border-l-2 pl-2 my-1 ${active ? 'border-blue-500/50' : 'border-gray-700'}`}>
-      <button onClick={toggle}
-        className={`cursor-pointer select-none flex items-center gap-1.5 ${active ? 'text-blue-700 dark:text-blue-300 font-medium' : 'text-gray-500 hover:text-gray-300'}`}>
-        {open ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
-        <span>Réflexion</span>
-        <span className={`tabular-nums ${active ? 'text-blue-700/80 dark:text-blue-300/80' : 'text-gray-600'}`} title="estimation ≈ caractères / 4">
-          · {formatTokens(shown)} tokens
-        </span>
-        {active && <Loader2 className="w-3 h-3 animate-spin text-blue-600 dark:text-blue-400" />}
-      </button>
-      {open && (
-        loading ? (
-          <div className="flex items-center gap-1.5 mt-1 text-gray-600"><Loader2 className="w-3 h-3 animate-spin" /> chargement…</div>
-        ) : err ? (
-          <div className="mt-1 text-red-400">{err}</div>
-        ) : (
-          <div className="whitespace-pre-wrap mt-1 italic">{loaded}</div>
-        )
-      )}
-    </div>
+    <span className="flex items-center gap-1.5 text-gray-500" title="réflexion (estimation ≈ caractères / 4)">
+      <Brain className="w-3 h-3 shrink-0" />
+      Réflexion · {formatTokens(charsToTokens(chars))} tokens
+    </span>
   );
 }
 
@@ -248,22 +203,17 @@ function ToolRow({ tool }) {
 }
 
 // Une SUITE contiguë d'activité INTERNE d'un tour (WHY) : appels d'outils ET réflexions
-// entremêlés (« 1 action ▸ thinking ▸ 1 action ▸ thinking… »). Avant : chaque réflexion
-// cassait le groupe d'outils → une cascade de petits blocs visuellement saturée. Désormais
-// tout est fusionné en UN groupe repliable : entête « N actions · M réflexions », détail
-// déplié = liste chronologique (outils + réflexions, chaque réflexion redépliable). L'état
-// LIVE n'est PLUS ici : il est rendu dans une barre persistante en bas du chat (`LiveBand`).
-function ActivityGroup({ entries, isTail, slug, sid }) {
+// entremêlés (« 1 action ▸ thinking ▸ 1 action ▸ thinking… »). Tout est fusionné en UN groupe
+// repliable : entête « N actions · 🧠 X tokens » (le compteur de réflexions agrégé, jamais le
+// texte), détail déplié = liste des OUTILS seulement (les réflexions ne sont plus lisibles).
+function ActivityGroup({ entries }) {
   const [open, setOpen] = useState(false);
   const toolEntries = entries.filter((e) => e.kind === 'tool');
   const nTools = toolEntries.length;
-  const nThink = entries.length - nTools;
   const anyError = toolEntries.some((e) => e.result?.isError);
-
-  const summary = [
-    nTools > 0 ? `${nTools} action${nTools > 1 ? 's' : ''}` : null,
-    nThink > 0 ? `${nThink} réflexion${nThink > 1 ? 's' : ''}` : null,
-  ].filter(Boolean).join(' · ');
+  const reflectionTokens = charsToTokens(
+    entries.filter((e) => e.kind === 'thinking').reduce((s, e) => s + (e.chars || 0), 0),
+  );
 
   return (
     <div className="text-[12px] my-1">
@@ -273,22 +223,20 @@ function ActivityGroup({ entries, isTail, slug, sid }) {
         ) : (
           <ChevronRight className="w-3.5 h-3.5 shrink-0" />
         )}
-        <span className="flex items-baseline gap-1.5 min-w-0">
-          <span className="shrink-0">{summary}</span>
+        <span className="flex items-center gap-1.5 min-w-0">
+          {nTools > 0 && <span className="shrink-0">{nTools} action{nTools > 1 ? 's' : ''}</span>}
+          {reflectionTokens > 0 && (
+            <span className="flex items-center gap-1 shrink-0">
+              {nTools > 0 && <span className="text-gray-600">·</span>}
+              <Brain className="w-3 h-3 shrink-0" /> {formatTokens(reflectionTokens)} tokens
+            </span>
+          )}
           {anyError && <span className="text-red-400 shrink-0" title="une action a échoué">●</span>}
         </span>
       </button>
-      {open && (
+      {open && nTools > 0 && (
         <ul className="mt-1 ml-5 space-y-0.5">
-          {entries.map((e, i) =>
-            e.kind === 'thinking' ? (
-              <li key={`th-${i}`}>
-                <ThinkingBlock slug={slug} sid={sid} tidx={e.tidx} chars={e.chars} text={e.text} active={isTail && i === entries.length - 1} />
-              </li>
-            ) : (
-              <ToolRow key={e.id || `a-${i}`} tool={e} />
-            ),
-          )}
+          {toolEntries.map((t, i) => <ToolRow key={t.id || `a-${i}`} tool={t} />)}
         </ul>
       )}
     </div>
@@ -547,14 +495,14 @@ export default function AgentPanel({ panelKey }) {
           if (t.type === 'tool_use' && !PINNED_TOOLS.has(t.name)) {
             entries.push({ kind: 'tool', id: t.id, name: t.name, input: t.input, result: t.id != null ? resultByUseId.get(t.id) : undefined });
           } else if (t.type === 'thinking') {
-            entries.push({ kind: 'thinking', tidx: t.tidx, chars: t.chars, text: t.text, idx: j });
+            entries.push({ kind: 'thinking', chars: t.chars, idx: j });
           }
           j++;
         }
         if (entries.some((e) => e.kind === 'tool')) {
           nodes.push({ kind: 'activity', entries, endIdx: j - 1, key: `act-${i}` });
         } else {
-          for (const e of entries) nodes.push({ kind: 'thinkitem', tidx: e.tidx, chars: e.chars, text: e.text, idx: e.idx, key: `th-${e.idx}` });
+          for (const e of entries) nodes.push({ kind: 'thinkitem', chars: e.chars, key: `th-${e.idx}` });
         }
         i = j;
       } else {
@@ -790,9 +738,11 @@ export default function AgentPanel({ panelKey }) {
         )}
         {renderNodes.map((node) =>
           node.kind === 'activity' ? (
-            <ActivityGroup key={node.key} entries={node.entries} isTail={running && node.endIdx === items.length - 1} slug={slug} sid={convo.sid} />
+            <ActivityGroup key={node.key} entries={node.entries} />
           ) : node.kind === 'thinkitem' ? (
-            <ThinkingBlock key={node.key} slug={slug} sid={convo.sid} tidx={node.tidx} chars={node.chars} text={node.text} active={running && node.idx === items.length - 1} />
+            <div key={node.key} className="text-[12px] border-l-2 border-gray-700 pl-2 my-1">
+              <ThinkingCount chars={node.chars} />
+            </div>
           ) : (
             renderItem(node.it, node.idx)
           ),
