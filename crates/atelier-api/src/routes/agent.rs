@@ -876,7 +876,15 @@ fn strip_thinking(items: &[Value]) -> Vec<Value> {
         .iter()
         .map(|it| {
             if it.get("type").and_then(|x| x.as_str()) == Some("thinking") {
-                let chars = it.get("text").and_then(|x| x.as_str()).unwrap_or("").chars().count();
+                // Préserver un `chars` DÉJÀ calculé : les blocs préchargés en reprise
+                // (seed via `messagesToItems`) portent `chars` mais PAS de `text` ; recalculer
+                // depuis `text` les remettrait à 0. On ne dérive du texte que les blocs live
+                // (accumulés en deltas, qui n'ont pas encore de `chars`).
+                let chars = it
+                    .get("chars")
+                    .and_then(|x| x.as_u64())
+                    .map(|c| c as usize)
+                    .unwrap_or_else(|| it.get("text").and_then(|x| x.as_str()).unwrap_or("").chars().count());
                 let v = json!({ "type": "thinking", "chars": chars, "tidx": tidx });
                 tidx += 1;
                 v

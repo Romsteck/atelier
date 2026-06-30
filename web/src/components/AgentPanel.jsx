@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Loader2, Bot, ChevronRight, ChevronDown, Wrench, AlertTriangle, X,
-  FileText, FilePlus, FilePen, Terminal, FolderSearch, Search, Globe, ListChecks, NotebookPen, Plug,
+  FileText, FilePlus, FilePen, Terminal, FolderSearch, Search, Globe, ListChecks, NotebookPen, Plug, Brain,
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
 import Composer from './agent/Composer';
@@ -16,11 +16,20 @@ import { MODELS, MODES, buildSettings } from '../lib/agentModels';
 // (ordre de grandeur usuel). Indicateur de progression, pas de facturation.
 const charsToTokens = (chars) => Math.max(0, Math.round((chars || 0) / 4));
 
+// Compteur de tokens compact : exact sous 1000, sinon notation « K » (1 décimale sous 10K,
+// entier au-delà). Virgule décimale française (1 234 → « 1,2K », 1000 → « 1K »).
+function formatTokens(n) {
+  if (n < 1000) return n.toLocaleString('fr-FR');
+  const k = n / 1000;
+  const s = k < 10 ? k.toFixed(1).replace(/\.0$/, '') : String(Math.round(k));
+  return `${s.replace('.', ',')}K`;
+}
+
 // Compteur LISSÉ : `target` saute par paliers (les tokens de réflexion arrivent en
 // lots ~50), on l'affiche en montant graduellement (≈12 %/frame + 1 min) via rAF pour
 // éviter les à-coups. `active` faux (réflexion finie / bloc d'historique) → snap direct.
-// SLOWDOWN : on n'avance qu'une frame sur 4 → animation 4× plus lente (~15 Hz).
-const SMOOTH_FRAME_SKIP = 4;
+// SLOWDOWN : on n'avance qu'une frame sur 8 → animation 2× plus lente que ~15 Hz (~7,5 Hz).
+const SMOOTH_FRAME_SKIP = 8;
 function useSmoothCount(target, active) {
   const [shown, setShown] = useState(target);
   const targetRef = useRef(target);
@@ -90,15 +99,15 @@ function ThinkingBlock({ slug, sid, tidx, chars, text, active }) {
   };
 
   return (
-    <div className="text-[12px] text-gray-400 border-l-2 border-gray-700 pl-2 my-1">
+    <div className={`text-[12px] text-gray-400 border-l-2 pl-2 my-1 ${active ? 'border-blue-500/50' : 'border-gray-700'}`}>
       <button onClick={toggle}
-        className="cursor-pointer select-none text-gray-500 hover:text-gray-300 flex items-center gap-1.5">
+        className={`cursor-pointer select-none flex items-center gap-1.5 ${active ? 'text-blue-700 dark:text-blue-300 font-medium' : 'text-gray-500 hover:text-gray-300'}`}>
         {open ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
         <span>Réflexion</span>
-        <span className="text-gray-600 tabular-nums" title="estimation ≈ caractères / 4">
-          · {shown.toLocaleString('fr-FR')} tokens
+        <span className={`tabular-nums ${active ? 'text-blue-700/80 dark:text-blue-300/80' : 'text-gray-600'}`} title="estimation ≈ caractères / 4">
+          · {formatTokens(shown)} tokens
         </span>
-        {active && <Loader2 className="w-3 h-3 animate-spin text-gray-600" />}
+        {active && <Loader2 className="w-3 h-3 animate-spin text-blue-600 dark:text-blue-400" />}
       </button>
       {open && (
         loading ? (
@@ -122,6 +131,12 @@ const TOOL_ICONS = {
 };
 const TOOL_CHIP = 'shrink-0 text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/40 px-1.5 py-0.5 rounded-sm';
 
+// Bande « live » : barre PLEINE LARGEUR flush en bas du chat (aucune marge), fond bleu LÉGER,
+// bord supérieur de séparation, texte gros et gras. Couleur de texte THEME-AWARE : seul le gris
+// est mirroré par le thème clair (cf. index.css), donc le bleu doit l'être à la main via `dark:`
+// — bleu foncé en clair, bleu très clair en sombre — sinon illisible en thème clair.
+const LIVE_BAND = 'flex items-center gap-2 shrink-0 px-3 py-2 border-t border-blue-500/30 bg-blue-500/10 text-[15px] font-semibold text-blue-800 dark:text-blue-50';
+
 // Chemin : basename en clair, dossier atténué, chemin complet en title.
 function PathLabel({ path, className = '' }) {
   const { dir, base } = splitPath(path);
@@ -136,6 +151,39 @@ function PathLabel({ path, className = '' }) {
 const TODO_MARK = { pending: '○', in_progress: '◐', completed: '✓' };
 const TODO_MARK_CLS = { pending: 'text-gray-600', in_progress: 'text-blue-400', completed: 'text-green-500' };
 const TODO_TEXT_CLS = { pending: 'text-gray-400', in_progress: 'text-gray-200', completed: 'text-gray-500 line-through' };
+
+// Outils de gestion de checklist : matérialisés dans le bandeau épinglé (TodoBanner), PAS
+// dans la liste d'actions (sinon doublon + bruit). `TodoWrite` = ancien système ; `Task*` =
+// nouveau système du SDK (≥0.3.x). `TaskGet`/`TaskList` (lectures) sont juste masqués.
+const PINNED_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList']);
+
+// Reconstruit la checklist depuis le flux Task* : `TaskCreate` n'a pas d'id (l'id est
+// l'ordinal de création « 1,2,3… »), `TaskUpdate` cible un `taskId` + `status`. On replie
+// en liste ordonnée {status, content, activeForm} (même forme que les todos de TodoWrite,
+// consommée telle quelle par TodoBanner). `deleted` → retiré.
+function reduceTasks(items) {
+  const byId = new Map();
+  const order = [];
+  let created = 0;
+  for (const it of items) {
+    if (it.type !== 'tool_use') continue;
+    if (it.name === 'TaskCreate') {
+      const id = String(++created);
+      const t = { id, content: it.input?.subject || '', activeForm: it.input?.activeForm || '', status: 'pending' };
+      byId.set(id, t);
+      order.push(id);
+    } else if (it.name === 'TaskUpdate') {
+      const id = String(it.input?.taskId ?? '');
+      if (!id) continue;
+      let t = byId.get(id);
+      if (!t) { t = { id, content: '', activeForm: '', status: 'pending' }; byId.set(id, t); order.push(id); }
+      if (it.input?.subject) t.content = it.input.subject;
+      if (it.input?.activeForm) t.activeForm = it.input.activeForm;
+      if (it.input?.status) t.status = it.input.status;
+    }
+  }
+  return order.map((id) => byId.get(id)).filter((t) => t.status !== 'deleted');
+}
 
 // Checklist ÉPINGLÉE (sticky) en haut du fil (WHY) : Claude Code réécrit sa todolist en
 // continu (N appels TodoWrite/tour). L'afficher inline la faisait « sauter » plus bas à
@@ -176,64 +224,104 @@ function toolTarget(d) {
   return d.primary.length > 60 ? `${d.primary.slice(0, 59)}…` : d.primary;
 }
 
-// Une SUITE d'appels d'outils d'un tour (WHY) : voir l'action EN COURS est utile, revoir
-// le détail de chaque action passée ne l'est pas. Tour en cours → on montre l'action live
-// (`⚙ verbe cible…`). Sinon → une ligne repliée « N actions » (dépliable à la demande).
-function ToolActivityGroup({ tools, isTail }) {
+// Une ligne d'outil dans le détail déplié d'un groupe d'activité.
+function ToolRow({ tool }) {
+  const d = describeTool(tool.name, tool.input);
+  const Icon = TOOL_ICONS[d.iconKey] || Wrench;
+  const err = tool.result?.isError;
+  return (
+    <li className="flex items-center gap-1.5 min-w-0">
+      <Icon className={`w-3 h-3 shrink-0 ${err ? 'text-red-400' : 'text-gray-500'}`} />
+      <span className="text-gray-400 shrink-0">{d.verb}</span>
+      {d.badge && <span className={TOOL_CHIP}>{d.badge}</span>}
+      {d.primary &&
+        (d.primaryPath ? (
+          <PathLabel path={d.primary} className="min-w-0" />
+        ) : (
+          <span className={`truncate text-gray-500 ${d.primaryMono ? 'font-mono' : ''}`} title={d.primaryTitle || d.primary}>
+            {d.primary}
+          </span>
+        ))}
+      {err && <span className="text-red-400 shrink-0 text-[10px]">échec</span>}
+    </li>
+  );
+}
+
+// Une SUITE contiguë d'activité INTERNE d'un tour (WHY) : appels d'outils ET réflexions
+// entremêlés (« 1 action ▸ thinking ▸ 1 action ▸ thinking… »). Avant : chaque réflexion
+// cassait le groupe d'outils → une cascade de petits blocs visuellement saturée. Désormais
+// tout est fusionné en UN groupe repliable : entête « N actions · M réflexions », détail
+// déplié = liste chronologique (outils + réflexions, chaque réflexion redépliable). L'état
+// LIVE n'est PLUS ici : il est rendu dans une barre persistante en bas du chat (`LiveBand`).
+function ActivityGroup({ entries, isTail, slug, sid }) {
   const [open, setOpen] = useState(false);
-  const n = tools.length;
-  const last = tools[n - 1];
-  const lastDesc = describeTool(last.name, last.input);
-  const live = isTail && !last.result; // dernière action sans résultat = en cours
-  const anyError = tools.some((t) => t.result?.isError);
+  const toolEntries = entries.filter((e) => e.kind === 'tool');
+  const nTools = toolEntries.length;
+  const nThink = entries.length - nTools;
+  const anyError = toolEntries.some((e) => e.result?.isError);
+
+  const summary = [
+    nTools > 0 ? `${nTools} action${nTools > 1 ? 's' : ''}` : null,
+    nThink > 0 ? `${nThink} réflexion${nThink > 1 ? 's' : ''}` : null,
+  ].filter(Boolean).join(' · ');
 
   return (
     <div className="text-[12px] my-1">
       <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 max-w-full text-gray-500 hover:text-gray-300">
-        {live ? (
-          <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-gray-400" />
-        ) : open ? (
+        {open ? (
           <ChevronDown className="w-3.5 h-3.5 shrink-0" />
         ) : (
           <ChevronRight className="w-3.5 h-3.5 shrink-0" />
         )}
-        {live ? (
-          <span className="flex items-baseline gap-1.5 min-w-0">
-            <span className="text-gray-300 shrink-0">{lastDesc.verb}</span>
-            <span className="truncate text-gray-400 font-mono">{toolTarget(lastDesc)}</span>
-            <span className="text-gray-600 shrink-0">…</span>
-          </span>
-        ) : (
-          <span className="flex items-center gap-1.5">
-            <span>{n} action{n > 1 ? 's' : ''}</span>
-            {anyError && <span className="text-red-400" title="une action a échoué">●</span>}
-          </span>
-        )}
+        <span className="flex items-baseline gap-1.5 min-w-0">
+          <span className="shrink-0">{summary}</span>
+          {anyError && <span className="text-red-400 shrink-0" title="une action a échoué">●</span>}
+        </span>
       </button>
       {open && (
         <ul className="mt-1 ml-5 space-y-0.5">
-          {tools.map((t, i) => {
-            const d = describeTool(t.name, t.input);
-            const Icon = TOOL_ICONS[d.iconKey] || Wrench;
-            const err = t.result?.isError;
-            return (
-              <li key={t.id || i} className="flex items-center gap-1.5 min-w-0">
-                <Icon className={`w-3 h-3 shrink-0 ${err ? 'text-red-400' : 'text-gray-500'}`} />
-                <span className="text-gray-400 shrink-0">{d.verb}</span>
-                {d.badge && <span className={TOOL_CHIP}>{d.badge}</span>}
-                {d.primary &&
-                  (d.primaryPath ? (
-                    <PathLabel path={d.primary} className="min-w-0" />
-                  ) : (
-                    <span className={`truncate text-gray-500 ${d.primaryMono ? 'font-mono' : ''}`} title={d.primaryTitle || d.primary}>
-                      {d.primary}
-                    </span>
-                  ))}
-                {err && <span className="text-red-400 shrink-0 text-[10px]">échec</span>}
+          {entries.map((e, i) =>
+            e.kind === 'thinking' ? (
+              <li key={`th-${i}`}>
+                <ThinkingBlock slug={slug} sid={sid} tidx={e.tidx} chars={e.chars} text={e.text} active={isTail && i === entries.length - 1} />
               </li>
-            );
-          })}
+            ) : (
+              <ToolRow key={e.id || `a-${i}`} tool={e} />
+            ),
+          )}
         </ul>
+      )}
+    </div>
+  );
+}
+
+// Barre LIVE persistante, TOUJOURS en bas du chat (flush, hors flux scrollé) tant que l'agent
+// travaille : reflète l'activité courante — réflexion en cours (compteur de tokens animé),
+// outil en cours / dernier outil, sinon générique « agent travaille… ».
+function LiveBand({ activity }) {
+  const thinkingLive = activity.kind === 'thinking';
+  const thinkShown = useSmoothCount(charsToTokens(thinkingLive ? activity.chars : 0), thinkingLive);
+  const desc = activity.kind === 'tool' ? describeTool(activity.name, activity.input) : null;
+  const Icon = desc ? TOOL_ICONS[desc.iconKey] || Wrench : null;
+  const accent = 'text-blue-600 dark:text-blue-200';
+  return (
+    <div className={LIVE_BAND}>
+      <Loader2 className={`w-4 h-4 shrink-0 animate-spin ${accent}`} />
+      {thinkingLive ? (
+        <>
+          <Brain className={`w-4 h-4 shrink-0 ${accent}`} />
+          <span className="tabular-nums shrink-0" title="réflexion en cours (≈ caractères / 4)">{formatTokens(thinkShown)} tokens</span>
+          <span className="text-blue-600/60 dark:text-blue-200/60 shrink-0">…</span>
+        </>
+      ) : desc ? (
+        <>
+          <Icon className={`w-4 h-4 shrink-0 ${accent}`} />
+          <span className="shrink-0">{desc.verb}</span>
+          <span className="truncate font-mono text-blue-700/90 dark:text-blue-100/90 min-w-0">{toolTarget(desc)}</span>
+          <span className="text-blue-600/60 dark:text-blue-200/60 shrink-0">…</span>
+        </>
+      ) : (
+        <span>agent travaille…</span>
       )}
     </div>
   );
@@ -440,24 +528,34 @@ export default function AgentPanel({ panelKey }) {
     return byId;
   }, [items]);
 
-  // Nœuds de rendu : les suites contiguës de tool_use/tool_result (hors TodoWrite, épinglé)
-  // sont fusionnées en UN groupe d'activité (`kind:'tools'`), le reste reste tel quel.
+  // Nœuds de rendu : une suite contiguë d'activité INTERNE (tool_use/tool_result/thinking,
+  // hors outils épinglés) est fusionnée en UN groupe (`kind:'activity'`) DÈS qu'elle contient
+  // ≥1 outil — la réflexion devient alors un détail du groupe. Une suite de réflexions SEULES
+  // (aucun outil) reste rendue en blocs directs (`kind:'thinkitem'`) pour ne pas sur-emballer
+  // une réflexion isolée. Le reste (prose/user/result/question) coupe le groupe.
+  const isActivity = (it) => it.type === 'tool_use' || it.type === 'tool_result' || it.type === 'thinking';
   const renderNodes = useMemo(() => {
     const nodes = [];
     let i = 0;
     while (i < items.length) {
       const it = items[i];
-      if (it.type === 'tool_use' || it.type === 'tool_result') {
-        const tools = [];
+      if (isActivity(it)) {
+        const entries = [];
         let j = i;
-        while (j < items.length && (items[j].type === 'tool_use' || items[j].type === 'tool_result')) {
+        while (j < items.length && isActivity(items[j])) {
           const t = items[j];
-          if (t.type === 'tool_use' && t.name !== 'TodoWrite') {
-            tools.push({ id: t.id, name: t.name, input: t.input, result: t.id != null ? resultByUseId.get(t.id) : undefined });
+          if (t.type === 'tool_use' && !PINNED_TOOLS.has(t.name)) {
+            entries.push({ kind: 'tool', id: t.id, name: t.name, input: t.input, result: t.id != null ? resultByUseId.get(t.id) : undefined });
+          } else if (t.type === 'thinking') {
+            entries.push({ kind: 'thinking', tidx: t.tidx, chars: t.chars, text: t.text, idx: j });
           }
           j++;
         }
-        if (tools.length) nodes.push({ kind: 'tools', tools, endIdx: j - 1, key: `tools-${i}` });
+        if (entries.some((e) => e.kind === 'tool')) {
+          nodes.push({ kind: 'activity', entries, endIdx: j - 1, key: `act-${i}` });
+        } else {
+          for (const e of entries) nodes.push({ kind: 'thinkitem', tidx: e.tidx, chars: e.chars, text: e.text, idx: e.idx, key: `th-${e.idx}` });
+        }
         i = j;
       } else {
         nodes.push({ kind: 'item', it, idx: i, key: it.id || `i-${i}` });
@@ -478,6 +576,11 @@ export default function AgentPanel({ panelKey }) {
     return null;
   }, [items]);
 
+  // Checklist épinglée : système Task* du SDK s'il est utilisé (reconstruit), sinon repli
+  // sur l'ancien TodoWrite. Une session n'emploie que l'un des deux.
+  const reducedTasks = useMemo(() => reduceTasks(items), [items]);
+  const pinnedTodos = reducedTasks.length ? reducedTasks : latestTodos;
+
   // Tour suspendu sur une interaction (question/plan) : on remplace le spinner générique
   // par "en attente de ta réponse" pour ne pas laisser croire que le modèle calcule.
   const lastItem = items[items.length - 1];
@@ -485,11 +588,25 @@ export default function AgentPanel({ panelKey }) {
     !!lastItem &&
     ((lastItem.type === 'question' && !(convo?.answered?.has(lastItem.request_id) || lastItem.answered)) ||
       (lastItem.type === 'plan_review' && !(convo?.decided?.has(lastItem.request_id) || lastItem.decided)));
-  // Action d'outil en cours sur le dernier item → l'activité live l'affiche déjà : on évite
-  // le doublon avec le spinner générique « agent travaille… » du bas.
-  const liveTool =
-    running && lastItem?.type === 'tool_use' && lastItem.name !== 'TodoWrite' &&
-    (lastItem.id == null || !resultByUseId.get(lastItem.id));
+  // Activité LIVE courante, dérivée de la queue des items → rendue dans la barre persistante
+  // en bas du chat (`LiveBand`). Réflexion en cours (compteur animé) ; outil en cours OU
+  // dernier outil (micro-gap tool_result) ; sinon générique. Outils épinglés (Task*/TodoWrite)
+  // = bookkeeping → on remonte au dernier vrai outil, sinon générique.
+  const liveActivity = useMemo(() => {
+    if (!running) return null;
+    const last = items[items.length - 1];
+    if (!last) return { kind: 'generic' };
+    if (last.type === 'thinking') return { kind: 'thinking', chars: last.chars || 0 };
+    if (last.type === 'tool_use' && !PINNED_TOOLS.has(last.name)) return { kind: 'tool', name: last.name, input: last.input };
+    if (last.type === 'tool_result' || last.type === 'tool_use') {
+      for (let k = items.length - 1; k >= 0; k--) {
+        const it = items[k];
+        if (it.type === 'tool_use' && !PINNED_TOOLS.has(it.name)) return { kind: 'tool', name: it.name, input: it.input };
+        if (it.type === 'assistant' || it.type === 'user') break;
+      }
+    }
+    return { kind: 'generic' };
+  }, [items, running]);
 
   // Auto-scroll bas SEULEMENT si l'utilisateur est collé en bas. S'il a scrollé pour lire,
   // on préserve sa position et on signale « Nouveaux messages » à la place. Exception : son
@@ -558,7 +675,7 @@ export default function AgentPanel({ panelKey }) {
 
   const displayName = convName(convo);
 
-  // Rendu d'un item NON-outil (les outils passent par ToolActivityGroup).
+  // Rendu d'un item NON-activité (outils + réflexions passent par ActivityGroup/thinkitem).
   const renderItem = (it, i) => {
     if (it.type === 'user') {
       return (
@@ -577,9 +694,15 @@ export default function AgentPanel({ panelKey }) {
       );
     }
     if (it.type === 'assistant') {
-      return <div key={`i-${i}`} className="text-[13px] text-gray-200"><MarkdownView>{it.text}</MarkdownView></div>;
+      // Carte discrète (fond + bord + padding) : délimite chaque PAQUET de prose. Avant, les
+      // blocs de texte successifs (séparés par des groupes d'activité) se fondaient en un
+      // seul pavé difficile à lire.
+      return (
+        <div key={`i-${i}`} className="text-[13px] text-gray-200 bg-gray-800/30 border border-gray-800 rounded-lg px-3 py-2">
+          <MarkdownView>{it.text}</MarkdownView>
+        </div>
+      );
     }
-    if (it.type === 'thinking') return <ThinkingBlock key={`i-${i}`} slug={slug} sid={convo.sid} tidx={it.tidx} chars={it.chars} text={it.text} active={running && i === items.length - 1} />;
     if (it.type === 'result') return <ResultFooter key={`i-${i}`} data={it.data} />;
     if (it.type === 'error') {
       return (
@@ -650,7 +773,7 @@ export default function AgentPanel({ panelKey }) {
           au bas VISIBLE du panneau (il ne défile pas avec le contenu). */}
       <div className="relative flex-1 min-h-0">
       <div ref={bodyRef} onScroll={onScroll} className="h-full overflow-y-auto px-3 py-2 space-y-2">
-        {latestTodos?.length > 0 && <TodoBanner todos={latestTodos} />}
+        {pinnedTodos?.length > 0 && <TodoBanner todos={pinnedTodos} />}
         {items.length === 0 && !convo.loading && (
           <div className="text-[13px] text-gray-600 mt-4 text-center">
             Pose une question à l’agent sur <span className="text-gray-400">{slug}</span>.
@@ -666,16 +789,13 @@ export default function AgentPanel({ panelKey }) {
           </div>
         )}
         {renderNodes.map((node) =>
-          node.kind === 'tools' ? (
-            <ToolActivityGroup key={node.key} tools={node.tools} isTail={running && node.endIdx === items.length - 1} />
+          node.kind === 'activity' ? (
+            <ActivityGroup key={node.key} entries={node.entries} isTail={running && node.endIdx === items.length - 1} slug={slug} sid={convo.sid} />
+          ) : node.kind === 'thinkitem' ? (
+            <ThinkingBlock key={node.key} slug={slug} sid={convo.sid} tidx={node.tidx} chars={node.chars} text={node.text} active={running && node.idx === items.length - 1} />
           ) : (
             renderItem(node.it, node.idx)
           ),
-        )}
-        {running && !awaitingUser && !liveTool && (
-          <div className="flex items-center gap-1.5 text-[12px] text-gray-500">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" /> agent travaille…
-          </div>
         )}
         {/* Indépendant de `running` : une carte dialogue est intrinsèquement un état
             d'attente, et l'action ne dépend que de runId (restauré au refresh). */}
@@ -690,6 +810,10 @@ export default function AgentPanel({ panelKey }) {
           </button>
         )}
       </div>
+
+      {/* Barre LIVE TOUJOURS en bas du chat (hors flux scrollé, flush) tant que l'agent
+          travaille — sauf en attente d'une réponse (carte question/plan affichée à la place). */}
+      {running && !awaitingUser && liveActivity && <LiveBand activity={liveActivity} />}
 
       {/* Sélecteurs. Modèle + mode sont modifiables EN COURS de session (setModel /
           setPermissionMode à chaud). L'effort, lui, est figé au démarrage (pas d'API live) →

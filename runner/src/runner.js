@@ -396,6 +396,13 @@ function trimToolInput(name, input) {
     case 'Task':
     case 'Agent':
       return { description: truncStr(inp.description, 200), subagent_type: inp.subagent_type };
+    // Système de tâches du SDK (≥0.3.x, remplace TodoWrite) : la checklist épinglée du front
+    // se reconstruit en repliant TaskCreate (sujet, id = ordre de création) + TaskUpdate
+    // (taskId + status). On ne garde que les champs utiles à la checklist (pas `description`).
+    case 'TaskCreate':
+      return { subject: truncStr(inp.subject, 200), activeForm: truncStr(inp.activeForm, 120) };
+    case 'TaskUpdate':
+      return { taskId: inp.taskId, status: inp.status, subject: truncStr(inp.subject, 200), activeForm: truncStr(inp.activeForm, 120) };
     default: {
       // MCP/inconnu : résumé borné (≤4 clés, valeurs tronquées) — assez pour un libellé kv.
       const out = {};
