@@ -292,7 +292,7 @@ async fn start_sweep(State(state): State<ApiState>) -> impl IntoResponse {
             Json(json!({ "ok": true, "sweep": snap })),
         )
             .into_response(),
-        Err(e) if e == "sweep already running" => {
+        Err(e) if e == "sweep already running" || e == "scan in progress" => {
             (StatusCode::CONFLICT, Json(json!({ "error": e }))).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),

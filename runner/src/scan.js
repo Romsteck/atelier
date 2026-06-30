@@ -177,7 +177,10 @@ try {
       case 'assistant':
         for (const b of msg.message?.content || []) {
           if (b.type === 'text' && b.text) emit({ t: 'assistant', text: b.text });
-          else if (b.type === 'thinking' && b.thinking) emit({ t: 'thinking', text: b.thinking });
+          // Réflexion = compteur SEUL (jamais le texte), calqué sur le chat (runner.js) dont le
+          // serveur ne transmet aucun détail de réflexion au navigateur. On n'émet que la longueur
+          // (→ tokens ≈ chars/4 côté front) : le texte ne quitte pas le runner = impossible à fuiter.
+          else if (b.type === 'thinking' && b.thinking) emit({ t: 'thinking', chars: b.thinking.length });
           else if (b.type === 'tool_use') {
             // Le scan n'est pas censé appeler ces 2 dialogues (refusés par canUseTool) ;
             // on ne les remonte pas comme outils pour ne pas polluer la console.

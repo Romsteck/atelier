@@ -122,7 +122,10 @@ async fn maybe_run(svc: &SurveillanceService, store: &SweepScheduleStore) -> any
         Ok(_) => {
             info!(hour = cfg.hour, cadence = %cfg.cadence, "surveillance: sweep planifié déclenché")
         }
-        // start_sweep refuse si un sweep tourne déjà (single-flight) — bénin.
+        // start_sweep refuse si un sweep tourne déjà (single-flight) OU si un scan
+        // individuel est en cours ("scan in progress") — bénin : `last_run_at` n'est
+        // estampillé qu'à la complétion (service.rs), donc le créneau n'est PAS consommé
+        // et un tick ultérieur (5 min) réessaiera une fois le scan terminé.
         Err(e) => warn!(error = %e, "surveillance: sweep planifié non démarré"),
     }
     Ok(())

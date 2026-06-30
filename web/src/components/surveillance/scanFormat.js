@@ -1,6 +1,7 @@
 // Shared scan-transcript helpers used by the per-app Surveillance tab AND the
 // global sweep live view. The scan engine is the Claude Agent SDK (`scan.js`),
 // which emits NDJSON events carrying a `t` field.
+import { charsToTokens, formatTokens } from '../../lib/toolDisplay';
 
 // Merge transcript lines deduped by seq (a buffer replay + live WS lines can
 // overlap) and kept ordered. Capped to the last 2000.
@@ -45,7 +46,11 @@ export function formatScanEvent(raw) {
   switch (ev.t) {
     case 'system': return { icon: '▸', text: `Session de scan démarrée${ev.model ? ` (${ev.model})` : ''}`, tone: 'meta' };
     case 'assistant': return ev.text?.trim() ? { icon: '🗨', text: ev.text, tone: 'msg' } : null;
-    case 'thinking': return ev.text?.trim() ? { icon: '💭', text: ev.text, tone: 'dim' } : null;
+    // Réflexion = compteur SEUL (jamais le texte) — `scan.js` n'émet que `chars`.
+    case 'thinking': {
+      const chars = ev.chars ?? (ev.text ? ev.text.length : 0);
+      return chars ? { icon: '🧠', text: `réflexion · ${formatTokens(charsToTokens(chars))} tokens`, tone: 'dim' } : null;
+    }
     case 'tool_use': return { icon: '🔧', text: scanToolLabel(ev), tone: 'tool' };
     // Successful tool results are implied by the next message; surface errors only.
     case 'tool_result': return ev.is_error ? { icon: '⚠', text: (ev.text || '').slice(0, 200), tone: 'err' } : null;
@@ -78,11 +83,12 @@ const READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
 // A `scan_progress` tool call (emitted by the agent via the MCP signpost tool)
 // opens a new step; every event until the next marker is attributed to it.
 // Activity before the first marker becomes a synthetic "Initialisation" step.
-// Per-step metrics (reads/tools/findings/duration) are derived from the events;
-// total tokens/cost/duration come from the final `result` event. Degrades
-// gracefully: with NO markers, everything lands in one "Initialisation" step.
-// Each step keeps its raw line strings in `entries` so the detail view can
-// re-render them through `formatScanEvent` on demand.
+// Per-step metrics (reads/tools/findings/thinkingChars/duration) are derived from
+// the events; total tokens/cost/duration come from the final `result` event.
+// Degrades gracefully: with NO markers, everything lands in one "Initialisation"
+// step. Each step keeps its parsed tool calls in `toolEvents` (for the detail
+// view's tool rows) and, for the RUNNING step, the single `activeAction` in
+// progress (thinking token count or current tool) — mirroring the chat's live band.
 export function buildScanSteps(lines) {
   const steps = [];
   let cur = null;
@@ -92,8 +98,9 @@ export function buildScanSteps(lines) {
   const open = (n, total, label, ts) => {
     cur = {
       n, total, label, status: 'running',
-      reads: 0, tools: 0, findings: 0,
-      startTs: ts || null, endTs: ts || null, lastText: '', error: null, entries: [],
+      reads: 0, tools: 0, findings: 0, thinkingChars: 0,
+      toolEvents: [], activeAction: null,
+      startTs: ts || null, endTs: ts || null, error: null,
     };
     steps.push(cur);
   };
@@ -127,27 +134,39 @@ export function buildScanSteps(lines) {
         if (FINDING_TOOLS.has(b)) cur.findings++;
         else if (READ_TOOLS.has(ev.name)) cur.reads++;
         else cur.tools++;
-        cur.entries.push(l.line);
+        cur.toolEvents.push({ id: ev.id, name: ev.name, input: ev.input, isError: false });
+        cur.activeAction = { kind: 'tool', name: ev.name, input: ev.input };
         break;
       }
-      case 'assistant':
       case 'thinking':
-        if (ev.text?.trim()) { cur.lastText = ev.text.trim(); cur.entries.push(l.line); }
+        // Compteur SEUL (jamais le texte) : `scan.js` n'émet que `chars`.
+        cur.thinkingChars += ev.chars ?? (ev.text ? ev.text.length : 0);
+        cur.activeAction = { kind: 'thinking', chars: cur.thinkingChars };
         break;
       case 'tool_result':
-        if (ev.is_error) cur.entries.push(l.line);
+        // Corréler le résultat à son appel pour marquer l'échec (rendu rouge au dépli).
+        if (ev.is_error) {
+          const t = cur.toolEvents.find((x) => x.id === ev.tool_use_id);
+          if (t) t.isError = true;
+        }
         break;
       case 'error':
         cur.error = ev.message || 'erreur';
-        cur.entries.push(l.line);
         break;
+      // 'assistant' : narration non affichée dans la vue étapes (reste en vue brute).
       default:
         break;
     }
   }
 
-  // Drop a leading empty "Initialisation" (agent called scan_progress first thing).
-  if (steps.length > 1 && steps[0].n === 0 && steps[0].entries.length === 0) steps.shift();
+  // Drop a leading empty "Initialisation" (agent called scan_progress first thing) —
+  // only if it did literally nothing (no tool, no thinking, no finding, no error).
+  const s0 = steps[0];
+  if (
+    steps.length > 1 && s0.n === 0 &&
+    s0.toolEvents.length === 0 && s0.thinkingChars === 0 &&
+    s0.reads + s0.tools + s0.findings === 0 && !s0.error
+  ) steps.shift();
 
   // With a final result the run finished → every step done; otherwise the last
   // step is the one in progress.
@@ -155,6 +174,8 @@ export function buildScanSteps(lines) {
   steps.forEach((s, i) => {
     s.status = finished || i < steps.length - 1 ? 'done' : 'running';
     if (s.startTs && s.endTs) s.durationMs = s.endTs - s.startTs;
+    // L'action « active » n'a de sens que pour l'étape en cours.
+    if (s.status !== 'running') s.activeAction = null;
   });
 
   const usage = result?.usage || null;

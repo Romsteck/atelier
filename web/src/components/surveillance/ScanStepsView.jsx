@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import {
-  Loader2, Check, FileText, Wrench, Flag, Clock,
+  Loader2, Check, FileText, Wrench, Flag, Clock, Brain,
   ChevronRight, Coins, AlertTriangle,
 } from 'lucide-react';
-import { buildScanSteps, formatScanEvent, TONE_CLS } from './scanFormat';
+import { buildScanSteps } from './scanFormat';
+import { charsToTokens, formatTokens, describeScanTool, toolTarget } from '../../lib/toolDisplay';
+import { TOOL_ICONS, useSmoothCount } from '../../lib/toolPresentation';
 
 function fmtDur(ms) {
   if (ms == null) return null;
@@ -27,9 +29,60 @@ function Chip({ Icon, value, title, cls = 'text-gray-400' }) {
   );
 }
 
+// The single action in progress on the RUNNING step (mirrors the chat's live band):
+// thinking → animated token count (never the text), tool → its lucide icon + target.
+function ActiveActionBand({ action }) {
+  const thinking = action?.kind === 'thinking';
+  const tokens = useSmoothCount(charsToTokens(thinking ? action.chars : 0), thinking);
+  const desc = action?.kind === 'tool' ? describeScanTool(action.name, action.input) : null;
+  const Icon = desc ? TOOL_ICONS[desc.iconKey] || Wrench : null;
+  const target = desc ? toolTarget(desc) : '';
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] mt-0.5 pl-4 text-blue-700 dark:text-blue-200 min-w-0">
+      <Loader2 className="w-3 h-3 shrink-0 animate-spin" />
+      {thinking ? (
+        <>
+          <Brain className="w-3 h-3 shrink-0" />
+          <span className="tabular-nums shrink-0" title="réflexion en cours (≈ caractères / 4)">{formatTokens(tokens)} tokens</span>
+          <span className="opacity-60 shrink-0">…</span>
+        </>
+      ) : desc ? (
+        <>
+          <Icon className="w-3 h-3 shrink-0" />
+          <span className="shrink-0">{desc.verb}</span>
+          {target && <span className="truncate font-mono opacity-90 min-w-0">{target}</span>}
+          <span className="opacity-60 shrink-0">…</span>
+        </>
+      ) : (
+        <span>scan travaille…</span>
+      )}
+    </div>
+  );
+}
+
+// One tool call in a step's expanded detail (icon + verb + target, red on failure).
+// Thinking is NEVER shown here — only its aggregated token count lives in the chips.
+function ScanToolRow({ tool }) {
+  const d = describeScanTool(tool.name, tool.input);
+  const Icon = TOOL_ICONS[d.iconKey] || Wrench;
+  const target = toolTarget(d);
+  return (
+    <li className="flex items-center gap-1.5 text-[10px] min-w-0">
+      <Icon className={`w-3 h-3 shrink-0 ${tool.isError ? 'text-red-400' : 'text-gray-500'}`} />
+      <span className="text-gray-400 shrink-0">{d.verb}</span>
+      {d.badge && (
+        <span className="shrink-0 text-[9px] uppercase tracking-wider text-gray-400 bg-gray-700/40 px-1 py-0.5 rounded-sm">{d.badge}</span>
+      )}
+      {target && <span className="truncate text-gray-500 min-w-0 font-mono" title={d.primary}>{target}</span>}
+      {tool.isError && <span className="text-red-400 shrink-0 text-[9px]">échec</span>}
+    </li>
+  );
+}
+
 // Step list derived from the live transcript (driven by the agent's
 // `scan_progress` MCP signposts). Shown in place of the raw conversation: one
-// row per phase with its metrics; click a row to reveal its raw sub-events.
+// row per phase with its aggregated metrics + (for the running step) the single
+// active action; click a row to reveal its tool calls.
 export default function ScanStepsView({ lines }) {
   const { steps, footer, model } = useMemo(() => buildScanSteps(lines), [lines]);
   const [open, setOpen] = useState({}); // explicit per-index override of the default
@@ -44,9 +97,6 @@ export default function ScanStepsView({ lines }) {
         const running = s.status === 'running';
         const isOpen = open[i] ?? running; // running step expanded by default
         const dur = fmtDur(s.durationMs);
-        const detail = isOpen
-          ? s.entries.map((raw) => formatScanEvent(raw)).filter((e) => e && (e.text?.trim() || e.tone === 'meta'))
-          : [];
         return (
           <div key={i} className="flex gap-2">
             {/* Left rail: number badge + connector line */}
@@ -78,34 +128,30 @@ export default function ScanStepsView({ lines }) {
                 {s.total ? <span className="text-[10px] text-gray-500 shrink-0">{s.n}/{s.total}</span> : null}
               </button>
 
-              {/* Metric chips */}
+              {/* Aggregated metric chips (counts of reads / actions / findings / thinking / duration) */}
               <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] mt-0.5 pl-4">
                 {s.reads > 0 && <Chip Icon={FileText} value={s.reads} title="fichiers lus (Read/Grep/Glob)" />}
-                {s.tools > 0 && <Chip Icon={Wrench} value={s.tools} title="autres outils" />}
+                {s.tools > 0 && <Chip Icon={Wrench} value={s.tools} title="actions (autres outils)" />}
                 {s.findings > 0 && (
                   <Chip Icon={Flag} value={s.findings} title="findings touchées" cls="text-fuchsia-700 dark:text-fuchsia-300" />
                 )}
-                {dur && <Chip Icon={Clock} value={dur} title="durée de l'étape" />}
-                {s.reads + s.tools + s.findings === 0 && !dur && running && (
-                  <span className="text-gray-600 italic">en cours…</span>
+                {s.thinkingChars > 0 && (
+                  <Chip Icon={Brain} value={formatTokens(charsToTokens(s.thinkingChars))} title="réflexion (estimation ≈ caractères / 4)" />
                 )}
+                {dur && <Chip Icon={Clock} value={dur} title="durée de l'étape" />}
               </div>
 
-              {/* Running subtitle: the latest thinking/message line */}
-              {running && s.lastText && !isOpen && (
-                <div className="text-[10px] text-gray-500 truncate mt-0.5 pl-4 italic">{s.lastText}</div>
-              )}
+              {/* Running step: the single active action in progress */}
+              {running && <ActiveActionBand action={s.activeAction} />}
 
-              {/* Expanded raw sub-events */}
-              {isOpen && detail.length > 0 && (
-                <div className="mt-1 ml-4 pl-2 border-l border-gray-700/60 space-y-1 max-h-48 overflow-y-auto">
-                  {detail.map((e, j) => (
-                    <div key={j} className="flex gap-1.5 text-[10px] leading-relaxed font-mono">
-                      {e.icon && <span className="shrink-0 select-none">{e.icon}</span>}
-                      <span className={`whitespace-pre-wrap wrap-break-word min-w-0 ${TONE_CLS[e.tone] || 'text-gray-300'}`}>{e.text}</span>
-                    </div>
-                  ))}
-                </div>
+              {/* Expanded tool calls (never thinking text) */}
+              {isOpen && s.toolEvents.length > 0 && (
+                <ul className="mt-1 ml-4 pl-2 border-l border-gray-700/60 space-y-0.5 max-h-48 overflow-y-auto">
+                  {s.toolEvents.map((t, j) => <ScanToolRow key={t.id || j} tool={t} />)}
+                </ul>
+              )}
+              {isOpen && s.error && (
+                <div className="mt-1 ml-4 pl-2 text-[10px] text-red-700 dark:text-red-300 wrap-break-word">⚠ {s.error}</div>
               )}
             </div>
           </div>

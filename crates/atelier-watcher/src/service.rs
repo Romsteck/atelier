@@ -383,6 +383,15 @@ impl SurveillanceService {
         if !self.inner.enabled {
             return Err("surveillance disabled (postgres unreachable)".into());
         }
+        // Exclusion mutuelle avec les scans individuels (Studio/manuels) : refuser le
+        // sweep tant qu'un scan est en vol — sa relecture FORCÉE du même app+kind
+        // collisionnerait sur les findings (double run concurrent, triage incohérent).
+        // Ici aucun sweep n'est encore actif (single-flight juste en dessous), donc tout
+        // run présent dans `running` est forcément un scan unitaire. Couvre le bouton ET
+        // le scheduler (`start_sweep` est l'unique point d'entrée des deux).
+        if !self.inner.running.lock().unwrap().is_empty() {
+            return Err("scan in progress".into());
+        }
         let mut guard = self.inner.sweep.lock().unwrap();
         if let Some(s) = guard.as_ref() {
             if matches!(s.snapshot.status, SweepStatus::Running | SweepStatus::Cancelling) {

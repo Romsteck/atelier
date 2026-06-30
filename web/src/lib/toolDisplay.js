@@ -94,3 +94,52 @@ export function describeTool(name, input) {
   // Inconnu : liste key:value de l'input.
   return { ...base, primary: kvSummary(inp), primaryTitle: safeJson(inp) };
 }
+
+// Cible compacte d'un outil (basename pour les chemins, primary tronqué sinon). Partagé
+// entre la bande live du chat (AgentPanel) et celle du suivi de scan (ScanStepsView).
+export function toolTarget(d) {
+  if (!d || !d.primary) return '';
+  if (d.primaryPath) return splitPath(d.primary).base;
+  return d.primary.length > 60 ? `${d.primary.slice(0, 59)}…` : d.primary;
+}
+
+// Estimation client-side du nombre de tokens de réflexion à partir d'un nombre de
+// caractères. Le flux thinking ne porte pas le compte réel → heuristique ≈ caractères / 4
+// (ordre de grandeur usuel). Indicateur de progression, pas de facturation.
+export const charsToTokens = (chars) => Math.max(0, Math.round((chars || 0) / 4));
+
+// Compteur de tokens compact : exact sous 1000, sinon notation « K » (1 décimale sous 10K,
+// entier au-delà). Virgule décimale française (1 234 → « 1,2K », 1000 → « 1K »).
+export function formatTokens(n) {
+  if (n < 1000) return n.toLocaleString('fr-FR');
+  const k = n / 1000;
+  const s = k < 10 ? k.toFixed(1).replace(/\.0$/, '') : String(Math.round(k));
+  return `${s.replace('.', ',')}K`;
+}
+
+// Variante de `describeTool` pour les outils du scan-agent de surveillance : les tools MCP
+// findings_*/pm_query/scan_progress ont des libellés/icônes dédiés ; le reste (Read/Grep/Glob,
+// MCP génériques) retombe sur `describeTool`. Strippe le préfixe `mcp__{serveur}__`.
+export function describeScanTool(name, input) {
+  const bare = typeof name === 'string' && name.startsWith('mcp__') ? name.split('__').slice(2).join('__') : name;
+  const inp = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const base = { iconKey: 'flag', verb: '', primary: '', primaryPath: false, primaryMono: false };
+  switch (bare) {
+    case 'findings_upsert':
+      return { ...base, verb: 'Finding', primary: `[${inp.severity || '?'}] ${inp.title || ''}`, badge: inp.severity };
+    case 'findings_dismiss':
+    case 'findings_resolve':
+    case 'findings_delete':
+      return { ...base, verb: bare.replace('findings_', ''), primary: inp.id != null ? `#${inp.id}` : '' };
+    case 'findings_list':
+      return { ...base, iconKey: 'tool', verb: 'findings_list', primary: inp.kind || '' };
+    case 'pm_query':
+      return { ...base, iconKey: 'mcp', verb: 'pm_query', primary: '' };
+    case 'scan_progress':
+      return { ...base, iconKey: 'tool', verb: 'Étape', primary: inp.label || '' };
+    default:
+      // Read/Grep/Glob + MCP génériques + inconnus : `describeTool` gère (avec le nom complet
+      // pour que sa branche mcp__ s'applique aux MCP non spécialisés ici).
+      return describeTool(name, input);
+  }
+}

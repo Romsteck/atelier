@@ -1,70 +1,15 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
-  Loader2, Bot, ChevronRight, ChevronDown, Wrench, AlertTriangle, X,
-  FileText, FilePlus, FilePen, Terminal, FolderSearch, Search, Globe, ListChecks, NotebookPen, Plug, Brain,
+  Loader2, Bot, ChevronRight, ChevronDown, Wrench, AlertTriangle, X, ListChecks, Brain,
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
 import Composer from './agent/Composer';
 import { getSdkVersion, updateSdk } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
-import { describeTool, splitPath } from '../lib/toolDisplay';
+import { describeTool, splitPath, charsToTokens, formatTokens, toolTarget } from '../lib/toolDisplay';
+import { TOOL_ICONS, useSmoothCount } from '../lib/toolPresentation';
 import { MODELS, MODES, buildSettings } from '../lib/agentModels';
-
-// Estimation client-side du nombre de tokens de réflexion à partir d'un nombre de
-// caractères. Le flux thinking ne porte pas le compte réel → heuristique ≈ caractères / 4
-// (ordre de grandeur usuel). Indicateur de progression, pas de facturation.
-const charsToTokens = (chars) => Math.max(0, Math.round((chars || 0) / 4));
-
-// Compteur de tokens compact : exact sous 1000, sinon notation « K » (1 décimale sous 10K,
-// entier au-delà). Virgule décimale française (1 234 → « 1,2K », 1000 → « 1K »).
-function formatTokens(n) {
-  if (n < 1000) return n.toLocaleString('fr-FR');
-  const k = n / 1000;
-  const s = k < 10 ? k.toFixed(1).replace(/\.0$/, '') : String(Math.round(k));
-  return `${s.replace('.', ',')}K`;
-}
-
-// Compteur LISSÉ : `target` saute par paliers (les tokens de réflexion arrivent en
-// lots ~50), on l'affiche en montant graduellement (≈12 %/frame + 1 min) via rAF pour
-// éviter les à-coups. `active` faux (réflexion finie / bloc d'historique) → snap direct.
-// SLOWDOWN : on n'avance qu'une frame sur 8 → animation 2× plus lente que ~15 Hz (~7,5 Hz).
-const SMOOTH_FRAME_SKIP = 8;
-function useSmoothCount(target, active) {
-  const [shown, setShown] = useState(target);
-  const targetRef = useRef(target);
-  const shownRef = useRef(target);
-  targetRef.current = target;
-
-  useEffect(() => {
-    if (!active) {
-      shownRef.current = targetRef.current;
-      setShown(targetRef.current);
-      return;
-    }
-    let raf;
-    let frame = 0;
-    const tick = () => {
-      if (++frame % SMOOTH_FRAME_SKIP === 0) {
-        const t = targetRef.current;
-        const cur = shownRef.current;
-        if (cur !== t) {
-          const gap = t - cur;
-          const step = Math.sign(gap) * Math.max(1, Math.ceil(Math.abs(gap) * 0.12));
-          let nextVal = cur + step;
-          if ((gap > 0 && nextVal > t) || (gap < 0 && nextVal < t)) nextVal = t;
-          shownRef.current = nextVal;
-          setShown(nextVal);
-        }
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [active]);
-
-  return shown;
-}
 
 // Réflexion = compteur SEUL (jamais le texte). Le front ne reçoit que `chars` (le serveur
 // n'envoie aucun détail), affiché en tokens (≈ chars/4). Non interactif, rien à déplier.
@@ -77,13 +22,6 @@ function ThinkingCount({ chars }) {
   );
 }
 
-// Mapping iconKey (toolDisplay) → composant lucide. Les imports lucide restent ici
-// (côté composant) ; toolDisplay reste pur (sans JSX).
-const TOOL_ICONS = {
-  read: FileText, write: FilePlus, edit: FilePen, bash: Terminal,
-  glob: FolderSearch, search: Search, web: Globe, agent: Bot,
-  todo: ListChecks, notebook: NotebookPen, mcp: Plug, tool: Wrench,
-};
 const TOOL_CHIP = 'shrink-0 text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/40 px-1.5 py-0.5 rounded-sm';
 
 // Bande « live » : barre PLEINE LARGEUR flush en bas du chat (aucune marge), fond bleu LÉGER,
@@ -170,13 +108,6 @@ function TodoBanner({ todos }) {
       )}
     </div>
   );
-}
-
-// Cible compacte d'un outil (basename pour les chemins, primary tronqué sinon).
-function toolTarget(d) {
-  if (!d.primary) return '';
-  if (d.primaryPath) return splitPath(d.primary).base;
-  return d.primary.length > 60 ? `${d.primary.slice(0, 59)}…` : d.primary;
 }
 
 // Une ligne d'outil dans le détail déplié d'un groupe d'activité.
