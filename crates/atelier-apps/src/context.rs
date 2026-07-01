@@ -407,21 +407,45 @@ impl ContextGenerator {
              4. Check the result via `app.status` and `app.logs`.\n\
              5. Open {url} to validate the change end-to-end.\n\
              \n\
-             ## Commit & push (fin de feature)\n\
-             - Quand une feature / un correctif cohérent est **terminé et validé**, \
-             **PROPOSE à l'utilisateur** de committer puis pousser. Ne commit/push **jamais** \
-             en silence, ni du travail à moitié fait — c'est l'utilisateur qui décide.\n\
-             - S'il accepte, dans `{src_dir}` via Bash : `git add -A && git commit -m \
-             \"<résumé clair, impératif>\"` (**aucune attribution Claude / Co-Authored-By** \
-             dans le message), puis `git push origin` (origin = dépôt Atelier local, \
+             > Ce cycle (edit → build → `app.control restart`) sert à **itérer en \
+             session** sur une feature en cours. La **livraison en prod** (0-build → \
+             0-deploy) se fait en **fin de feature validée** — voir ci-dessous.\n\
+             \n\
+             ## Fin de feature : livrer PUIS proposer le commit\n\
+             Quand une feature / un correctif cohérent est **terminé et validé** \
+             (vérifié end-to-end sur {url}), applique **systématiquement** et **dans \
+             cet ordre** :\n\
+             1. **Livre en prod, sans demander** : `0-build` (compile en place) puis, \
+             s'il passe, `0-deploy` (stop + restart). La livraison est **libre** — tu \
+             ne demandes PAS l'autorisation de déployer, comme un `make deploy-app`. \
+             Vérifie ensuite `app.status` (`running`) et {url}.\n\
+             2. **PROPOSE ensuite le commit** : le commit reste **décidé par \
+             l'utilisateur**. Ne commit/push jamais en silence ni du travail à moitié \
+             fait. S'il accepte, dans `{src_dir}` via Bash : `git add -A && git commit \
+             -m \"<résumé clair, impératif>\"` (**aucune attribution Claude / \
+             Co-Authored-By**), puis `git push origin` (origin = dépôt Atelier local, \
              miroir GitHub via post-receive).\n\
-             - Le déploiement reste **séparé** du commit : build via **0-build**, livraison \
-             via **0-deploy** quand l'utilisateur demande de livrer.\n\
+             \n\
+             **Règle de livraison** : déployer est libre et systématique en fin de \
+             feature ; committer se demande. (Symétrique de la doctrine Atelier : \
+             déployer librement, demander avant de committer.)\n\
+             \n\
+             **Si ça échoue** : `0-build` KO → ne déploie PAS, corrige, re-build sur \
+             vert. `0-deploy` KO → l'app peut être down : diagnostique (`app.status` / \
+             `app.logs`), répare, re-livre ; ne propose le commit qu'une fois \
+             `running` et sain.\n\
+             \n\
+             **Pendant l'itération** (feature pas finie) : tu build librement pour \
+             compiler/tester mais tu ne déploies PAS à chaque petit edit — 0-deploy se \
+             déclenche une fois la feature validée.\n\
              \n\
              ## Regles\n\
              - **Builder sur place** : jamais de cross-compile, tout se compile sur le serveur de production.\n\
              - **Pas de mode dev** : pas de `pnpm dev` / `cargo watch`. Production only.\n\
-             - **Pas de pipelines** : pas de promotion dev→acc→prod.\n\
+             - **Pas de pipelines, pas d'environnements** : un seul runtime, la prod ; \
+             pas de promotion dev→acc→prod. « Pas de pipeline » = pas d'étages, PAS \
+             « ne pas déployer » : la livraison en fin de feature est justement \
+             systématique (voir ci-dessus).\n\
              \n\
              ## Environment variables\n\
              Atelier injects a single `.env` (rendered automatically — **ne pas \
@@ -754,7 +778,7 @@ __BUILD_COMMAND__
 ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
 emit "{\"status\":\"finished\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"message\":\"build OK (local)\"}"
 echo "=== Build OK ($ELAPSED_MS ms) ==="
-echo "Pour livrer en prod : bash .claude/skills/0-deploy/deploy.sh"
+echo "En fin de feature validée, livre en prod : bash .claude/skills/0-deploy/deploy.sh"
 "#;
     template
         .replace("__SLUG__", &app.slug)
@@ -784,7 +808,7 @@ fn render_app_deploy_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: 0-deploy\n\
-         description: Livre les artefacts pre-buildés de l'app `{slug}` vers Medion (rsync + restart). Utilise cette skill QUAND l'utilisateur demande de déployer/livrer/ship cette app — APRÈS un build local réussi.\n\
+         description: Livre en prod l'app `{slug}` (stop + restart pour reprendre l'artefact buildé). Utilise cette skill EN FIN DE FEATURE VALIDÉE (livraison systématique, sans demander l'autorisation), et aussi quand l'utilisateur demande de déployer/livrer/ship. Toujours APRÈS un `0-build` réussi.\n\
          allowed-tools: Bash(bash .claude/skills/0-deploy/deploy.sh*)\n\
          ---\n\
          \n\
@@ -866,7 +890,7 @@ fn render_app_build_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: 0-build\n\
-         description: Build local de l'application {slug} ({stack}) sur Medion (toolchain locale, output cargo/pnpm visible en live). Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app.\n\
+         description: Build local de l'app {slug} ({stack}) sur Medion (toolchain locale, output cargo/pnpm en live). Utilise cette skill pour itérer/compiler pendant le dev ET en fin de feature validée (build puis 0-deploy, livraison systématique), ou quand l'utilisateur demande de builder/compiler/rebuild.\n\
          allowed-tools: Bash(bash .claude/skills/0-build/build.sh*)\n\
          ---\n\
          \n\
@@ -887,7 +911,11 @@ fn render_app_build_skill(app: &Application) -> String {
          bash .claude/skills/0-build/build.sh\n\
          ```\n\
          \n\
-         Tu peux itérer sans deploy : edit → build → re-edit → re-build. Tant que tu n'as pas fait `0-deploy`, le runtime Medion ne change pas (c'est volontaire).\n\
+         Tu peux itérer sans deploy : edit → build → re-edit → re-build. Tant que tu \
+         n'as pas fait `0-deploy`, le runtime Medion ne change pas — **volontaire \
+         pendant l'itération**. Mais **en fin de feature validée, 0-deploy est \
+         systématique** (livraison libre, sans demander) : le build seul ne suffit pas \
+         à livrer.\n\
          \n\
          ## Retour\n\
          \n\
@@ -1547,7 +1575,10 @@ fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
          2. Pour chaque finding : la liste montre titre+summary ; ouvre le `plan` (document de résolution) ; demande confirmation ; implémente ; vérifie (build/typecheck) ; commit `fix(surveillance:<id>): <résumé>` puis `findings_resolve(id, commit_sha)`. Faux positif → `findings_dismiss(id, reason)`.\n\
          3. Récap : N résolues, M dismiss, K ouvertes.\n\
          \n\
-         **Ne lance JAMAIS `make deploy` toi-même** — l'utilisateur livre après revue des commits.\n",
+         **Ne lance JAMAIS `make deploy` / `make deploy-app` toi-même** (commandes \
+         d'Atelier, hors périmètre d'une app). Pour livrer un fix, passe par `0-build` \
+         puis `0-deploy` (comme toute fin de feature) : la livraison est libre. Le \
+         commit `fix(surveillance:<id>)` reste, lui, décidé par l'utilisateur.\n",
         slug = app.slug,
     )));
 
