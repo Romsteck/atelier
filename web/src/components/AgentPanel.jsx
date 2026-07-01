@@ -82,17 +82,23 @@ function reduceTasks(items) {
 // continu (N appels TodoWrite/tour). L'afficher inline la faisait « sauter » plus bas à
 // chaque MAJ (rendue à la position de la dernière occurrence). Épinglée, elle montre
 // TOUJOURS le dernier état, mise à jour en place. Repliable pour libérer de la place.
-function TodoBanner({ todos }) {
-  const [open, setOpen] = useState(true);
+function TodoBanner({ todos, collapsed = false }) {
+  const [open, setOpen] = useState(!collapsed);
+  // Auto-repli quand la liste devient « terminée + nouveau tour » (todoStale) : n'agit qu'à
+  // la transition vers collapsed=true → l'utilisateur peut toujours la rouvrir d'un clic.
+  useEffect(() => { if (collapsed) setOpen(false); }, [collapsed]);
   const total = todos.length;
   const done = todos.filter((t) => t.status === 'completed').length;
+  const allDone = total > 0 && done === total;
+  // Hors du flux scrollé, collé sous l'en-tête (plus de gap). Fond légèrement élevé +
+  // ombre portée + `z-10` (l'ombre passe AU-DESSUS du fil qui suit) pour le démarquer.
   return (
-    <div className="sticky top-0 z-10 -mx-3 px-3 py-1.5 bg-gray-900/95 backdrop-blur-sm border-b border-gray-800">
+    <div className="relative z-10 shrink-0 px-3 py-1.5 bg-gray-800/60 border-b border-gray-700 shadow-[0_2px_6px_rgba(0,0,0,0.35)]">
       <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-1.5 text-[12px] text-gray-400 hover:text-gray-200">
         {open ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
         <ListChecks className="w-3.5 h-3.5 shrink-0" />
         <span className="text-gray-300">Todos</span>
-        <span className="text-gray-600">{done}/{total}</span>
+        <span className={allDone ? 'text-green-500' : 'text-gray-600'}>{done}/{total}</span>
       </button>
       {open && (
         <ul className="mt-1 ml-5 space-y-0.5">
@@ -460,6 +466,22 @@ export default function AgentPanel({ panelKey }) {
   const reducedTasks = useMemo(() => reduceTasks(items), [items]);
   const pinnedTodos = reducedTasks.length ? reducedTasks : latestTodos;
 
+  // Bandeau « terminé + nouveau tour » (WHY) : garantie visuelle déterministe. Si la liste
+  // épinglée est 100% complétée ET qu'un message utilisateur est arrivé APRÈS le dernier
+  // tool_use qui la définit, on la replie — le bandeau ne reste pas bloqué sur du ✓✓✓ périmé,
+  // même quand l'agent oublie de le réinitialiser. Couvre aussi le cas resume (dérivé des items).
+  const todoStale = useMemo(() => {
+    const todos = pinnedTodos;
+    if (!todos?.length || !todos.every((t) => t.status === 'completed')) return false;
+    const isTodoTool = (it) =>
+      it.type === 'tool_use' && (it.name === 'TodoWrite' || it.name === 'TaskCreate' || it.name === 'TaskUpdate');
+    let lastTodoIdx = -1;
+    for (let k = items.length - 1; k >= 0; k--) { if (isTodoTool(items[k])) { lastTodoIdx = k; break; } }
+    if (lastTodoIdx < 0) return false;
+    for (let k = lastTodoIdx + 1; k < items.length; k++) { if (items[k].type === 'user') return true; }
+    return false;
+  }, [pinnedTodos, items]);
+
   // Tour suspendu sur une interaction (question/plan) : on remplace le spinner générique
   // par "en attente de ta réponse" pour ne pas laisser croire que le modèle calcule.
   const lastItem = items[items.length - 1];
@@ -656,11 +678,14 @@ export default function AgentPanel({ panelKey }) {
         </div>
       </div>
 
+      {/* Checklist épinglée : HORS du flux scrollé, collée sous l'en-tête (plus de gap),
+          fond + ombre distincts. Repliée d'elle-même quand terminée + nouveau tour (todoStale). */}
+      {pinnedTodos?.length > 0 && <TodoBanner todos={pinnedTodos} collapsed={todoStale} />}
+
       {/* Fil de conversation. Wrapper `relative` : le bouton « Nouveaux messages » s'ancre
           au bas VISIBLE du panneau (il ne défile pas avec le contenu). */}
       <div className="relative flex-1 min-h-0">
       <div ref={bodyRef} onScroll={onScroll} className="h-full overflow-y-auto px-3 py-2 space-y-2">
-        {pinnedTodos?.length > 0 && <TodoBanner todos={pinnedTodos} />}
         {items.length === 0 && !convo.loading && (
           <div className="text-[13px] text-gray-600 mt-4 text-center">
             Pose une question à l’agent sur <span className="text-gray-400">{slug}</span>.

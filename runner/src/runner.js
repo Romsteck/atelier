@@ -335,6 +335,67 @@ async function canUseTool(toolName, input, opts) {
   return { behavior: 'allow', updatedInput: input };
 }
 
+// Suivi de la todolist COURANTE de la session (WHY) : sert au hook UserPromptSubmit
+// ci-dessous, qui doit savoir si la liste est 100% terminée à l'arrivée d'un nouveau
+// tour. On réplique la dérivation du front (AgentPanel `reduceTasks`/`latestTodos`) :
+// `TodoWrite` (ancien système) OU réduction du flux `Task*` (nouveau SDK ≥0.3.x) — une
+// session n'emploie que l'un des deux. Alimenté depuis la boucle `case 'assistant'`.
+let todoWriteList = []; // dernier TodoWrite vu (liste complète)
+const taskById = new Map(); // Task* : id ordinal (« 1,2,3… ») → {status,content,activeForm}
+const taskOrder = [];
+let taskCreated = 0;
+function trackTodo(name, input) {
+  if (name === 'TodoWrite') {
+    todoWriteList = Array.isArray(input?.todos) ? input.todos : [];
+  } else if (name === 'TaskCreate') {
+    const id = String(++taskCreated);
+    taskById.set(id, { id, content: input?.subject || '', activeForm: input?.activeForm || '', status: 'pending' });
+    taskOrder.push(id);
+  } else if (name === 'TaskUpdate') {
+    const id = String(input?.taskId ?? '');
+    if (!id) return;
+    let t = taskById.get(id);
+    if (!t) { t = { id, content: '', activeForm: '', status: 'pending' }; taskById.set(id, t); taskOrder.push(id); }
+    if (input?.subject) t.content = input.subject;
+    if (input?.activeForm) t.activeForm = input.activeForm;
+    if (input?.status) t.status = input.status;
+  }
+}
+function effectiveTodos() {
+  // Task* prime s'il est employé (comme `reducedTasks.length ? reducedTasks : latestTodos`).
+  if (taskOrder.length) return taskOrder.map((id) => taskById.get(id)).filter((t) => t && t.status !== 'deleted');
+  return todoWriteList;
+}
+
+// Hook UserPromptSubmit = rappel de reset DÉTERMINISTE, piloté par l'HÔTE (donc indépendant
+// de la mémoire de l'agent, qui oublie souvent de nettoyer sa todolist terminée après un
+// long effort). À CHAQUE nouveau prompt utilisateur : si la todolist courante est non vide
+// ET 100% complétée, on injecte un additionalContext ordonnant sa réinitialisation. Dédup
+// par signature → un seul rappel tant que la même liste complète subsiste (pas de spam si
+// l'agent l'ignore et que l'utilisateur ré-écrit). Reset de la signature dès que la liste
+// redevient incomplète/vide, pour re-nudger sur une future complétion.
+let lastNudgedSig = null;
+async function todoResetHook() {
+  const todos = effectiveTodos();
+  const total = todos.length;
+  const done = todos.filter((t) => t && t.status === 'completed').length;
+  if (!total || done !== total) { lastNudgedSig = null; return {}; }
+  const sig = JSON.stringify(todos.map((t) => `${t.status}:${t.content}`));
+  if (sig === lastNudgedSig) return {};
+  lastNudgedSig = sig;
+  diag(`todo-reset: todolist terminée (${done}/${total}) au nouveau tour → rappel de reset injecté`);
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext:
+        `La todolist précédente est terminée à 100 % (${done}/${total}). Nouvelle requête reçue : ` +
+        `commence par réinitialiser ta todolist AVANT toute autre chose — un TodoWrite avec une liste vide ` +
+        `si la nouvelle demande est triviale, sinon une nouvelle liste pour cette tâche. ` +
+        `Ne laisse pas l'ancienne checklist complétée épinglée.`,
+    },
+  };
+}
+
 const options = {
   // effort : 'low'|'medium'|'high'|'xhigh'|'max' — optionnel (xhigh/max = Opus ; Haiku : aucun).
   ...(effort ? { effort } : {}),
@@ -347,6 +408,7 @@ const options = {
   settingSources: ['project'],
   systemPrompt: { type: 'preset', preset: 'claude_code' },
   canUseTool, // host unique : AskUserQuestion (2 modes) + ExitPlanMode (plan) + garde-fou MCP en plan
+  hooks: { UserPromptSubmit: [{ hooks: [todoResetHook] }] }, // reset déterministe de la todolist terminée au nouveau tour
   // Omettre model → le CLI résout le défaut de l'abonnement = claude-opus-4-8[1m] (contexte 1M).
   ...(model ? { model } : {}),
   ...(cwd ? { cwd } : {}),
@@ -573,6 +635,8 @@ try {
         // Le texte est déjà streamé via les deltas ; ici on ne remonte que les tool_use.
         for (const block of msg.message?.content || []) {
           if (block.type !== 'tool_use') continue;
+          // Suit l'état de la todolist (input INTÉGRAL, avant tout trim) pour le hook de reset.
+          trackTodo(block.name, block.input);
           // AskUserQuestion / ExitPlanMode sont matérialisés par canUseTool (events
           // `question` / `plan_review`) — on ne ré-émet pas leur tool_use brut, et on masque
           // leur tool_result par block.id (source d'id fiable : l'assistant arrive AVANT
