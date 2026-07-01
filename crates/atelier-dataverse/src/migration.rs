@@ -275,6 +275,7 @@ mod tests {
             columns: cols,
             description: None,
             id_strategy: IdStrategy::Bigserial,
+            display_column: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -367,6 +368,7 @@ mod tests {
             columns: vec![],
             description: None,
             id_strategy: IdStrategy::Uuid,
+            display_column: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -393,6 +395,7 @@ mod tests {
             columns: vec![],
             description: None,
             id_strategy: IdStrategy::Bigserial,
+            display_column: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

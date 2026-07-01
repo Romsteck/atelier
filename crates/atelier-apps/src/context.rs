@@ -1724,9 +1724,30 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          ## Schema-ops (création/évolution de tables)\n\
          \n\
          - `db_create_table`, `db_add_column`, `db_create_relation`,\n\
-           `db_drop_table`, `db_remove_column` — outils MCP pour faire évoluer le\n\
-           schéma. Créent tables avec trigger `updated_at`, FK natives, types\n\
-           Dataverse riches.\n\
+           `db_drop_table`, `db_remove_column`, `db_set_display_column` — outils\n\
+           MCP pour faire évoluer le schéma. Créent tables avec trigger\n\
+           `updated_at`, FK natives, types Dataverse riches.\n\
+         \n\
+         ## 🔤 Colonne d'affichage primaire (lookups)\n\
+         \n\
+         Quand une table est **référencée par un Lookup**, l'UI (explorateur,\n\
+         sélecteurs) et `$expand` affichent sa **colonne d'affichage primaire** à\n\
+         la place de l'id brut. Invariant : **chaque table** a une colonne\n\
+         d'affichage primaire **explicitement définie** (jamais implicite) —\n\
+         y compris `id` si aucune colonne texte ne convient. La plateforme la\n\
+         renseigne d'office à la création (et backfille les tables existantes).\n\
+         \n\
+         - **Par défaut**, elle est déduite par heuristique : 1re colonne texte\n\
+           nommée `name`, puis `title`, puis `label`, puis la 1re colonne texte ;\n\
+           à défaut (aucune colonne texte) → `id`. Cette valeur est **épinglée**\n\
+           explicitement, pas recalculée à chaque lecture.\n\
+         - Nommer cette colonne `name` est **recommandé quand c'est naturel** —\n\
+           mais **non obligatoire**.\n\
+         - Pour la changer : `db_set_display_column` (`table` + `column` texte,\n\
+           ou `id`, ou `null` pour recalculer+épingler le défaut).\n\
+         - Côté app : `GET /api/dv/{slug}/<table>?$expand=<colonne_lookup>` renvoie\n\
+           `<colonne_lookup>_display` (le libellé de la cible) **à côté** de l'id\n\
+           brut — plus besoin de charger une table de correspondance en mémoire.\n\
          \n\
          ## ❌ Ne PAS faire\n\
          \n\

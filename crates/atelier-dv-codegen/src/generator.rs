@@ -604,6 +604,7 @@ mod tests {
                 ],
                 description: None,
                 id_strategy: IdStrategy::Bigserial,
+                display_column: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }],

@@ -31,20 +31,27 @@ use crate::validation;
 /// safely after a partial provisioning failure.
 pub const INIT_METADATA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS _dv_tables (
-    id          BIGSERIAL PRIMARY KEY,
-    name        TEXT NOT NULL UNIQUE,
-    slug        TEXT NOT NULL UNIQUE,
-    description TEXT,
+    id             BIGSERIAL PRIMARY KEY,
+    name           TEXT NOT NULL UNIQUE,
+    slug           TEXT NOT NULL UNIQUE,
+    description    TEXT,
     -- 'bigserial' (legacy default) or 'uuid' — picks the implicit
     -- `id` column type for this user table. See [`IdStrategy`].
-    id_strategy TEXT NOT NULL DEFAULT 'bigserial',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id_strategy    TEXT NOT NULL DEFAULT 'bigserial',
+    -- Primary display column: shown in place of the raw id when this table
+    -- is referenced by a Lookup (DbExplorer, selectors, gateway $expand).
+    -- NULL = auto (heuristic). See [`DatabaseSchema::effective_display_column`].
+    display_column TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- Forward-compat: existing databases that pre-date the column get it
--- backfilled with the safe default. ALTER … IF NOT EXISTS is idempotent.
+-- Forward-compat: existing databases that pre-date these columns get them
+-- backfilled. ALTER … IF NOT EXISTS is idempotent, so replaying the whole
+-- bootstrap on every engine open is safe.
 ALTER TABLE _dv_tables
     ADD COLUMN IF NOT EXISTS id_strategy TEXT NOT NULL DEFAULT 'bigserial';
+ALTER TABLE _dv_tables
+    ADD COLUMN IF NOT EXISTS display_column TEXT;
 
 CREATE TABLE IF NOT EXISTS _dv_columns (
     id                  BIGSERIAL PRIMARY KEY,
@@ -162,6 +169,39 @@ impl DataverseEngine {
     pub async fn init_metadata(&self) -> Result<()> {
         sqlx::raw_sql(INIT_METADATA_SQL).execute(&self.pool).await?;
         self.upgrade_base_model().await?;
+        self.backfill_display_columns().await?;
+        Ok(())
+    }
+
+    /// Ensure every table has an EXPLICIT primary display column. Tables that
+    /// predate this feature (or were created via a path that left it NULL) get
+    /// pinned to their auto-resolved column ("id" when there's no readable text
+    /// column). Idempotent and cheap: a NULL-count probe short-circuits it to a
+    /// no-op once every row is set, so replaying on each engine open is free.
+    async fn backfill_display_columns(&self) -> Result<()> {
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM _dv_tables WHERE display_column IS NULL")
+                .fetch_one(&self.pool)
+                .await?;
+        if pending == 0 {
+            return Ok(());
+        }
+        let schema = self.get_schema().await?;
+        for t in &schema.tables {
+            if t.display_column.is_some() {
+                continue;
+            }
+            let resolved = schema.effective_display_column(t);
+            sqlx::query(
+                "UPDATE _dv_tables SET display_column = $2 \
+                 WHERE name = $1 AND display_column IS NULL",
+            )
+            .bind(&t.name)
+            .bind(&resolved)
+            .execute(&self.pool)
+            .await?;
+        }
+        tracing::info!(slug = %self.slug, count = pending, "backfilled explicit display_column");
         Ok(())
     }
 
@@ -266,21 +306,24 @@ impl DataverseEngine {
             String,         // slug
             Option<String>, // description
             String,         // id_strategy
+            Option<String>, // display_column
             DateTime<Utc>,
             DateTime<Utc>,
         )> = sqlx::query_as(
-            "SELECT name, slug, description, id_strategy, created_at, updated_at \
+            "SELECT name, slug, description, id_strategy, display_column, created_at, updated_at \
              FROM _dv_tables ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
 
         let mut tables: Vec<TableDefinition> = Vec::with_capacity(table_rows.len());
-        for (name, slug, description, id_strategy_code, created_at, updated_at) in table_rows {
+        for (name, slug, description, id_strategy_code, display_column, created_at, updated_at) in
+            table_rows
+        {
             let cols = self.list_columns(&name).await?;
             let id_strategy = IdStrategy::from_code(&id_strategy_code).unwrap_or_default();
             tables.push(TableDefinition {
-                name, slug, description, columns: cols, id_strategy, created_at, updated_at,
+                name, slug, description, columns: cols, id_strategy, display_column, created_at, updated_at,
             });
         }
 
@@ -373,15 +416,23 @@ impl DataverseEngine {
 
         // 4. _dv_tables row — persists id_strategy so subsequent
         //    schema reads (and add_column for Lookups targeting this
-        //    table) pick up the right FK type.
+        //    table) pick up the right FK type. Every table also gets an
+        //    EXPLICIT primary display column: the caller's choice if given,
+        //    else the auto-resolved one (never NULL; "id" when the table has
+        //    no readable text column).
+        let display_column = match &def.display_column {
+            Some(c) => c.clone(),
+            None => snapshot.effective_display_column(def),
+        };
         sqlx::query(
-            "INSERT INTO _dv_tables (name, slug, description, id_strategy) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO _dv_tables (name, slug, description, id_strategy, display_column) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&def.name)
         .bind(&def.slug)
         .bind(&def.description)
         .bind(def.id_strategy.as_str())
+        .bind(&display_column)
         .execute(&self.pool)
         .await?;
 
@@ -413,6 +464,63 @@ impl DataverseEngine {
             "columns": def.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
         })).await?;
 
+        Ok(version)
+    }
+
+    /// Set a table's **primary display column** — the column shown in place of
+    /// the raw id when the table is referenced by a Lookup.
+    ///
+    /// Every table keeps an EXPLICIT display column (never NULL): a `None`
+    /// request recomputes the auto default (heuristic) and pins it. `id` is a
+    /// valid value (means "show the raw id"); other system columns are not.
+    /// A non-`id` value must be an existing user column. Bumps the schema
+    /// version + journals the change, like other schema-ops.
+    #[instrument(level = "info", skip(self), fields(slug = %self.slug, table = %table))]
+    pub async fn set_display_column(&self, table: &str, column: Option<&str>) -> Result<u64> {
+        validation::validate_user_identifier(table)?;
+        if !self.table_exists(table).await? {
+            return Err(DataverseError::TableNotFound(table.into()));
+        }
+        let resolved: String = match column {
+            // "id" = show the raw id — allowed even though it's a base column.
+            Some("id") => "id".to_string(),
+            Some(col) => {
+                if crate::migration::is_base_column(col) {
+                    return Err(DataverseError::SchemaMismatch(format!(
+                        "'{col}' is a system column and cannot be used as a display column"
+                    )));
+                }
+                let cols = self.list_columns(table).await?;
+                if !cols.iter().any(|c| c.name == col) {
+                    return Err(DataverseError::ColumnNotFound {
+                        table: table.into(),
+                        column: col.into(),
+                    });
+                }
+                col.to_string()
+            }
+            // No column given → recompute the default and pin it explicitly,
+            // so the table never falls back to an implicit/NULL display column.
+            None => {
+                let schema = self.get_schema().await?;
+                match schema.tables.iter().find(|t| t.name == table) {
+                    Some(t) => schema.effective_display_column(t),
+                    None => return Err(DataverseError::TableNotFound(table.into())),
+                }
+            }
+        };
+        sqlx::query("UPDATE _dv_tables SET display_column = $2 WHERE name = $1")
+            .bind(table)
+            .bind(&resolved)
+            .execute(&self.pool)
+            .await?;
+        let version = bump_schema_version(&self.pool).await?;
+        journal_migration(
+            &self.pool,
+            &format!("set_display_column:{table}"),
+            &json!({ "op": "set_display_column", "table": table, "column": resolved }),
+        )
+        .await?;
         Ok(version)
     }
 

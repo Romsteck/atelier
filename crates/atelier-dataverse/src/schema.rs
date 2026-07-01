@@ -283,6 +283,12 @@ pub struct TableDefinition {
     /// with all tables created before UUID-PK support landed.
     #[serde(default)]
     pub id_strategy: IdStrategy,
+    /// Primary display column: the user column whose value stands in for a
+    /// row when this table is referenced by a Lookup (DbExplorer cells,
+    /// selectors, gateway `$expand`). `None` = auto mode — a heuristic picks
+    /// it, see [`DatabaseSchema::effective_display_column`].
+    #[serde(default)]
+    pub display_column: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -393,6 +399,68 @@ pub struct DatabaseSchema {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+impl DatabaseSchema {
+    /// Resolve the effective **primary display column** of `table`: the column
+    /// whose value represents a row when the table is referenced by a Lookup
+    /// (DbExplorer cells, lookup selectors, gateway `$expand`).
+    ///
+    /// Priority:
+    /// 1. an explicit `display_column` that still exists and is textual;
+    /// 2. a heuristic over the table's user (non-base) textual columns —
+    ///    first of `name`, `title`, `label` (case-insensitive), else the
+    ///    first textual column in declared order;
+    /// 3. `"id"` as a last resort (callers treat `"id"` as "no readable
+    ///    display" and skip enrichment, so behaviour degrades to the raw id).
+    pub fn effective_display_column(&self, table: &TableDefinition) -> String {
+        fn is_textual(ft: FieldType) -> bool {
+            matches!(
+                ft,
+                FieldType::Text | FieldType::Email | FieldType::Url | FieldType::Phone
+            )
+        }
+
+        // (1) Explicit override. An explicit `id` pin means "show the raw id"
+        //     and is honoured verbatim. Any other pin is honoured only if the
+        //     column still exists and is textual (a stale/retyped pin silently
+        //     falls back to the heuristic).
+        if let Some(explicit) = table.display_column.as_deref() {
+            if explicit == "id" {
+                return "id".to_string();
+            }
+            if table
+                .columns
+                .iter()
+                .any(|c| c.name == explicit && is_textual(c.field_type))
+            {
+                return explicit.to_string();
+            }
+        }
+
+        // (2) Heuristic over user textual columns. `table.columns` holds only
+        //     user columns (base columns live in DDL, not `_dv_columns`), but
+        //     filter defensively all the same.
+        let textual: Vec<&ColumnDefinition> = table
+            .columns
+            .iter()
+            .filter(|c| !crate::migration::is_base_column(&c.name) && is_textual(c.field_type))
+            .collect();
+        for preferred in ["name", "title", "label"] {
+            if let Some(c) = textual
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(preferred))
+            {
+                return c.name.clone();
+            }
+        }
+        if let Some(c) = textual.first() {
+            return c.name.clone();
+        }
+
+        // (3) No readable column — the raw id is all we can show.
+        "id".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +491,95 @@ mod tests {
         assert_eq!(FieldType::from_pg_type("BOOLEAN", "is_active"), FieldType::Boolean);
         assert_eq!(FieldType::from_pg_type("JSONB", "data"), FieldType::Json);
         assert_eq!(FieldType::from_pg_type("UUID", "uid"), FieldType::Uuid);
+    }
+
+    fn col(name: &str, ft: FieldType) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.into(),
+            field_type: ft,
+            required: false,
+            unique: false,
+            default_value: None,
+            description: None,
+            choices: vec![],
+            formula_expression: None,
+            lookup_target: None,
+        }
+    }
+
+    fn table(display_column: Option<&str>, columns: Vec<ColumnDefinition>) -> TableDefinition {
+        TableDefinition {
+            name: "t".into(),
+            slug: "t".into(),
+            columns,
+            description: None,
+            id_strategy: IdStrategy::default(),
+            display_column: display_column.map(str::to_string),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn effective_display_column_prefers_name() {
+        let schema = DatabaseSchema::default();
+        let t = table(None, vec![col("title", FieldType::Text), col("name", FieldType::Text)]);
+        // `name` wins over `title` regardless of declaration order.
+        assert_eq!(schema.effective_display_column(&t), "name");
+    }
+
+    #[test]
+    fn effective_display_column_falls_back_through_heuristic() {
+        let schema = DatabaseSchema::default();
+        // No name → title; no title → label; no preferred → first textual.
+        assert_eq!(
+            schema.effective_display_column(&table(None, vec![col("title", FieldType::Text)])),
+            "title"
+        );
+        assert_eq!(
+            schema.effective_display_column(&table(None, vec![col("label", FieldType::Text)])),
+            "label"
+        );
+        assert_eq!(
+            schema.effective_display_column(&table(
+                None,
+                vec![col("slug", FieldType::Text), col("descr", FieldType::Text)]
+            )),
+            "slug"
+        );
+    }
+
+    #[test]
+    fn effective_display_column_id_when_no_textual_column() {
+        let schema = DatabaseSchema::default();
+        let t = table(None, vec![col("qty", FieldType::Number), col("done", FieldType::Boolean)]);
+        assert_eq!(schema.effective_display_column(&t), "id");
+    }
+
+    #[test]
+    fn effective_display_column_honours_valid_explicit_pin() {
+        let schema = DatabaseSchema::default();
+        // Explicit textual pin beats the `name` heuristic.
+        let t = table(Some("title"), vec![col("name", FieldType::Text), col("title", FieldType::Text)]);
+        assert_eq!(schema.effective_display_column(&t), "title");
+    }
+
+    #[test]
+    fn effective_display_column_ignores_stale_or_nontextual_pin() {
+        let schema = DatabaseSchema::default();
+        // Pin points at a column that no longer exists → heuristic.
+        let gone = table(Some("ghost"), vec![col("name", FieldType::Text)]);
+        assert_eq!(schema.effective_display_column(&gone), "name");
+        // Pin points at a non-textual column → heuristic (here → id).
+        let nontext = table(Some("qty"), vec![col("qty", FieldType::Number)]);
+        assert_eq!(schema.effective_display_column(&nontext), "id");
+    }
+
+    #[test]
+    fn effective_display_column_honours_explicit_id_pin() {
+        let schema = DatabaseSchema::default();
+        // Explicit "id" means "show the raw id" even when a text column exists.
+        let t = table(Some("id"), vec![col("name", FieldType::Text)]);
+        assert_eq!(schema.effective_display_column(&t), "id");
     }
 }

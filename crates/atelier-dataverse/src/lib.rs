@@ -47,6 +47,7 @@ pub mod query;
 pub mod crud;
 pub mod audit;
 pub mod dv_io;
+pub mod expand;
 
 // Re-exports for the most common API surface so callers can use
 // `atelier_dataverse::DataverseEngine` directly.

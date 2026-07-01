@@ -104,6 +104,7 @@ async fn run_assertions(manager: &DataverseManager, slug: &str) {
         ],
         description: Some("smoke-test table".into()),
         id_strategy: IdStrategy::Bigserial,
+        display_column: None,
         created_at: now,
         updated_at: now,
     };

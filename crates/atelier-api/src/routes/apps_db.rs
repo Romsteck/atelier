@@ -303,11 +303,20 @@ async fn describe_table(
         .iter()
         .filter(|r| r.from_table == table)
         .map(|r| {
+            // The lookup shows the target table's primary display column
+            // (auto-resolved), not the raw id. Falls back to "id" if the
+            // target is missing or has no readable column.
+            let display_column = schema
+                .tables
+                .iter()
+                .find(|t| t.name == r.to_table)
+                .map(|target| schema.effective_display_column(target))
+                .unwrap_or_else(|| "id".to_string());
             json!({
                 "from_column": r.from_column,
                 "to_table": r.to_table,
                 "to_column": r.to_column,
-                "display_column": "id",
+                "display_column": display_column,
             })
         })
         .collect();
@@ -518,7 +527,7 @@ async fn query_rows(
     const HIDDEN: &[&str] = &["is_deleted", "version"];
 
     let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let cleaned_rows: Vec<Value> = raw_rows
+    let mut cleaned_rows: Vec<Value> = raw_rows
         .into_iter()
         .map(|r| {
             if let Value::Object(map) = r {
@@ -537,7 +546,21 @@ async fn query_rows(
         .collect();
     let columns: Vec<String> = col_set.into_iter().collect();
 
-    let _ = body.expand; // expand non-géré pour l'instant
+    // Resolve lookup display values AFTER `columns` is built, so `{col}_display`
+    // rides on the rows without ever surfacing as a grid column (DataGrid hides
+    // and keys off `_display`). No-op when `expand` is empty; a failure degrades
+    // gracefully to raw ids rather than breaking the whole view.
+    if let Err(e) = atelier_dataverse::expand::expand_lookup_displays(
+        engine.pool(),
+        &schema,
+        table_def,
+        &mut cleaned_rows,
+        &body.expand,
+    )
+    .await
+    {
+        warn!(slug = %slug, table = %table, ?e, "AppDbQueryRows expand failed");
+    }
     let _ = Uuid::nil(); // keep uuid dep
 
     info!(

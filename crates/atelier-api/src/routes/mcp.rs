@@ -533,6 +533,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "db_get_schema" | "db_sync_schema"
             | "db_create_table" | "db_drop_table"
             | "db_add_column" | "db_remove_column" | "db_create_relation"
+            | "db_set_display_column"
             | "dv_schema" | "dv_list" | "dv_get" | "dv_insert" | "dv_update"
             | "dv_soft_delete" | "dv_restore" | "dv_audit_list"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
@@ -560,6 +561,7 @@ fn is_dispatched_project_tool(name: &str) -> bool {
             | "db_get_schema" | "db_sync_schema"
             | "db_create_table" | "db_drop_table"
             | "db_add_column" | "db_remove_column" | "db_create_relation"
+            | "db_set_display_column"
             | "dv_schema" | "dv_list" | "dv_get" | "dv_insert" | "dv_update"
             | "dv_soft_delete" | "dv_restore" | "dv_audit_list"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
@@ -591,11 +593,12 @@ fn tool_definitions_project() -> Value {
         { "name": "db_get_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON. Read-only.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_sync_schema", "description": "Rebuild the dataverse `_dv_tables`/`_dv_columns`/`_dv_relations` metadata by introspecting the live PG schema. Use after manual ALTER TABLE.", "inputSchema": { "type": "object", "properties": {} } },
         // Schema-ops (mutations — confirmation required, NOT in auto-approve).
-        { "name": "db_create_table", "description": "Create a dataverse-managed table. Emits the right PG type per `field_type` (NUMERIC for decimal, TIMESTAMPTZ for date_time, JSONB for json, UUID for uuid, etc.) and registers it in `_dv_tables`/`_dv_columns`. Audit columns (id, created_at, updated_at, version, is_deleted, created_by, updated_by, *_kind) are added implicitly — do NOT declare them.", "inputSchema": { "type": "object", "properties": { "definition": { "type": "object", "description": "TableDefinition — { name, slug, columns: [{name, field_type, required?, unique?, default_value?, ...}], id_strategy?: \"bigserial\"|\"uuid\" }" } }, "required": ["definition"] } },
+        { "name": "db_create_table", "description": "Create a dataverse-managed table. Emits the right PG type per `field_type` (NUMERIC for decimal, TIMESTAMPTZ for date_time, JSONB for json, UUID for uuid, etc.) and registers it in `_dv_tables`/`_dv_columns`. Audit columns (id, created_at, updated_at, version, is_deleted, created_by, updated_by, *_kind) are added implicitly — do NOT declare them. If this table will be referenced by a Lookup, give it a PRIMARY DISPLAY COLUMN: a readable text column (`name` recommended when natural, else `title`/`label`) shown in place of the raw id in lookups. A heuristic auto-detects one; pin it explicitly with `db_set_display_column` if needed.", "inputSchema": { "type": "object", "properties": { "definition": { "type": "object", "description": "TableDefinition — { name, slug, columns: [{name, field_type, required?, unique?, default_value?, ...}], id_strategy?: \"bigserial\"|\"uuid\", display_column?: string }" } }, "required": ["definition"] } },
         { "name": "db_drop_table", "description": "Drop a dataverse-managed table (DROP TABLE + remove from `_dv_*` metadata).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
-        { "name": "db_add_column", "description": "Add a column to an existing dataverse-managed table. Reserved/audit names (created_by, updated_by, version, etc.) are rejected.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "object", "description": "ColumnDefinition — { name, field_type, required?, unique?, default_value? }" } }, "required": ["table", "column"] } },
+        { "name": "db_add_column", "description": "Add a column to an existing dataverse-managed table. Reserved/audit names (created_by, updated_by, version, etc.) are rejected. When adding a `lookup` column, ensure the target table has a readable PRIMARY DISPLAY COLUMN (text; `name`/`title`/`label`) so the lookup renders a label instead of the raw id — auto-detected, or pin it with `db_set_display_column`.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "object", "description": "ColumnDefinition — { name, field_type, required?, unique?, default_value? }" } }, "required": ["table", "column"] } },
         { "name": "db_remove_column", "description": "Drop a user-defined column from a dataverse-managed table. Refuses to drop audit/reserved columns.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "string" } }, "required": ["table", "column"] } },
-        { "name": "db_create_relation", "description": "Declare a Lookup foreign-key relation between two dataverse-managed tables.", "inputSchema": { "type": "object", "properties": { "from_table": { "type": "string" }, "from_column": { "type": "string" }, "to_table": { "type": "string" } }, "required": ["from_table", "from_column", "to_table"] } },
+        { "name": "db_create_relation", "description": "Declare a Lookup foreign-key relation between two dataverse-managed tables. The `to_table` should expose a readable PRIMARY DISPLAY COLUMN (text) so the lookup renders a label rather than the raw id — auto-detected, or set via `db_set_display_column`.", "inputSchema": { "type": "object", "properties": { "from_table": { "type": "string" }, "from_column": { "type": "string" }, "to_table": { "type": "string" } }, "required": ["from_table", "from_column", "to_table"] } },
+        { "name": "db_set_display_column", "description": "Set a table's PRIMARY DISPLAY COLUMN — the readable column shown in place of the raw id when the table is referenced by a Lookup (DbExplorer cells, lookup selectors, gateway `$expand`). Every table keeps an EXPLICIT display column (never implicit). Pass `column: null` to (re)compute and pin the default (heuristic name/title/label/first text column). `id` is allowed (show the raw id) when no readable column fits; other system columns are rejected. A non-`id` value must be an existing text column.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": ["string", "null"], "description": "Text column to display, `id` for the raw id, or null to (re)compute the default." } }, "required": ["table"] } },
         // ── Data rows (gateway CRUD, audited; system identity) ──
         { "name": "dv_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "dv_list", "description": "List rows of a table (audited gateway path). `query` mirrors OData: { filter?, select?, orderby?, top?, skip?, include_deleted?, count? } — `filter` uses the dvexpr dialect (no temporal comparisons; see .claude/rules/db.md). For ad-hoc JOINs/aggregates prefer db_query.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "query": { "type": "object", "description": "{ filter?: string, select?: string[], orderby?: [{column,direction}], top?: int, skip?: int, include_deleted?: bool, count?: bool }" } }, "required": ["table"] } },
@@ -727,6 +730,7 @@ async fn handle_tools_call(
         "db.add_column" => tool_db_add_column(id, &arguments, state).await,
         "db.remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db.create_relation" => tool_db_create_relation(id, &arguments, state).await,
+        "db.set_display_column" => tool_db_set_display_column(id, &arguments, state).await,
         // ── Project-scoped simplified names (used when ?project=slug) ──
         "status" => tool_app_status(id, &arguments, state).await,
         "start" => {
@@ -757,6 +761,7 @@ async fn handle_tools_call(
         "db_add_column" => tool_db_add_column(id, &arguments, state).await,
         "db_remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
+        "db_set_display_column" => tool_db_set_display_column(id, &arguments, state).await,
         "db_overview" => tool_db_overview(id, &arguments, state).await,
         "db_count_rows" => tool_db_count_rows(id, &arguments, state).await,
         "dv_schema" => tool_dv_schema(id, &arguments, state).await,
@@ -1676,6 +1681,19 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
+            "name": "db.set_display_column",
+            "description": "Set a table's primary display column — the readable column shown in place of the raw id when the table is referenced by a Lookup. Every table keeps an explicit display column; column=null (re)computes and pins the default (name/title/label/first text column). `id` is allowed (raw id); other system columns are rejected.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" },
+                    "column": { "type": ["string", "null"], "description": "Text column, `id`, or null to (re)compute the default." }
+                },
+                "required": ["slug", "table"]
+            }
+        },
+        {
             "name": "studio.refresh_context",
             "description": "Regenerate Claude Code context files (CLAUDE.md, .claude/) for a specific app.",
             "inputSchema": {
@@ -2432,6 +2450,34 @@ async fn tool_db_create_relation(id: Value, args: &Value, state: &McpState) -> V
     ipc_resp_to_mcp(
         id,
         ctx.db_create_relation(slug.to_string(), relation).await,
+    )
+}
+
+// ── db.set_display_column ────────────────────────────────────────────
+
+async fn tool_db_set_display_column(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    // `column` absent or null → clear the pin (auto mode); a string pins it.
+    let column: Option<String> = match args.get("column") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return error_response(id, INVALID_PARAMS, "column must be a string or null".into());
+        }
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_set_display_column(slug.to_string(), table.to_string(), column)
+            .await,
     )
 }
 

@@ -807,11 +807,20 @@ impl AppsContext {
             .relations
             .iter()
             .filter(|r| r.from_table == table)
-            .map(|r| AppDbRelation {
-                from_column: r.from_column.clone(),
-                to_table: r.to_table.clone(),
-                to_column: r.to_column.clone(),
-                display_column: "id".to_string(),
+            .map(|r| {
+                // Target's primary display column (auto-resolved), not the id.
+                let display_column = dv_schema
+                    .tables
+                    .iter()
+                    .find(|t| t.name == r.to_table)
+                    .map(|target| dv_schema.effective_display_column(target))
+                    .unwrap_or_else(|| "id".to_string());
+                AppDbRelation {
+                    from_column: r.from_column.clone(),
+                    to_table: r.to_table.clone(),
+                    to_column: r.to_column.clone(),
+                    display_column,
+                }
             })
             .collect();
         IpcResponse::ok_data(AppDbTableSchema {
@@ -982,6 +991,26 @@ impl AppsContext {
         match engine.create_relation(&rel).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("create_relation: {e}")),
+        }
+    }
+
+    pub async fn db_set_display_column(
+        &self,
+        slug: String,
+        table: String,
+        column: Option<String>,
+    ) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let engine = match self.dv_engine_for(&slug).await {
+            Ok(e) => e,
+            Err(resp) => return resp,
+        };
+        info!(slug = %slug, table = %table, column = ?column, backend = "postgres-dataverse", "Setting display column");
+        match engine.set_display_column(&table, column.as_deref()).await {
+            Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+            Err(e) => IpcResponse::err(format!("set_display_column: {e}")),
         }
     }
 

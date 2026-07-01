@@ -400,6 +400,11 @@ struct ListParams {
     include_deleted: Option<bool>,
     #[serde(default, rename = "$count")]
     count: Option<bool>,
+    /// Comma-separated lookup columns to resolve: each yields a flat
+    /// `{col}_display` sidecar (the target's primary display value) next to
+    /// the untouched raw id.
+    #[serde(default, rename = "$expand")]
+    expand: Option<String>,
 }
 
 async fn list_rows(
@@ -484,13 +489,38 @@ async fn list_rows(
             );
         }
     };
-    let rows = match run_list(engine.pool(), table_def, &compiled).await {
+    let mut rows = match run_list(engine.pool(), table_def, &compiled).await {
         Ok(r) => r,
         Err(e) => {
             error!(?e, "dv_list run failed");
             return db_error_resp("dv_list", e);
         }
     };
+
+    // OData $expand: resolve `{col}_display` for each requested lookup column
+    // (flat sidecar, raw id untouched → safe for existing app deserializers).
+    // A failure degrades to raw ids rather than failing the request.
+    let expand: Vec<String> = params
+        .expand
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(e) = atelier_dataverse::expand::expand_lookup_displays(
+        engine.pool(),
+        &schema,
+        table_def,
+        &mut rows,
+        &expand,
+    )
+    .await
+    {
+        warn!(?e, "dv_list expand failed");
+    }
 
     let mut envelope = serde_json::Map::new();
     envelope.insert("value".into(), Value::Array(rows));
