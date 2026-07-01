@@ -18,7 +18,7 @@ export default function BuildBadge({ build, onDismiss }) {
       <div
         role="status"
         aria-live="polite"
-        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-blue-500/15 border border-blue-500/30 text-blue-300 shrink-0"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-blue-500/15 border border-blue-500/30 text-blue-700 dark:text-blue-300 shrink-0"
       >
         <Loader2 className="w-3 h-3 animate-spin" />
         <span>Build{hasCounter ? ` ${step ?? '…'}/${total}` : ''}</span>
@@ -33,7 +33,7 @@ export default function BuildBadge({ build, onDismiss }) {
       <div
         role="status"
         aria-live="polite"
-        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 shrink-0 transition-opacity duration-300"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 shrink-0 transition-opacity duration-300"
       >
         <Check className="w-3 h-3" />
         <span>Build OK{secs != null ? ` · ${secs}s` : ''}</span>
@@ -47,7 +47,7 @@ export default function BuildBadge({ build, onDismiss }) {
         role="status"
         aria-live="polite"
         title={build.error || build.message || 'Build failed'}
-        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-red-500/15 border border-red-500/30 text-red-300 shrink-0"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-[11px] bg-red-500/15 border border-red-500/30 text-red-700 dark:text-red-300 shrink-0"
       >
         <AlertCircle className="w-3 h-3" />
         <span>Build failed</span>

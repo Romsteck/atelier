@@ -285,9 +285,9 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
                       {tableRelations.map((rel, i) => (
                         <tr key={i} className="border-b border-gray-700/50 text-gray-400">
                           <td className="px-3 py-1.5"><Link2 className="w-3.5 h-3.5 text-purple-400" /></td>
-                          <td className="px-3 py-1.5 font-mono text-purple-300">{rel.from_table}.{rel.from_column}</td>
+                          <td className="px-3 py-1.5 font-mono text-purple-700 dark:text-purple-300">{rel.from_table}.{rel.from_column}</td>
                           <td className="px-3 py-1.5 text-gray-600">→</td>
-                          <td className="px-3 py-1.5 font-mono text-purple-300">{rel.to_table}.{rel.to_column}</td>
+                          <td className="px-3 py-1.5 font-mono text-purple-700 dark:text-purple-300">{rel.to_table}.{rel.to_column}</td>
                           <td className="px-3 py-1.5 text-gray-500">{rel.relation_type}</td>
                         </tr>
                       ))}
@@ -438,7 +438,7 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs text-gray-400">Colonnes</label>
-              <button type="button" onClick={addColumn} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 border-none bg-transparent cursor-pointer">
+              <button type="button" onClick={addColumn} className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1 border-none bg-transparent cursor-pointer">
                 <Plus className="w-3 h-3" /> Ajouter
               </button>
             </div>

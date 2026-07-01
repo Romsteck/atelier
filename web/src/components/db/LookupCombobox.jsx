@@ -88,7 +88,7 @@ export function LookupCombobox({ appSlug, relation, value, onChange, required })
                 <div
                   key={id}
                   className={`px-3 py-1.5 text-xs cursor-pointer hover:bg-gray-700 flex justify-between ${
-                    id == value ? 'bg-blue-500/20 text-blue-300' : 'text-gray-300'
+                    id == value ? 'bg-blue-500/20 text-blue-700 dark:text-blue-300' : 'text-gray-300'
                   }`}
                   onClick={() => { onChange(id); setOpen(false); setSearch(''); }}
                 >

@@ -347,7 +347,7 @@ export default function Hosts() {
                 {hosts.map((host) => (
                   <tr key={host.id} className="bg-gray-800 hover:bg-gray-700/50">
                     {/* Name */}
-                    <td className="px-3 py-2 text-sm font-medium text-white">
+                    <td className="px-3 py-2 text-sm font-medium text-gray-50">
                       <div className="flex items-center gap-2">
                         <HardDrive className={`w-4 h-4 shrink-0 ${host.is_local ? 'text-green-400' : 'text-blue-400'}`} />
                         {host.is_local ? 'HomeRoute' : host.name}
@@ -449,7 +449,7 @@ export default function Hosts() {
                       <div className="flex gap-1">
                         <button
                           onClick={() => openSettings(host)}
-                          className="p-1.5 text-gray-400 hover:bg-gray-600/20 hover:text-white"
+                          className="p-1.5 text-gray-400 hover:bg-gray-600/20 hover:text-gray-50"
                           title="Parametres"
                         >
                           <Settings className="w-3.5 h-3.5" />
@@ -509,8 +509,8 @@ export default function Hosts() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-4 w-full max-w-md">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-bold text-white">Ajouter un hote</h2>
-              <button onClick={() => { setShowAddModal(false); resetForm(); }} className="text-gray-400 hover:text-white">
+              <h2 className="text-sm font-bold text-gray-50">Ajouter un hote</h2>
+              <button onClick={() => { setShowAddModal(false); resetForm(); }} className="text-gray-400 hover:text-gray-50">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -522,7 +522,7 @@ export default function Hosts() {
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50 focus:outline-hidden focus:border-blue-500"
                   placeholder="Mon serveur"
                   required
                 />
@@ -535,7 +535,7 @@ export default function Hosts() {
                     type="text"
                     value={formData.host}
                     onChange={(e) => setFormData({ ...formData, host: e.target.value })}
-                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50 focus:outline-hidden focus:border-blue-500"
                     placeholder="10.0.0.10"
                     required
                   />
@@ -546,7 +546,7 @@ export default function Hosts() {
                     type="number"
                     value={formData.port}
                     onChange={(e) => setFormData({ ...formData, port: e.target.value })}
-                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50 focus:outline-hidden focus:border-blue-500"
                     placeholder="22"
                   />
                 </div>
@@ -558,7 +558,7 @@ export default function Hosts() {
                   type="text"
                   value={formData.username}
                   onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50 focus:outline-hidden focus:border-blue-500"
                   placeholder="root"
                   required
                 />
@@ -570,7 +570,7 @@ export default function Hosts() {
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50 focus:outline-hidden focus:border-blue-500"
                   placeholder="••••••••"
                   required
                 />
@@ -583,7 +583,7 @@ export default function Hosts() {
                   type="text"
                   value={formData.container_storage_path}
                   onChange={(e) => setFormData({ ...formData, container_storage_path: e.target.value })}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-hidden focus:border-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50 focus:outline-hidden focus:border-blue-500"
                   placeholder="/var/lib/machines"
                 />
               </div>
@@ -614,10 +614,10 @@ export default function Hosts() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-4 w-full max-w-md">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-bold text-white">
+              <h2 className="text-sm font-bold text-gray-50">
                 {settingsHost.is_local ? 'HomeRoute' : settingsHost.name} — Parametres
               </h2>
-              <button onClick={() => setSettingsHost(null)} className="text-gray-400 hover:text-white">
+              <button onClick={() => setSettingsHost(null)} className="text-gray-400 hover:text-gray-50">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -631,7 +631,7 @@ export default function Hosts() {
                     <label className="block text-xs text-gray-400 mb-0.5">MAC WOL</label>
                     {settingsHost.interfaces && settingsHost.interfaces.length > 0 ? (
                       <select
-                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
+                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50"
                         value={settingsForm.wol_mac}
                         onChange={(e) => setSettingsForm({ ...settingsForm, wol_mac: e.target.value })}
                       >
@@ -645,7 +645,7 @@ export default function Hosts() {
                     ) : (
                       <input
                         type="text"
-                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
+                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50"
                         value={settingsForm.wol_mac}
                         onChange={(e) => setSettingsForm({ ...settingsForm, wol_mac: e.target.value })}
                         placeholder="AA:BB:CC:DD:EE:FF"
@@ -662,7 +662,7 @@ export default function Hosts() {
                 <label className="block text-xs text-gray-400 mb-0.5">Chemin de stockage</label>
                 <input
                   type="text"
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-gray-50"
                   value={settingsForm.container_storage_path}
                   onChange={(e) => setSettingsForm({ ...settingsForm, container_storage_path: e.target.value })}
                   placeholder="/var/lib/machines"

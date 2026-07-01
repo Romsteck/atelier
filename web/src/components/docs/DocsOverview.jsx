@@ -29,7 +29,7 @@ export default function DocsOverview({ overview, diagram }) {
         )}
         {meta.stack && (
           <span className="inline-block mt-2 px-2 py-0.5 text-xs rounded
-                           bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                           bg-blue-500/10 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300 border border-blue-500/30">
             {meta.stack}
           </span>
         )}
@@ -72,7 +72,7 @@ export default function DocsOverview({ overview, diagram }) {
             Aucune vue d'ensemble pour cette app.
           </p>
           <p className="text-sm">
-            L'agent peut la créer via <code className="px-1 py-0.5 bg-gray-900 rounded-sm text-xs text-blue-300">docs_update(type=overview, name=overview, …)</code>.
+            L'agent peut la créer via <code className="px-1 py-0.5 bg-gray-900 rounded-sm text-xs text-blue-700 dark:text-blue-300">docs_update(type=overview, name=overview, …)</code>.
           </p>
         </div>
       )}

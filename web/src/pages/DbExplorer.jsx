@@ -422,7 +422,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
                 {selectedAppSlug && (
                   <span
-                    className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
                     title="Postgres géré via atelier-dataverse (passerelle REST, plus d'accès direct)"
                   >
                     dataverse

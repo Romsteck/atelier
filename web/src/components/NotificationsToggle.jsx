@@ -54,7 +54,7 @@ export default function NotificationsToggle({ collapsed, compact }) {
       disabled={perm !== 'default'}
       title={title}
       className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-sm text-sm transition-[background-color,color] duration-300 ease-out hover:duration-0 ${
-        granted ? 'text-emerald-300' : denied ? 'text-gray-500 cursor-not-allowed' : 'text-gray-300 hover:text-gray-100 hover:bg-gray-700/50'
+        granted ? 'text-emerald-700 dark:text-emerald-300' : denied ? 'text-gray-500 cursor-not-allowed' : 'text-gray-300 hover:text-gray-100 hover:bg-gray-700/50'
       } ${railRow}`}
     >
       <Icon className="w-4 h-4 shrink-0" />

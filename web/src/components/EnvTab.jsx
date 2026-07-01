@@ -19,18 +19,18 @@ const SCOPES = [
 ];
 
 function ScopeBadge({ scope }) {
-  const color = scope === 'build' ? 'bg-purple-500/15 text-purple-300'
-    : scope === 'both' ? 'bg-amber-500/15 text-amber-300'
+  const color = scope === 'build' ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300'
+    : scope === 'both' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
     : 'bg-gray-500/15 text-gray-400';
   return <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${color}`}>{scope}</span>;
 }
 
 function OwnerBadge({ owner, secret }) {
   if (owner === 'platform') {
-    return <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/15 text-blue-300">plateforme</span>;
+    return <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/15 text-blue-700 dark:text-blue-300">plateforme</span>;
   }
   return (
-    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${secret ? 'bg-red-500/15 text-red-300' : 'bg-green-500/15 text-green-300'}`}>
+    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${secret ? 'bg-red-500/15 text-red-700 dark:text-red-300' : 'bg-green-500/15 text-green-700 dark:text-green-300'}`}>
       {secret ? 'secret' : 'config'}
     </span>
   );
@@ -160,11 +160,11 @@ export default function EnvTab({ slug, onRestart }) {
         </div>
 
         {restartNeeded && (
-          <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-sm bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
+          <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-sm bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-200 text-xs">
             <span>Les changements s'appliquent au prochain démarrage du process.</span>
             {onRestart && (
               <button onClick={doRestart} disabled={restarting}
-                className="px-2.5 py-1 rounded-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 flex items-center gap-1.5 disabled:opacity-50">
+                className="px-2.5 py-1 rounded-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-100 flex items-center gap-1.5 disabled:opacity-50">
                 {restarting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 Redémarrer
               </button>
@@ -173,7 +173,7 @@ export default function EnvTab({ slug, onRestart }) {
         )}
 
         {err && (
-          <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-sm bg-red-500/10 border border-red-500/30 text-red-200 text-xs">
+          <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-sm bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-200 text-xs">
             <span>{err}</span>
             <button onClick={() => setErr('')}><X className="w-3.5 h-3.5" /></button>
           </div>
@@ -257,7 +257,7 @@ export default function EnvTab({ slug, onRestart }) {
                       <td className="px-3 py-2 align-top text-right whitespace-nowrap">
                         {isEditing ? (
                           <div className="flex items-center gap-2 justify-end">
-                            <button onClick={saveEdit} disabled={editing.saving} className="text-green-400 hover:text-green-300 disabled:opacity-50" title="Enregistrer">
+                            <button onClick={saveEdit} disabled={editing.saving} className="text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300 disabled:opacity-50" title="Enregistrer">
                               {editing.saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                             </button>
                             <button onClick={() => setEditing(null)} className="text-gray-500 hover:text-gray-300" title="Annuler"><X className="w-4 h-4" /></button>
@@ -269,7 +269,7 @@ export default function EnvTab({ slug, onRestart }) {
                                 {revealed[row.key] !== undefined ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                               </button>
                             )}
-                            <button onClick={() => startEdit(row)} className="text-gray-500 hover:text-blue-300" title="Modifier"><Pencil className="w-4 h-4" /></button>
+                            <button onClick={() => startEdit(row)} className="text-gray-500 hover:text-blue-600 dark:hover:text-blue-300" title="Modifier"><Pencil className="w-4 h-4" /></button>
                             <button onClick={() => removeVar(row.key)} className="text-gray-500 hover:text-red-400" title="Supprimer"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         )}
@@ -319,7 +319,7 @@ export default function EnvTab({ slug, onRestart }) {
                   </div>
                 </div>
               ) : (
-                <button onClick={() => setAdding(true)} className="flex items-center gap-1.5 text-xs text-blue-300 hover:text-blue-200">
+                <button onClick={() => setAdding(true)} className="flex items-center gap-1.5 text-xs text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200">
                   <Plus className="w-3.5 h-3.5" /> Ajouter une variable
                 </button>
               )}

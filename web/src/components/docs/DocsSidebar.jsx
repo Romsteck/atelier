@@ -44,7 +44,7 @@ function EntryItem({ entry, selected, onSelect }) {
       onClick={() => onSelect({ type: entry.doc_type, name: entry.name })}
       className={`w-full text-left px-2 py-1.5 rounded-sm text-sm flex items-start gap-2 transition-colors
                   ${isSelected
-                    ? 'bg-blue-500/20 text-white border-l-2 border-blue-500'
+                    ? 'bg-blue-500/20 text-blue-800 dark:text-white border-l-2 border-blue-500'
                     : 'text-gray-300 hover:bg-gray-800/60'}
                   ${entry.has_diagram ? 'pr-6' : ''}`}
       title={entry.summary || entry.title || entry.name}
@@ -108,7 +108,7 @@ export default function DocsSidebar({ overview, selected, onSelect }) {
         onClick={() => onSelect({ type: 'overview', name: 'overview' })}
         className={`w-full mb-2 px-2 py-2 rounded-sm text-sm flex items-center gap-2 transition-colors
                     ${isOverviewSelected
-                      ? 'bg-blue-500/20 text-white border-l-2 border-blue-500'
+                      ? 'bg-blue-500/20 text-blue-800 dark:text-white border-l-2 border-blue-500'
                       : 'text-gray-200 hover:bg-gray-800/60'}`}
       >
         <Compass className="w-4 h-4" />

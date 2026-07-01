@@ -151,7 +151,7 @@ function Ddns() {
                   value={zoneIdValue}
                   onChange={(e) => setZoneIdValue(e.target.value)}
                   placeholder="Zone ID Cloudflare"
-                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-hidden focus:border-blue-500"
+                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-gray-50 focus:outline-hidden focus:border-blue-500"
                   autoFocus
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleSaveZoneId();
@@ -170,7 +170,7 @@ function Ddns() {
                   </button>
                   <button
                     onClick={() => { setEditingZoneId(false); setZoneIdValue(''); setZoneIdError(null); }}
-                    className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-white"
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-gray-50"
                   >
                     <X className="w-3 h-3" />
                     Annuler
@@ -201,7 +201,7 @@ function Ddns() {
                   value={tokenValue}
                   onChange={(e) => setTokenValue(e.target.value)}
                   placeholder="Nouveau token API"
-                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-white focus:outline-hidden focus:border-blue-500"
+                  className="w-full bg-gray-800 border border-gray-600 px-2 py-1 text-sm font-mono text-gray-50 focus:outline-hidden focus:border-blue-500"
                   autoFocus
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleSaveToken();
@@ -220,7 +220,7 @@ function Ddns() {
                   </button>
                   <button
                     onClick={() => { setEditingToken(false); setTokenValue(''); setTokenError(null); }}
-                    className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-white"
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-gray-50"
                   >
                     <X className="w-3 h-3" />
                     Annuler

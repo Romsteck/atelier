@@ -113,7 +113,7 @@ export default function Apps() {
                         target="_blank"
                         rel="noopener noreferrer"
                         onClick={e => e.stopPropagation()}
-                        className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300"
+                        className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
                         title={`Ouvrir /apps/${app.slug}/`}
                       >
                         /apps/{app.slug}/ <ExternalLink className="w-3 h-3" />

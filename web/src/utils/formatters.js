@@ -48,9 +48,9 @@ export const formatBytes = (bytes) => {
 
 // Classes Tailwind selon la fraîcheur (vert <24h / ambre <7j / rouge sinon).
 export const freshnessClasses = (dateStr) => {
-  if (!dateStr) return 'border-red-500/30 bg-red-500/10 text-red-200';
+  if (!dateStr) return 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200';
   const ageHours = (Date.now() - new Date(dateStr).getTime()) / 3600000;
-  if (ageHours < 24) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200';
-  if (ageHours < 24 * 7) return 'border-amber-500/30 bg-amber-500/10 text-amber-200';
-  return 'border-red-500/30 bg-red-500/10 text-red-200';
+  if (ageHours < 24) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200';
+  if (ageHours < 24 * 7) return 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-200';
+  return 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200';
 };

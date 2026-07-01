@@ -212,7 +212,7 @@ export default function Monitoring() {
                 }`} />
                 <div className="flex-1 min-w-0">
                   <p className={`text-sm font-medium ${
-                    alert.severity === 'critical' ? 'text-red-300' : 'text-yellow-300'
+                    alert.severity === 'critical' ? 'text-red-700 dark:text-red-300' : 'text-yellow-700 dark:text-yellow-300'
                   }`}>
                     {alert.message}
                   </p>
@@ -245,7 +245,7 @@ export default function Monitoring() {
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
                       <Server className={`w-4 h-4 ${isOnline ? 'text-green-400' : 'text-gray-500'}`} />
-                      <span className="text-sm font-medium text-white">{host.is_local ? 'HomeRoute' : host.name}</span>
+                      <span className="text-sm font-medium text-gray-50">{host.is_local ? 'HomeRoute' : host.name}</span>
                     </div>
                     <span className={`px-1.5 py-0.5 text-[10px] font-medium ${
                       isOnline ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'
@@ -337,14 +337,14 @@ export default function Monitoring() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Server className={`w-4 h-4 ${isOnline ? 'text-green-400' : 'text-gray-500'}`} />
-                    <span className="text-sm font-medium text-white">{backupHost.name}</span>
+                    <span className="text-sm font-medium text-gray-50">{backupHost.name}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     {!isOnline && (
                       <button
                         onClick={handleWakeBackup}
                         disabled={wakingBackup}
-                        className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-green-300 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-green-700 dark:text-green-300 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <Power className={`w-3.5 h-3.5 ${wakingBackup ? 'animate-pulse' : ''}`} />
                         {wakingBackup ? 'Envoi WOL...' : 'Reveiller'}
@@ -508,7 +508,7 @@ export default function Monitoring() {
                   { label: 'Uptime', value: formatUptime(edgeStats.global.uptime_secs) },
                 ].map((stat, i) => (
                   <div key={i} className="bg-gray-800 border border-gray-700 p-3 text-center">
-                    <div className={`text-lg font-bold ${stat.color || 'text-white'}`}>{stat.value}</div>
+                    <div className={`text-lg font-bold ${stat.color || 'text-gray-50'}`}>{stat.value}</div>
                     <div className="text-xs text-gray-500 mt-0.5">{stat.label}</div>
                   </div>
                 ))}

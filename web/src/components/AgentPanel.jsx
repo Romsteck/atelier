@@ -255,7 +255,7 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
       {questions.map((q, qi) => (
         <div key={qi} className="space-y-1.5">
           {q.header && (
-            <span className="inline-block text-[10px] uppercase tracking-wider text-blue-300 bg-blue-500/15 px-1.5 py-0.5 rounded-sm">{q.header}</span>
+            <span className="inline-block text-[10px] uppercase tracking-wider text-blue-700 dark:text-blue-300 bg-blue-500/15 px-1.5 py-0.5 rounded-sm">{q.header}</span>
           )}
           <div className="text-[13px] text-gray-200">{q.question}</div>
           <div className="flex flex-col gap-1.5">
@@ -263,7 +263,7 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
               const chosen = sel[qi].chosen.has(o.label);
               return (
                 <button key={oi} disabled={answered} onClick={() => setChosen(qi, o.label, !!q.multiSelect)}
-                  className={`text-left px-2.5 py-1.5 rounded-md text-[12px] border ${chosen ? 'bg-blue-500/25 border-blue-500/50 text-blue-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'} disabled:opacity-60`}>
+                  className={`text-left px-2.5 py-1.5 rounded-md text-[12px] border ${chosen ? 'bg-blue-500/25 border-blue-500/50 text-blue-800 dark:text-blue-100' : 'border-gray-700 text-gray-300 hover:bg-gray-800'} disabled:opacity-60`}>
                   <div className="font-medium">{o.label}</div>
                   {o.description && <div className="text-[11px] text-gray-400 mt-0.5 font-normal">{o.description}</div>}
                 </button>
@@ -274,7 +274,7 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
             <input value={sel[qi].text} onChange={(e) => setText(qi, e.target.value)} placeholder="Autre… (réponse libre)"
               className={`w-full bg-gray-800 border rounded-sm px-2 py-1 text-[12px] placeholder-gray-600 focus:outline-none ${
                 sel[qi].text.trim()
-                  ? 'border-blue-500/50 ring-1 ring-blue-500/30 text-blue-100' // mode custom actif
+                  ? 'border-blue-500/50 ring-1 ring-blue-500/30 text-blue-800 dark:text-blue-100' // mode custom actif
                   : 'border-gray-700 text-gray-100 focus:border-blue-500'
               }`} />
           )}
@@ -305,7 +305,7 @@ function PlanReviewCard({ plan, decided, approved, onApprove, onReject }) {
   const [feedback, setFeedback] = useState('');
   return (
     <div className="border border-amber-500/30 bg-amber-500/5 rounded-lg p-3 my-1 space-y-2">
-      <span className="inline-block text-[10px] uppercase tracking-wider text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded-sm">
+      <span className="inline-block text-[10px] uppercase tracking-wider text-amber-700 dark:text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded-sm">
         Plan proposé
       </span>
       <div className="text-[13px] text-gray-200"><MarkdownView>{plan || '(plan vide)'}</MarkdownView></div>
@@ -722,8 +722,8 @@ export default function AgentPanel({ panelKey }) {
               className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] ${
                 mode === m.id
                   ? m.id === 'bypass'
-                    ? 'bg-amber-500/20 text-amber-300'
-                    : 'bg-blue-500/20 text-blue-300'
+                    ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                    : 'bg-blue-500/20 text-blue-700 dark:text-blue-300'
                   : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'
               }`}>
               {m.label}
@@ -736,7 +736,7 @@ export default function AgentPanel({ panelKey }) {
             <span className="text-[11px] text-gray-600 mr-1">Effort</span>
             {selModel.efforts.map((e) => (
               <button key={e} disabled={live} onClick={() => chooseEffort(e)}
-                className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${effort === e ? 'bg-blue-500/20 text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
+                className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${effort === e ? 'bg-blue-500/20 text-blue-700 dark:text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
                 {e}
               </button>
             ))}

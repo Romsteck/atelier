@@ -2,10 +2,10 @@ import { Layout, Layers, Boxes, Compass } from 'lucide-react';
 
 const STYLES = {
   overview:  { bg: 'bg-gray-700/40',   text: 'text-gray-200', border: 'border-gray-500/40', label: 'Overview',  Icon: Compass },
-  screen:    { bg: 'bg-blue-500/15',   text: 'text-blue-300', border: 'border-blue-500/40', label: 'Écran',     Icon: Layout },
-  feature_g: { bg: 'bg-violet-500/20', text: 'text-violet-200', border: 'border-violet-500/40', label: 'Feature globale',  Icon: Layers },
-  feature_s: { bg: 'bg-violet-500/10', text: 'text-violet-300', border: 'border-violet-400/30', label: 'Feature',          Icon: Layers },
-  component: { bg: 'bg-emerald-500/15',text: 'text-emerald-200',border:'border-emerald-500/40', label: 'Composant',Icon: Boxes },
+  screen:    { bg: 'bg-blue-500/15',   text: 'text-blue-700 dark:text-blue-300', border: 'border-blue-500/40', label: 'Écran',     Icon: Layout },
+  feature_g: { bg: 'bg-violet-500/20', text: 'text-violet-700 dark:text-violet-200', border: 'border-violet-500/40', label: 'Feature globale',  Icon: Layers },
+  feature_s: { bg: 'bg-violet-500/10', text: 'text-violet-700 dark:text-violet-300', border: 'border-violet-400/30', label: 'Feature',          Icon: Layers },
+  component: { bg: 'bg-emerald-500/15',text: 'text-emerald-700 dark:text-emerald-200',border:'border-emerald-500/40', label: 'Composant',Icon: Boxes },
 };
 
 function styleFor(type, scope) {

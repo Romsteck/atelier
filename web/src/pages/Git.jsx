@@ -368,7 +368,7 @@ function Git() {
                 href="https://github.com/settings/tokens/new?scopes=repo&description=Atelier"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 mt-2"
+                className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 mt-2"
               >
                 <ExternalLink className="w-3 h-3" /> Generer un token
               </a>
@@ -530,7 +530,7 @@ function Git() {
                       <button
                         onClick={() => setConfirmDelete(selectedRepo)}
                         title="Supprimer ce dépôt"
-                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 text-red-400 border border-red-900/50 bg-red-900/10 hover:bg-red-900/30 hover:text-red-300 transition-colors"
+                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 text-red-600 dark:text-red-400 border border-red-900/50 bg-red-900/10 hover:bg-red-900/30 hover:text-red-700 dark:hover:text-red-300 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" /> Supprimer
                       </button>

@@ -23,7 +23,7 @@ function highlight(snippet) {
       if (p === '<mark>') { inMark = true; return null; }
       if (p === '</mark>') { inMark = false; return null; }
       return inMark ? (
-        <mark key={i} className="bg-yellow-400/30 text-yellow-200 px-0.5 rounded-sm">{p}</mark>
+        <mark key={i} className="bg-yellow-400/30 text-yellow-800 dark:text-yellow-200 px-0.5 rounded-sm">{p}</mark>
       ) : (
         <span key={i}>{p}</span>
       );
@@ -114,7 +114,7 @@ export default function DocsSearch({ appId, onPick }) {
               onClick={() => setType(t.key)}
               className={`px-2 py-1 text-xs rounded-sm border transition-colors
                           ${type === t.key
-                            ? 'bg-blue-500/20 border-blue-500 text-blue-200'
+                            ? 'bg-blue-500/20 border-blue-500 text-blue-800 dark:text-blue-200'
                             : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'}`}
             >
               {t.label}

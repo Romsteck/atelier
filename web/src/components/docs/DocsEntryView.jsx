@@ -73,7 +73,7 @@ export default function DocsEntryView({ entry, onPickLink }) {
                 key={link}
                 onClick={() => onPickLink?.({ type: t, name: n })}
                 className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded
-                           bg-blue-500/10 border border-blue-500/30 text-blue-300
+                           bg-blue-500/10 border border-blue-500/30 text-blue-700 dark:text-blue-300
                            hover:bg-blue-500/20"
               >
                 <LinkIcon className="w-3 h-3" />

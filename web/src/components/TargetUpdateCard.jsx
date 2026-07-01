@@ -17,7 +17,7 @@ function VersionCell({ installed, latest, category, targetId, onUpgrade, upgradi
             {!upgrading && (
               <button
                 onClick={() => onUpgrade(targetId, category)}
-                className="ml-1 text-orange-400 hover:text-orange-300 p-0.5"
+                className="ml-1 text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300 p-0.5"
                 title="Mettre à jour"
               >
                 <ArrowUp className="w-3 h-3" />
@@ -54,7 +54,7 @@ function OsCell({ target, onUpgrade, upgrading }) {
         {!upgrading && (
           <button
             onClick={() => onUpgrade(target.id, 'apt')}
-            className="ml-1 text-orange-400 hover:text-orange-300 p-0.5"
+            className="ml-1 text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300 p-0.5"
             title="Mettre à jour APT"
           >
             <ArrowUp className="w-3 h-3" />

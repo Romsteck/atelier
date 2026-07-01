@@ -66,7 +66,7 @@ function TreeNode({ slug, entry, depth, onOpenFile, openPaths, refreshToken }) {
         title={entry.path}
         style={{ paddingLeft: depth * 12 + 8 }}
         className={`w-full flex items-center gap-1 py-[3px] pr-2 text-[13px] text-left rounded-sm ${
-          opened ? 'bg-blue-500/20 text-blue-200' : 'text-gray-300 hover:bg-gray-700/40'
+          opened ? 'bg-blue-500/20 text-blue-800 dark:text-blue-200' : 'text-gray-300 hover:bg-gray-700/40'
         }`}>
         {entry.is_dir ? (
           open ? <ChevronDown className="w-3.5 h-3.5 shrink-0 text-gray-500" />

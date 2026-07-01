@@ -114,7 +114,7 @@ function FindingCard({ finding, active, onSelect, onResolve, resolving }) {
               className={`px-2 py-1 text-xs border rounded-sm flex items-center gap-1 ${
                 resolving
                   ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
-                  : 'text-blue-300 hover:text-blue-200 hover:bg-blue-900/30 border-blue-500/30'
+                  : 'text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200 hover:bg-blue-900/30 border-blue-500/30'
               }`}
             >
               <Wrench className="w-3 h-3" /> {resolving ? 'Conversation ouverte' : 'Résoudre'}
@@ -168,7 +168,7 @@ function AnnexDrawer({ finding, onClose, onResolve, onDelete, resolving }) {
             className={`flex-1 px-2 py-1 text-xs border rounded-sm flex items-center justify-center gap-1 ${
               resolving
                 ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
-                : 'text-blue-300 hover:text-blue-200 border-blue-500/30 hover:bg-blue-900/30'
+                : 'text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200 border-blue-500/30 hover:bg-blue-900/30'
             }`}
           >
             <Wrench className="w-3 h-3" /> {resolving ? 'Conversation ouverte' : "Résoudre avec l'agent"}
@@ -468,7 +468,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       {/* Action bar */}
       <div className="px-4 py-2 border-b border-gray-700 bg-gray-800/30 flex items-center gap-2 flex-wrap">
         {activeRun ? (
-          <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-200 hover:bg-red-500/30 border-red-500/30">
+          <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-700 dark:text-red-200 hover:bg-red-500/30 border-red-500/30">
             {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
             Arrêter le scan
           </button>
@@ -495,7 +495,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
 
       <div className="flex-1 overflow-y-auto flex">
         <div className="flex-1 p-4 space-y-4 min-w-0">
-          {err && <div className="p-3 bg-red-900/30 border border-red-700/50 text-red-300 rounded-sm text-sm">{err}</div>}
+          {err && <div className="p-3 bg-red-900/30 border border-red-700/50 text-red-700 dark:text-red-300 rounded-sm text-sm">{err}</div>}
           {!err && findings.length === 0 && !loading && (
             <div className="text-center py-12 text-gray-500 text-sm">
               {blankBusiness ? 'Scan Business en veille — il sera défini par l\'agent du projet.' : `Aucune finding ${meta.label} pour ce statut. Lance le scan ci-dessus.`}

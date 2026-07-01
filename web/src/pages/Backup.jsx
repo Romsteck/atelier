@@ -22,10 +22,10 @@ const STEPS = [
 ];
 
 const STATUS_META = {
-  success: { label: 'Réussi', cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200', icon: CheckCircle2 },
-  failed: { label: 'Échec', cls: 'border-red-500/30 bg-red-500/10 text-red-200', icon: XCircle },
-  cancelled: { label: 'Annulé', cls: 'border-orange-500/30 bg-orange-500/10 text-orange-200', icon: Square },
-  running: { label: 'En cours', cls: 'border-blue-500/30 bg-blue-500/10 text-blue-200', icon: Loader2 },
+  success: { label: 'Réussi', cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200', icon: CheckCircle2 },
+  failed: { label: 'Échec', cls: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200', icon: XCircle },
+  cancelled: { label: 'Annulé', cls: 'border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-200', icon: Square },
+  running: { label: 'En cours', cls: 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-200', icon: Loader2 },
 };
 
 // État par étape, accumulé depuis les events `backup:live` (cf. WS handler).
@@ -67,9 +67,9 @@ function PipelineStep({ step, state, isLast }) {
         {!isLast && <div className={`w-0.5 flex-1 ${lineColor} transition-colors duration-300`} style={{ minHeight: '24px' }} />}
       </div>
       <div className={`mb-3 flex-1 rounded-xl border px-4 py-3 ${border} transition-colors duration-300`}>
-        <div className="flex items-center justify-between gap-2 text-sm font-medium text-white">
+        <div className="flex items-center justify-between gap-2 text-sm font-medium text-gray-50">
           <span className="flex items-center gap-2"><Icon className="h-4 w-4 text-gray-400" /> {step.label}</span>
-          {status === 'complete' && bd != null && <span className="text-xs font-normal text-emerald-300/90">+{formatBytes(bd)}</span>}
+          {status === 'complete' && bd != null && <span className="text-xs font-normal text-emerald-700 dark:text-emerald-300/90">+{formatBytes(bd)}</span>}
         </div>
         {isActive && (
           <div className="mt-2">
@@ -80,7 +80,7 @@ function PipelineStep({ step, state, isLast }) {
                 <div className="h-full w-full animate-pulse rounded-full bg-linear-to-r from-blue-500/50 to-cyan-400/60" />
               )}
             </div>
-            <div className="mt-1 text-xs text-blue-100/80">
+            <div className="mt-1 text-xs text-blue-700 dark:text-blue-100/80">
               {determinate
                 ? `${formatBytes(bd)} / ${formatBytes(bt)} · ${pct}%`
                 : bd != null
@@ -118,15 +118,15 @@ function SnapshotRow({ snap, isLast }) {
       <div className="flex-1 pb-3">
         <div className="flex items-center gap-2 text-sm">
           <span className="font-medium text-gray-200">{snap.tag}</span>
-          {!ok && <span className="text-xs text-red-300">échec</span>}
+          {!ok && <span className="text-xs text-red-700 dark:text-red-300">échec</span>}
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-400">
           <span>{snap.files} fichiers</span>
           <span>traité {formatBytes(snap.bytes_processed)}</span>
-          <span className="text-emerald-300/90">ajouté {formatBytes(snap.bytes_added)}</span>
+          <span className="text-emerald-700 dark:text-emerald-300/90">ajouté {formatBytes(snap.bytes_added)}</span>
           {snap.snapshot_id && <span className="font-mono text-gray-500">{snap.snapshot_id}</span>}
         </div>
-        {snap.error && <div className="mt-1 text-xs text-red-300">{snap.error}</div>}
+        {snap.error && <div className="mt-1 text-xs text-red-700 dark:text-red-300">{snap.error}</div>}
       </div>
     </div>
   );
@@ -144,14 +144,14 @@ function HistoryRow({ run, expanded, onToggle }) {
           {run.trigger === 'cron' ? 'planifié' : 'manuel'}
         </span>
         <span className="ml-auto flex items-center gap-4 text-xs text-gray-400">
-          {run.total_added != null && <span className="text-emerald-300/90">+{formatBytes(run.total_added)}</span>}
+          {run.total_added != null && <span className="text-emerald-700 dark:text-emerald-300/90">+{formatBytes(run.total_added)}</span>}
           <span>{formatDuration(dur)}</span>
         </span>
       </button>
       {expanded && (
         <div className="border-t border-gray-700/60 bg-gray-900/40 px-4 py-3">
           {run.error && (
-            <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-200">
               {run.error}
             </div>
           )}
@@ -224,7 +224,7 @@ function ServerCard({ target, onConfigure, onReveal }) {
         <div className="flex items-center gap-3">
           <Server className="h-5 w-5 text-gray-400" />
           <div>
-            <div className="text-sm font-semibold text-white">Serveur de sauvegarde</div>
+            <div className="text-sm font-semibold text-gray-50">Serveur de sauvegarde</div>
             {configured ? (
               <div className="text-sm text-gray-400">
                 <span className="font-mono text-gray-300">{target.host}</span>
@@ -320,7 +320,7 @@ function ConfigWizard({ target, onClose, onSaved, setToast }) {
             {STEP_LABELS.map((s, i) => (
               <div key={s} className="flex items-center gap-2">
                 <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs ${step === i + 1 ? 'bg-blue-500 text-white' : step > i + 1 ? 'bg-emerald-500/80 text-white' : 'bg-gray-700 text-gray-400'}`}>{i + 1}</span>
-                <span className={`text-xs ${step === i + 1 ? 'text-white' : 'text-gray-500'}`}>{s}</span>
+                <span className={`text-xs ${step === i + 1 ? 'text-gray-50' : 'text-gray-500'}`}>{s}</span>
                 {i < STEP_LABELS.length - 1 && <span className="mx-1 text-gray-600">›</span>}
               </div>
             ))}
@@ -550,7 +550,7 @@ export default function Backup() {
       </PageHeader>
 
       {toast && (
-        <div className={`rounded-xl border px-4 py-3 text-sm ${toast.type === 'error' ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'}`}>
+        <div className={`rounded-xl border px-4 py-3 text-sm ${toast.type === 'error' ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200'}`}>
           {toast.text}
           <button onClick={() => setToast(null)} className="ml-3 text-xs text-gray-400 hover:text-gray-200">fermer</button>
         </div>
@@ -585,7 +585,7 @@ export default function Backup() {
           </div>
         )}
         {!toolsOk && (
-          <div className="mt-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          <div className="mt-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-200">
             <AlertTriangle className="h-4 w-4" /> Binaire manquant sur le serveur : installez {!tools.restic && 'restic'} {!tools.restic && !tools.rclone && '+'} {!tools.rclone && 'rclone'}.
           </div>
         )}
@@ -606,7 +606,7 @@ export default function Backup() {
       {/* Historique */}
       <section>
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Historique</h2>
+          <h2 className="text-lg font-semibold text-gray-50">Historique</h2>
           <div className="flex items-center gap-2">
             {['all', 'success', 'failed'].map((f) => (
               <button
@@ -632,7 +632,7 @@ export default function Backup() {
         </div>
         {runs.length < total && (
           <div className="mt-3 text-center">
-            <button onClick={() => setLimit((l) => l + 50)} className="text-sm text-blue-400 hover:text-blue-300">
+            <button onClick={() => setLimit((l) => l + 50)} className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">
               Voir plus ({runs.length}/{total})
             </button>
           </div>

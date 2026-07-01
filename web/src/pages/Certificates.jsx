@@ -130,7 +130,7 @@ const Certificates = () => {
             <span className="text-sm font-medium">Let's Encrypt</span>
             <CheckCircle className="w-4 h-4 text-green-400" />
             <span className="text-sm text-green-400">Actif</span>
-            <span className="px-1.5 py-0.5 bg-blue-900/30 text-blue-300 text-xs rounded-sm">
+            <span className="px-1.5 py-0.5 text-blue-700 dark:text-blue-300 text-xs rounded-sm">
               Wildcards
             </span>
             <span className="text-xs text-gray-500">Renouvellement auto 30j avant expiration</span>
@@ -149,7 +149,7 @@ const Certificates = () => {
               href="https://letsencrypt.org/"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-300"
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-600 dark:hover:text-blue-300"
             >
               <ExternalLink className="w-3 h-3" />
               letsencrypt.org
@@ -212,9 +212,9 @@ const Certificates = () => {
                     <td className="py-1.5">
                       <span className={`px-1.5 py-0.5 text-xs rounded-sm ${
                         cert.type === 'app'
-                          ? 'bg-purple-900/30 text-purple-300'
+                          ? 'text-purple-700 dark:text-purple-300'
                           : cert.type === 'global'
-                          ? 'bg-blue-900/30 text-blue-300'
+                          ? 'text-blue-700 dark:text-blue-300'
                           : 'bg-gray-700/50 text-gray-400'
                       }`}>
                         {getTypeLabel(cert)}

@@ -259,7 +259,7 @@ export default function Logs() {
       <div className="p-4 sm:p-6 border-b border-gray-700">
         <div className="flex items-center gap-3">
           <ScrollText className="w-6 h-6 text-blue-400" />
-          <h1 className="text-2xl font-bold text-white">Logs</h1>
+          <h1 className="text-2xl font-bold text-gray-50">Logs</h1>
           {isLive && (
             <span className="flex items-center gap-1.5 ml-2">
               <span className="relative flex h-2.5 w-2.5">
@@ -307,7 +307,7 @@ export default function Logs() {
                 onClick={() => { setScope(s.key); if (s.key !== 'apps') setAppSlug(''); }}
                 className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition-colors border ${
                   active
-                    ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                    ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30'
                     : 'bg-gray-800 text-gray-400 border-gray-700 hover:bg-gray-700'
                 }`}
               >
@@ -370,7 +370,7 @@ export default function Logs() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Rechercher..."
-            className="w-full pl-8 pr-8 py-1.5 text-xs bg-gray-700 border border-gray-600 text-white rounded-lg placeholder-gray-500 focus:outline-hidden focus:border-blue-500"
+            className="w-full pl-8 pr-8 py-1.5 text-xs bg-gray-700 border border-gray-600 text-gray-50 rounded-lg placeholder-gray-500 focus:outline-hidden focus:border-blue-500"
           />
           {searchInput && (
             <button onClick={() => { setSearchInput(''); setSearchText(''); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
@@ -420,7 +420,7 @@ export default function Logs() {
       {/* New entries badge */}
       {paused && newCount > 0 && (
         <div className="px-4 sm:px-6 py-1.5 bg-blue-500/10 border-b border-blue-500/20">
-          <button onClick={resume} className="text-xs text-blue-400 hover:text-blue-300">
+          <button onClick={resume} className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">
             {newCount} nouvelle{newCount > 1 ? 's' : ''} entree{newCount > 1 ? 's' : ''} — cliquer pour reprendre
           </button>
         </div>

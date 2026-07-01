@@ -431,7 +431,7 @@ export default function StudioShell({ slug }) {
           href={appPath}
           target="_blank"
           rel="noopener noreferrer"
-          className="hidden md:flex items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 truncate max-w-[200px]"
+          className="hidden md:flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate max-w-[200px]"
           title={`Ouvrir ${slug} (${appPath})`}
         >
           <span className="truncate">{appPath}</span>
@@ -479,7 +479,7 @@ export default function StudioShell({ slug }) {
         {topBar}
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-400">
           <p className="text-sm">Application <span className="font-mono text-gray-200">{slug}</span> introuvable.</p>
-          <a href="/" className="text-sm text-blue-400 hover:text-blue-300 inline-flex items-center gap-1.5"><ArrowLeft className="w-4 h-4" /> Retour à Atelier</a>
+          <a href="/" className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 inline-flex items-center gap-1.5"><ArrowLeft className="w-4 h-4" /> Retour à Atelier</a>
         </div>
       </div>
     );

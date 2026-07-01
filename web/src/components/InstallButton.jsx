@@ -14,7 +14,7 @@ function InstallButton({ collapsed }) {
   // Aligne le repli en rail d'icônes sur le reste de la sidebar.
   const railLabel = collapsed ? 'lg:hidden lg:group-hover/aside:block' : '';
   const railRow = collapsed ? 'lg:justify-center lg:group-hover/aside:justify-start' : '';
-  const btn = `flex items-center gap-2 w-full px-2 py-1.5 rounded-sm text-sm text-amber-300 hover:text-amber-200 hover:bg-gray-700/50 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${railRow}`;
+  const btn = `flex items-center gap-2 w-full px-2 py-1.5 rounded-sm text-sm text-amber-700 dark:text-amber-300 hover:text-amber-800 dark:hover:text-amber-200 hover:bg-gray-700/50 transition-[background-color,color] duration-300 ease-out hover:duration-0 ${railRow}`;
 
   if (canInstall) {
     return (

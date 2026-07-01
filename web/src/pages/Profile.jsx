@@ -54,7 +54,7 @@ function Profile() {
       <div className="space-y-6">
         {/* User Info Card */}
         <div className="bg-gray-800/50 backdrop-blur-xs p-6 border border-gray-700">
-          <h2 className="text-lg font-semibold text-white mb-4">Informations du compte</h2>
+          <h2 className="text-lg font-semibold text-gray-50 mb-4">Informations du compte</h2>
 
           <div className="space-y-px">
             <div className="flex items-center gap-3">
@@ -63,7 +63,7 @@ function Profile() {
               </div>
               <div>
                 <div className="text-sm text-gray-400">Nom d'utilisateur</div>
-                <div className="text-white font-medium">{user.username}</div>
+                <div className="text-gray-50 font-medium">{user.username}</div>
               </div>
             </div>
 
@@ -73,7 +73,7 @@ function Profile() {
               </div>
               <div>
                 <div className="text-sm text-gray-400">Nom d'affichage</div>
-                <div className="text-white font-medium">{user.displayName || user.username}</div>
+                <div className="text-gray-50 font-medium">{user.displayName || user.username}</div>
               </div>
             </div>
           </div>
@@ -81,7 +81,7 @@ function Profile() {
 
         {/* Change Code Card */}
         <div className="bg-gray-800/50 backdrop-blur-xs p-6 border border-gray-700">
-          <h2 className="text-lg font-semibold text-white mb-4">Changer le code d'acces</h2>
+          <h2 className="text-lg font-semibold text-gray-50 mb-4">Changer le code d'acces</h2>
 
           <form onSubmit={handleChangeCode} className="space-y-4">
             {codeSuccess && (
@@ -108,7 +108,7 @@ function Profile() {
                   type="password"
                   value={newCode}
                   onChange={(e) => setNewCode(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 bg-gray-900/50 border border-gray-600 text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
+                  className="w-full pl-10 pr-4 py-3 bg-gray-900/50 border border-gray-600 text-gray-50 placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
                   placeholder="Nouveau code d'acces"
                   required
                 />

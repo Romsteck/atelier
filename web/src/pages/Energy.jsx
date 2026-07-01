@@ -9,6 +9,7 @@ import Section from '../components/Section';
 import StatusBadge from '../components/StatusBadge';
 import Button from '../components/Button';
 import useWebSocket from '../hooks/useWebSocket';
+import { useTheme } from '../context/ThemeContext';
 import {
   getEnergyHosts, getCurrentEnergyMode, setEnergyMode,
   getEnergySchedule, saveEnergySchedule,
@@ -197,7 +198,7 @@ export default function Energy() {
                     type="time"
                     value={schedule.nightStart || '23:00'}
                     onChange={(e) => setSchedule(s => ({ ...s, nightStart: e.target.value }))}
-                    className="bg-gray-800 border border-gray-600 text-white text-sm px-2 py-1"
+                    className="bg-gray-800 border border-gray-600 text-gray-50 text-sm px-2 py-1"
                   />
                 </div>
                 <div className="flex items-center gap-2">
@@ -206,7 +207,7 @@ export default function Energy() {
                     type="time"
                     value={schedule.nightEnd || '07:00'}
                     onChange={(e) => setSchedule(s => ({ ...s, nightEnd: e.target.value }))}
-                    className="bg-gray-800 border border-gray-600 text-white text-sm px-2 py-1"
+                    className="bg-gray-800 border border-gray-600 text-gray-50 text-sm px-2 py-1"
                   />
                 </div>
                 <Button variant="primary" onClick={handleScheduleSave} loading={scheduleLoading}>
@@ -405,7 +406,7 @@ function PerCoreGrid({ cores, hostId }) {
           return (
             <div key={core.coreId} className="bg-gray-800 border border-gray-700/50 p-1 text-center group relative">
               <div className="text-[9px] text-gray-600">C{core.coreId}</div>
-              <div className="text-[11px] font-mono text-white tabular-nums">{core.frequencyMhz}</div>
+              <div className="text-[11px] font-mono text-gray-50 tabular-nums">{core.frequencyMhz}</div>
               <div className={`text-[9px] font-mono ${govColor}`}>{GOV_SHORT[core.governor] || core.governor.slice(0, 2).toUpperCase()}</div>
               {/* Frequency bar */}
               <div className="mt-0.5 h-0.5 bg-gray-700 rounded-full overflow-hidden">
@@ -423,7 +424,7 @@ function PerCoreGrid({ cores, hostId }) {
                     disabled={busy != null}
                     className={`px-1.5 py-0.5 text-[9px] font-mono border transition-colors ${
                       core.governor === gov
-                        ? 'border-blue-500 bg-blue-900/40 text-blue-300'
+                        ? 'border-blue-500 bg-blue-900/40 text-blue-700 dark:text-blue-300'
                         : 'border-gray-700 bg-gray-800 text-gray-400 hover:bg-gray-700'
                     }`}
                   >
@@ -445,7 +446,7 @@ function MetricCell({ icon: Icon, value, sub, color }) {
   return (
     <div className="bg-gray-800 border border-gray-700 p-2 text-center">
       <Icon className="w-3.5 h-3.5 text-gray-500 mx-auto mb-1" />
-      <div className={`text-base font-semibold tabular-nums ${color || 'text-white'}`}>
+      <div className={`text-base font-semibold tabular-nums ${color || 'text-gray-50'}`}>
         {value}
         {sub && <span className="text-xs text-gray-500 ml-0.5">{sub}</span>}
       </div>
@@ -457,6 +458,7 @@ function MetricCell({ icon: Icon, value, sub, color }) {
 
 function MiniGraph({ data, max, color, label, unit, tick }) {
   const canvasRef = useRef(null);
+  const { theme } = useTheme();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -469,11 +471,14 @@ function MiniGraph({ data, max, color, label, unit, tick }) {
     canvas.height = h * dpr;
     ctx.scale(dpr, dpr);
 
-    ctx.fillStyle = '#111827';
+    // Le canvas ne peut pas hériter des couleurs CSS thémées : on choisit le
+    // fond/grille selon le thème (la couleur de la donnée, saturée, reste inchangée).
+    const isLight = theme === 'light';
+    ctx.fillStyle = isLight ? '#f3f4f6' : '#111827';
     ctx.fillRect(0, 0, w, h);
 
     // Grid
-    ctx.strokeStyle = '#1f2937';
+    ctx.strokeStyle = isLight ? '#e5e7eb' : '#1f2937';
     ctx.lineWidth = 0.5;
     for (let i = 0; i <= 4; i++) {
       const y = (h - 16) * i / 4 + 8;
@@ -525,7 +530,7 @@ function MiniGraph({ data, max, color, label, unit, tick }) {
     // Label + value overlay
     const lastVal = validData.filter(v => v != null).pop();
     ctx.font = '10px monospace';
-    ctx.fillStyle = '#6b7280';
+    ctx.fillStyle = isLight ? '#4b5563' : '#6b7280';
     ctx.textAlign = 'left';
     ctx.fillText(label, 3, h - 2);
     if (lastVal != null) {
@@ -534,7 +539,7 @@ function MiniGraph({ data, max, color, label, unit, tick }) {
       ctx.textAlign = 'right';
       ctx.fillText(`${lastVal.toFixed(0)}${unit}`, w - 3, h - 2);
     }
-  }, [data, max, color, label, unit, tick]);
+  }, [data, max, color, label, unit, tick, theme]);
 
   return (
     <div className="border border-gray-700/50 overflow-hidden">

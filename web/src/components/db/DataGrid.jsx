@@ -12,7 +12,7 @@ function CellValue({ value, fieldType, displayValue }) {
     return (
       <span className="flex items-center gap-1">
         <FunctionSquare className="w-3 h-3 text-purple-400 shrink-0" />
-        <span className="text-purple-300">{String(value)}</span>
+        <span className="text-purple-700 dark:text-purple-300">{String(value)}</span>
       </span>
     );
   }

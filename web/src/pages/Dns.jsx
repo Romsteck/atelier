@@ -105,7 +105,7 @@ function Dns() {
                       <td className="py-2 text-gray-400">{record.ttl}s</td>
                       <td className="py-2">
                         {record.managed_by === 'hr-edge' ? (
-                          <span className="px-2 py-0.5 text-xs font-medium bg-blue-900/50 text-blue-300" title="Auto-généré depuis le reverse proxy">
+                          <span className="px-2 py-0.5 text-xs font-medium text-blue-700 dark:text-blue-300" title="Auto-généré depuis le reverse proxy">
                             Auto (proxy)
                           </span>
                         ) : (

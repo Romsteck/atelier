@@ -182,7 +182,7 @@ function Adblock() {
                       <span className="font-mono text-sm">{domain}</span>
                       <button
                         onClick={() => handleRemoveWhitelist(domain)}
-                        className="text-red-400 hover:text-red-300"
+                        className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
