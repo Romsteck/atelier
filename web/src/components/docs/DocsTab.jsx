@@ -120,8 +120,8 @@ export default function DocsTab({ slug }) {
           Pas encore de documentation pour cette app.
         </div>
         <div className="text-sm text-gray-500 max-w-md">
-          La documentation est créée et maintenue par l'agent. Demande-lui de l'initialiser
-          ou attends la prochaine itération sur l'app.
+          La documentation est créée et maintenue par l&apos;agent. Demande-lui de l&apos;initialiser
+          ou attends la prochaine itération sur l&apos;app.
         </div>
         <button
           onClick={loadOverview}

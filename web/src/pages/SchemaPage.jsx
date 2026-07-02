@@ -1,13 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { listApps, getAppDbTables } from '../api/client';
+import { listApps, getAppDbTables, unwrapApi as unwrap } from '../api/client';
 import { SchemaEditor } from '../components/db/SchemaEditor';
 import { Database, Loader2 } from 'lucide-react';
-
-function unwrap(res) {
-  const d = res.data;
-  return d && typeof d === 'object' && 'data' in d ? d.data : d;
-}
 
 export default function SchemaPage() {
   const [searchParams, setSearchParams] = useSearchParams();

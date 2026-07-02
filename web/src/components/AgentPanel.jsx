@@ -389,7 +389,7 @@ export default function AgentPanel({ panelKey }) {
   // Reflète l'effort imposé au lancement (ex. 'max' depuis « Résoudre ») dès qu'il est connu.
   useEffect(() => {
     if (convo?.effort) setEffort(convo.effort);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [convo?.effort]);
 
   // Changement délibéré d'effort par l'utilisateur → applique + mémorise comme préférence.

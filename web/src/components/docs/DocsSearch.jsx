@@ -55,7 +55,7 @@ export default function DocsSearch({ appId, onPick }) {
         const res = await searchDocs(params);
         setResults(res.data?.results || []);
         setOpen(true);
-      } catch (e) {
+      } catch {
         setResults([]);
       } finally {
         setLoading(false);

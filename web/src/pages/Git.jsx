@@ -9,7 +9,8 @@ import Button from '../components/Button';
 import CommitHeatmap from '../components/git/CommitHeatmap';
 import DiffStatBar from '../components/git/DiffStatBar';
 import CommitDetailModal from '../components/git/CommitDetailModal';
-import { timeAgo, formatBytes } from '../utils/gitFormat';
+import { timeAgo, formatBytes } from '../utils/formatters';
+import { useToast } from '../hooks/useToast';
 import {
   getGitRepos, getGitCommits, getGitActivity, getGitBranches,
   triggerGitMirrorSync, syncAllGitRepos, getGitSshKey,
@@ -29,7 +30,8 @@ function Git() {
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showConfig, setShowConfig] = useState(false);
-  const [message, setMessage] = useState(null);
+  // Toast banner (rendu inline sous le header, pas le <Toast> flottant partagé).
+  const { toast: message, showToast, dismiss } = useToast();
   const [showToken, setShowToken] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
   const [orgInput, setOrgInput] = useState('');
@@ -64,11 +66,11 @@ function Git() {
       const res = await getGitRepos();
       setRepos(res.data?.repos || res.data || []);
     } catch {
-      setMessage({ type: 'error', text: 'Erreur lors du chargement des depots' });
+      showToast('Erreur lors du chargement des depots', 'error');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showToast]);
 
   const fetchSshKey = useCallback(async () => {
     try {
@@ -130,7 +132,7 @@ function Git() {
       setBranches(branchesRes.data?.branches || branchesRes.data || []);
       setActivity(activityRes.data?.activity || activityRes.data || []);
     } catch {
-      setMessage({ type: 'error', text: 'Erreur lors du chargement du depot' });
+      showToast('Erreur lors du chargement du depot', 'error');
     } finally {
       setLoadingDetail(false);
       setLoadingActivity(false);
@@ -143,10 +145,10 @@ function Git() {
     try {
       const res = await generateGitSshKey();
       setSshKey(res.data);
-      setMessage({ type: 'success', text: 'Cle SSH generee' });
+      showToast('Cle SSH generee');
       updateActivity(logId, 'ok');
     } catch {
-      setMessage({ type: 'error', text: 'Erreur lors de la generation de la cle' });
+      showToast('Erreur lors de la generation de la cle', 'error');
       updateActivity(logId, 'error', 'Erreur lors de la generation de la cle');
     } finally {
       setGeneratingKey(false);
@@ -156,7 +158,7 @@ function Git() {
   const handleSaveConfig = async () => {
     const hasExistingToken = !!config?.github_token;
     if ((!tokenInput.trim() && !hasExistingToken) || !orgInput.trim()) {
-      setMessage({ type: 'error', text: 'Le token et l\'organisation sont requis' });
+      showToast('Le token et l\'organisation sont requis', 'error');
       return;
     }
     const logId = addActivity('Config');
@@ -165,11 +167,11 @@ function Git() {
     if (tokenInput.trim()) payload.github_token = tokenInput;
     try {
       await updateGitConfig(payload);
-      setMessage({ type: 'success', text: 'Configuration sauvegardee' });
+      showToast('Configuration sauvegardee');
       updateActivity(logId, 'ok');
       fetchConfig();
     } catch {
-      setMessage({ type: 'error', text: 'Erreur lors de la sauvegarde' });
+      showToast('Erreur lors de la sauvegarde', 'error');
       updateActivity(logId, 'error', 'Erreur lors de la sauvegarde');
     } finally {
       setSavingConfig(false);
@@ -180,7 +182,7 @@ function Git() {
     const key = sshKey?.public_key || sshKey?.key || '';
     if (key) {
       navigator.clipboard.writeText(key);
-      setMessage({ type: 'success', text: 'Cle copiee' });
+      showToast('Cle copiee');
     }
   };
 
@@ -189,12 +191,12 @@ function Git() {
     setSyncing(prev => ({ ...prev, [slug]: true }));
     try {
       await triggerGitMirrorSync(slug);
-      setMessage({ type: 'success', text: `Synchronisation de ${slug} lancee` });
+      showToast(`Synchronisation de ${slug} lancee`);
       updateActivity(logId, 'ok');
       fetchRepos();
       fetchConfig();
     } catch {
-      setMessage({ type: 'error', text: `Erreur de synchronisation pour ${slug}` });
+      showToast(`Erreur de synchronisation pour ${slug}`, 'error');
       updateActivity(logId, 'error', `Erreur de synchronisation pour ${slug}`);
     } finally {
       setSyncing(prev => ({ ...prev, [slug]: false }));
@@ -207,7 +209,7 @@ function Git() {
     try {
       const res = await syncAllGitRepos();
       const count = res.data?.synced || res.data?.count || 'tous les';
-      setMessage({ type: 'success', text: `Synchronisation de ${count} depots lancee` });
+      showToast(`Synchronisation de ${count} depots lancee`);
       updateActivity(logId, 'ok', `${count} depots synchronises`);
       if (res.data?.mirrors) {
         setConfig(prev => ({ ...prev, mirrors: res.data.mirrors }));
@@ -215,7 +217,7 @@ function Git() {
       fetchRepos();
       fetchConfig();
     } catch {
-      setMessage({ type: 'error', text: 'Erreur lors de la synchronisation globale' });
+      showToast('Erreur lors de la synchronisation globale', 'error');
       updateActivity(logId, 'error', 'Erreur lors de la synchronisation globale');
     } finally {
       setSyncingAll(false);
@@ -227,7 +229,7 @@ function Git() {
     setDeletingRepo(true);
     try {
       await deleteGitRepo(slug);
-      setMessage({ type: 'success', text: `Dépôt ${slug} supprimé` });
+      showToast(`Dépôt ${slug} supprimé`);
       updateActivity(logId, 'ok');
       setConfirmDelete(null);
       if (selectedRepo === slug) setSelectedRepo(null);
@@ -235,19 +237,12 @@ function Git() {
       fetchConfig();
     } catch (e) {
       const detail = e?.response?.data?.error || `Erreur lors de la suppression de ${slug}`;
-      setMessage({ type: 'error', text: detail });
+      showToast(detail, 'error');
       updateActivity(logId, 'error', detail);
     } finally {
       setDeletingRepo(false);
     }
   };
-
-  // Auto-dismiss messages
-  useEffect(() => {
-    if (!message) return;
-    const t = setTimeout(() => setMessage(null), 4000);
-    return () => clearTimeout(t);
-  }, [message]);
 
   const selectedRepoData = repos.find(r => r.slug === selectedRepo);
   const mc = selectedRepo ? (config?.mirrors?.[selectedRepo] || {}) : {};
@@ -286,8 +281,8 @@ function Git() {
             ? 'text-red-400 bg-red-900/20 border border-red-800'
             : 'text-green-400 bg-green-900/20 border border-green-800'
         }`}>
-          <span>{message.text}</span>
-          <button onClick={() => setMessage(null)} className="ml-3 text-gray-500 hover:text-gray-300">&times;</button>
+          <span>{message.msg}</span>
+          <button onClick={dismiss} className="ml-3 text-gray-500 hover:text-gray-300">&times;</button>
         </div>
       )}
 
@@ -335,7 +330,7 @@ function Git() {
                 Token GitHub (Personal Access Token)
               </label>
               <p className="text-xs text-gray-500 mb-2">
-                Necessaire pour creer automatiquement les repos sur GitHub lors de l'activation du mirror.
+                Necessaire pour creer automatiquement les repos sur GitHub lors de l&apos;activation du mirror.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <div className="relative flex-1 min-w-[12rem]">
@@ -615,7 +610,7 @@ function Git() {
                     <GitCommit className="w-8 h-8 text-gray-700 mx-auto mb-2" />
                     <p className="text-sm text-gray-500">Aucun commit</p>
                     <p className="text-xs text-gray-600 mt-1">
-                      Poussez du code depuis votre container pour voir l'historique ici.
+                      Poussez du code depuis votre container pour voir l&apos;historique ici.
                     </p>
                   </div>
                 ) : (
@@ -725,7 +720,7 @@ function Git() {
               </p>
               <p className="text-xs text-gray-500">
                 Le dépôt bare et son historique git sont effacés du disque. Cette action est
-                irréversible (le miroir GitHub éventuel n'est pas touché).
+                irréversible (le miroir GitHub éventuel n&apos;est pas touché).
               </p>
             </div>
             <div className="px-5 py-3 border-t border-gray-700 flex items-center justify-end gap-2">

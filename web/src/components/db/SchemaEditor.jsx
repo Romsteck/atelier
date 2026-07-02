@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   getAppDbSchema,
   syncAppDbSchema,
@@ -7,17 +7,15 @@ import {
   addAppDbColumn,
   removeAppDbColumn,
   createAppDbRelation,
+  unwrapApi as unwrap,
 } from '../../api/client';
 import {
   Plus, Trash2, RefreshCw, Database, Columns, Link2, X, Loader2,
   Type, Hash, Calendar, Mail, Globe, Phone, DollarSign, Percent, Clock,
   Braces, Key, List, Search, FunctionSquare, ToggleLeft,
 } from 'lucide-react';
-
-function unwrap(res) {
-  const d = res.data;
-  return d && typeof d === 'object' && 'data' in d ? d.data : d;
-}
+import { useToast, Toast } from '../../hooks/useToast';
+import { apiErr } from '../../utils/apiErr';
 
 const FIELD_TYPES = [
   'Text', 'Number', 'Decimal', 'Boolean', 'DateTime', 'Date', 'Time',
@@ -65,7 +63,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
   const [schema, setSchema] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { toast, showToast } = useToast(3000);
 
   // Selected table for detail view
   const [selectedTable, setSelectedTable] = useState(null);
@@ -75,12 +73,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
   const [showAddColumn, setShowAddColumn] = useState(null); // table name
   const [showCreateRelation, setShowCreateRelation] = useState(false);
 
-  function showToast(msg, type = 'ok') {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  }
-
-  async function loadSchema() {
+  const loadSchema = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -91,9 +84,9 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [appSlug]);
 
-  useEffect(() => { loadSchema(); }, [appSlug]);
+  useEffect(() => { loadSchema(); }, [loadSchema]);
 
   async function handleSync() {
     try {
@@ -104,7 +97,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
       await loadSchema();
       onSchemaChanged?.();
     } catch (e) {
-      showToast(e.message, 'err');
+      showToast(apiErr(e), 'error');
     }
   }
 
@@ -117,7 +110,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
       await loadSchema();
       onSchemaChanged?.();
     } catch (e) {
-      showToast(e.message, 'err');
+      showToast(apiErr(e), 'error');
     }
   }
 
@@ -129,7 +122,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
       await loadSchema();
       onSchemaChanged?.();
     } catch (e) {
-      showToast(e.message, 'err');
+      showToast(apiErr(e), 'error');
     }
   }
 
@@ -305,14 +298,7 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
         )}
       </div>
 
-      {/* Toast */}
-      {toast && (
-        <div className={`fixed bottom-4 right-4 z-50 px-4 py-2 rounded-lg text-sm shadow-lg ${
-          toast.type === 'ok' ? 'bg-green-500/90 text-white' : 'bg-red-500/90 text-white'
-        }`}>
-          {toast.msg}
-        </div>
-      )}
+      <Toast toast={toast} />
 
       {/* Create Table Modal */}
       {showCreateTable && (
@@ -404,7 +390,7 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
       showToast(`Table "${name}" creee`);
       onCreated();
     } catch (err) {
-      showToast(err.response?.data?.error || err.message, 'err');
+      showToast(apiErr(err), 'error');
     } finally {
       setSaving(false);
     }
@@ -524,7 +510,7 @@ function AddColumnModal({ appSlug, table, onAdded, onClose, showToast }) {
       showToast(`Colonne "${name}" ajoutee a "${table}"`);
       onAdded();
     } catch (err) {
-      showToast(err.response?.data?.error || err.message, 'err');
+      showToast(apiErr(err), 'error');
     } finally {
       setSaving(false);
     }
@@ -534,7 +520,7 @@ function AddColumnModal({ appSlug, table, onAdded, onClose, showToast }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
       <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-xl w-full max-w-sm">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-          <h3 className="text-sm font-semibold text-gray-50">Ajouter colonne a "{table}"</h3>
+          <h3 className="text-sm font-semibold text-gray-50">Ajouter colonne a &quot;{table}&quot;</h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-50 rounded-sm hover:bg-gray-700 border-none bg-transparent cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
@@ -615,7 +601,7 @@ function CreateRelationModal({ appSlug, tables, onCreated, onClose, showToast })
       showToast(`Relation ${fromTable}.${fromColumn} → ${toTable}.${toColumn} creee`);
       onCreated();
     } catch (err) {
-      showToast(err.response?.data?.error || err.message, 'err');
+      showToast(apiErr(err), 'error');
     } finally {
       setSaving(false);
     }

@@ -17,6 +17,8 @@ import LiveScanPanel from './surveillance/LiveScanPanel';
 import { mergeLines } from './surveillance/scanFormat';
 import useWebSocket from '../hooks/useWebSocket';
 import { useOpenResolveFindings } from '../lib/resolveConvos';
+import { useToast, Toast } from '../hooks/useToast';
+import { apiErr } from '../utils/apiErr';
 
 // Each app has THREE scans, discriminated by `kind`:
 // - security / code_review: fixed platform scans (label/categories are constant).
@@ -242,6 +244,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
   const [busy, setBusy] = useState(false); // launch/stop request in flight
   const [transcript, setTranscript] = useState([]); // live scan-agent output (ephemeral)
   const [err, setErr] = useState(null);
+  const { toast, showToast } = useToast();
   const [statusFilter, setStatusFilter] = useState('open');
   // Open findings count for the ACTIVE kind, independent of statusFilter — drives
   // that kind's launch-button cap.
@@ -288,7 +291,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       })
       .catch((e) => {
         if (e.response?.status === 503) setErr('Surveillance désactivée (Postgres injoignable).');
-        else setErr(e.response?.data?.error || e.message);
+        else setErr(apiErr(e));
       })
       .finally(() => setLoading(false));
   }, [slug, activeKind, statusFilter]);
@@ -353,7 +356,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       await runSurveillance(slug, activeKind);
       await reload();
     } catch (e) {
-      alert(e.response?.status === 501 ? 'Runner de scan non disponible.' : (e.response?.data?.error || e.message));
+      showToast(e.response?.status === 501 ? 'Runner de scan non disponible.' : apiErr(e), 'error');
     } finally {
       setBusy(false);
     }
@@ -366,7 +369,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       await cancelSurveillanceRun(slug, activeRun.id);
       await reload();
     } catch (e) {
-      alert('Arrêt a échoué : ' + (e.response?.data?.error || e.message));
+      showToast('Arrêt a échoué : ' + apiErr(e), 'error');
     } finally {
       setBusy(false);
     }
@@ -392,7 +395,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       setSelected(null);
       await reload();
     } catch (e) {
-      alert('Suppression a échoué : ' + (e.response?.data?.error || e.message));
+      showToast('Suppression a échoué : ' + apiErr(e), 'error');
     }
   };
 
@@ -401,6 +404,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
 
   return (
     <div className="h-full flex flex-col">
+      <Toast toast={toast} />
       {/* Kind selector — the app's three scans */}
       <div className="px-4 pt-3 pb-0 flex items-end gap-1 border-b border-gray-700/50">
         {KINDS.map((k) => {
@@ -441,7 +445,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       {isBusiness && showDef && (
         <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/40 text-xs text-gray-300 space-y-1">
           {blank ? (
-            <div className="text-gray-500">Aucun scan Business défini. L'agent du projet le crée/maintient via le tool MCP <code className="text-gray-300">scan_set</code> (cf. <code className="text-gray-300">.claude/rules/surveillance.md</code>).</div>
+            <div className="text-gray-500">Aucun scan Business défini. L&apos;agent du projet le crée/maintient via le tool MCP <code className="text-gray-300">scan_set</code> (cf. <code className="text-gray-300">.claude/rules/surveillance.md</code>).</div>
           ) : (
             <>
               <div><span className="text-gray-500">catégories :</span> {(scan.categories || []).join(', ') || '—'}</div>
@@ -458,7 +462,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       {/* Fixed scans (Sécurité / Qualité) : axes d'analyse listés sous le nom du scan */}
       {!isBusiness && meta.cats?.length > 0 && (
         <div className="px-4 pt-2 pb-2 flex items-center gap-1.5 flex-wrap border-b border-gray-700/40 text-xs">
-          <span className="text-gray-500">Axes d'analyse :</span>
+          <span className="text-gray-500">Axes d&apos;analyse :</span>
           {meta.cats.map((c) => (
             <span key={c} className="px-1.5 py-0.5 rounded-sm bg-gray-700/60 text-gray-300">{catLabel(c)}</span>
           ))}

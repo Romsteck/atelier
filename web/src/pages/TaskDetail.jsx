@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { CheckCircle, XCircle, Loader, Clock, ArrowLeft, Ban } from 'lucide-react';
 import useWebSocket from '../hooks/useWebSocket';
+import { getTask, cancelTask } from '../api/client';
 
 const STATUS_CONFIG = {
   pending: { icon: Clock, color: 'text-gray-400', border: 'border-gray-500', label: 'En attente' },
@@ -105,9 +106,9 @@ export default function TaskDetail() {
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/tasks/${id}`)
-      .then(r => r.json())
-      .then(data => {
+    getTask(id)
+      .then(res => {
+        const data = res.data;
         if (data?.task) setTask(data.task);
         if (data?.steps) setSteps(data.steps);
       })
@@ -127,7 +128,7 @@ export default function TaskDetail() {
 
   const handleCancel = async () => {
     try {
-      await fetch(`/api/tasks/${id}/cancel`, { method: 'POST' });
+      await cancelTask(id);
     } catch { /* ignore */ }
   };
 

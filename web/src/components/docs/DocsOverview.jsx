@@ -69,10 +69,10 @@ export default function DocsOverview({ overview, diagram }) {
       ) : (
         <div className="p-6 bg-gray-800/30 border border-dashed border-gray-700 rounded-lg text-center text-gray-400">
           <p className="font-medium text-gray-300 mb-1">
-            Aucune vue d'ensemble pour cette app.
+            Aucune vue d&apos;ensemble pour cette app.
           </p>
           <p className="text-sm">
-            L'agent peut la créer via <code className="px-1 py-0.5 bg-gray-900 rounded-sm text-xs text-blue-700 dark:text-blue-300">docs_update(type=overview, name=overview, …)</code>.
+            L&apos;agent peut la créer via <code className="px-1 py-0.5 bg-gray-900 rounded-sm text-xs text-blue-700 dark:text-blue-300">docs_update(type=overview, name=overview, …)</code>.
           </p>
         </div>
       )}

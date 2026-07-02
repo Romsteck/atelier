@@ -8,6 +8,7 @@ import {
   insertAppDbRow,
   updateAppDbRow,
   deleteAppDbRow,
+  unwrapApi as unwrap,
 } from '../api/client';
 import { TableSidebar } from '../components/db/TableSidebar';
 import { DataGrid } from '../components/db/DataGrid';
@@ -17,11 +18,7 @@ import { DeleteConfirmModal } from '../components/db/DeleteConfirmModal';
 import { AppPicker } from '../components/db/AppPicker';
 import { Download, Plus, Trash2, RefreshCw, Database } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
-
-function unwrap(res) {
-  const d = res.data;
-  return (d && typeof d === 'object' && 'data' in d) ? d.data : d;
-}
+import { useToast, Toast } from '../hooks/useToast';
 
 export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -71,13 +68,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   // Tiroir « Tables » (mobile <lg) : la sidebar 224px déborderait à 375px.
   const [tablesOpen, setTablesOpen] = useState(false);
 
-  // Toast
-  const [toast, setToast] = useState(null);
-
-  function showToast(msg, type = 'ok') {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  }
+  const { toast, showToast } = useToast(3000);
 
   // ── Load apps (résolution des noms + picker standalone) ──
   useEffect(() => {
@@ -511,14 +502,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
           </>
         )}
 
-        {/* Toast */}
-        {toast && (
-          <div className={`fixed bottom-4 right-4 z-50 px-4 py-2 rounded-lg text-sm shadow-lg ${
-            toast.type === 'ok' ? 'bg-green-500/90 text-white' : 'bg-red-500/90 text-white'
-          }`}>
-            {toast.msg}
-          </div>
-        )}
+        <Toast toast={toast} />
 
         {/* Modals */}
         {showAddRow && schema && (

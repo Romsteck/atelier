@@ -1,11 +1,8 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import useWebSocket from '../hooks/useWebSocket';
+import { getTasks, getActiveTasks, getTask } from '../api/client';
 
 const TaskContext = createContext(null);
-
-const api = {
-  get: (url) => fetch(`/api${url}`).then(r => r.json()),
-};
 
 function upsertTask(list, task) {
   const idx = list.findIndex(t => t.id === task.id);
@@ -26,11 +23,11 @@ export function TaskProvider({ children }) {
 
   // Load initial tasks
   useEffect(() => {
-    api.get('/tasks?limit=30').then(data => {
-      if (data?.tasks) setTasks(data.tasks);
+    getTasks({ limit: 30 }).then(res => {
+      if (res.data?.tasks) setTasks(res.data.tasks);
     }).catch(() => {});
-    api.get('/tasks/active').then(data => {
-      if (Array.isArray(data)) setActiveTasks(data);
+    getActiveTasks().then(res => {
+      if (Array.isArray(res.data)) setActiveTasks(res.data);
     }).catch(() => {});
   }, []);
 
@@ -59,8 +56,8 @@ export function TaskProvider({ children }) {
     setSelectedTaskId(taskId);
     if (taskId) {
       try {
-        const data = await api.get(`/tasks/${taskId}`);
-        if (data?.steps) setSelectedTaskSteps(data.steps);
+        const res = await getTask(taskId);
+        if (res.data?.steps) setSelectedTaskSteps(res.data.steps);
       } catch { /* ignore */ }
     } else {
       setSelectedTaskSteps([]);

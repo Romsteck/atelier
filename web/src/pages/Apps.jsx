@@ -3,6 +3,7 @@ import {
   LayoutGrid, Database, ExternalLink, Plus, Play, Square, Loader2, X,
 } from 'lucide-react';
 import { createApp } from '../api/client';
+import { apiErr } from '../utils/apiErr';
 import PageHeader from '../components/PageHeader';
 import ScrollableTable from '../components/ScrollableTable';
 import { useApps } from '../context/AppsContext';
@@ -26,7 +27,7 @@ function CreateAppModal({ onClose, onCreated }) {
     if (!SLUG_RE.test(slug)) { setError('Slug invalide'); return; }
     setSubmitting(true); setError(null);
     try { await createApp({ name: name.trim(), slug, stack, visibility }); onCreated(); }
-    catch (err) { setError(err.response?.data?.error || err.message); }
+    catch (err) { setError(apiErr(err)); }
     finally { setSubmitting(false); }
   }
 

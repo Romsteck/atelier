@@ -3,7 +3,7 @@ import { X, Loader2, GitCommit, ExternalLink } from 'lucide-react';
 import Button from '../Button';
 import DiffView from './DiffView';
 import { getGitCommitDetail } from '../../api/client';
-import { timeAgo } from '../../utils/gitFormat';
+import { timeAgo } from '../../utils/formatters';
 
 // Badge de statut de fichier (A/M/D/R/C/T/U) — sémantique git, distincte du
 // StatusBadge de service, d'où une petite version locale.

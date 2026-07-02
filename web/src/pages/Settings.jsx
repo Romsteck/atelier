@@ -10,8 +10,8 @@ import {
   getHomerouteSettings, setHomerouteSettings, testHomeroute, registerHomeroute,
   getHomerouteAppRoutes, assignHomerouteRoute, removeHomerouteRoute, toggleHomerouteRoute,
 } from '../api/client';
-
-const apiErr = (e) => e?.response?.data?.error || e?.message || 'Erreur réseau';
+import { apiErr } from '../utils/apiErr';
+import { useToast } from '../hooks/useToast';
 
 const FIELD = 'w-full rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none';
 const LBL = 'mb-1 block text-xs font-medium text-gray-400';
@@ -34,15 +34,12 @@ export default function Settings() {
   const [testing, setTesting] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [testResult, setTestResult] = useState(null);
-  const [toast, setToast] = useState(null);
+  // Banner inline (rendu custom sous le header) piloté par le hook partagé.
+  const { toast, showToast, dismiss } = useToast();
+  const flash = (type, text) => showToast(text, type);
   const [busy, setBusy] = useState({});            // per-slug action in flight
   const [subdomains, setSubdomains] = useState({}); // per-slug editable subdomain
   const dirty = useRef(false);                       // user touched the subdomain inputs
-
-  const flash = (type, text) => {
-    setToast({ type, text });
-    setTimeout(() => setToast(null), 4000);
-  };
 
   const reload = useCallback(async () => {
     try {
@@ -183,8 +180,8 @@ export default function Settings() {
           toast.type === 'error'
             ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200'
             : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200'}`}>
-          {toast.text}
-          <button onClick={() => setToast(null)} className="ml-3 text-xs text-gray-400 hover:text-gray-200">fermer</button>
+          {toast.msg}
+          <button onClick={dismiss} className="ml-3 text-xs text-gray-400 hover:text-gray-200">fermer</button>
         </div>
       )}
 
@@ -196,7 +193,7 @@ export default function Settings() {
         <p className="mb-4 text-xs text-gray-500">
           Cet environnement Atelier se déclare auprès du reverse proxy Homeroute et publie
           les apps en sous-domaine (DNS + TLS <code>*.{baseDomain || 'mynetwk.biz'}</code> auto).
-          Le <strong>token</strong> s'obtient dans Homeroute → <em>Environnements</em>.
+          Le <strong>token</strong> s&apos;obtient dans Homeroute → <em>Environnements</em>.
         </p>
 
         <div className="space-y-4">
@@ -236,7 +233,7 @@ export default function Settings() {
         <div className="mt-4 flex items-center gap-3">
           <Button onClick={saveSettings} loading={saving}>Enregistrer</Button>
           <span className="text-xs text-gray-500">
-            La liaison est active dès qu'un token est renseigné.
+            La liaison est active dès qu&apos;un token est renseigné.
           </span>
         </div>
       </section>
@@ -247,13 +244,13 @@ export default function Settings() {
           <Plug className="h-4 w-4 text-blue-400" /> Connexion
         </h2>
         <p className="mb-4 text-xs text-gray-500">
-          S'enregistrer rattache cet environnement à Homeroute (visible dans sa page
+          S&apos;enregistrer rattache cet environnement à Homeroute (visible dans sa page
           <em> Environnements</em>). Un heartbeat le maintient « en ligne ».
         </p>
 
         <div className="flex flex-wrap items-center gap-2">
           <Button onClick={doRegister} loading={registering} disabled={!configured}>
-            <Plug className="h-4 w-4" /> Connecter / S'enregistrer
+            <Plug className="h-4 w-4" /> Connecter / S&apos;enregistrer
           </Button>
           <Button onClick={doTest} variant="secondary" loading={testing}>
             <RotateCw className="h-4 w-4" /> Tester la connexion
@@ -310,7 +307,7 @@ export default function Settings() {
         )}
         {configured && !reachable && (
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-700 dark:text-red-200">
-            <XCircle className="h-4 w-4 shrink-0" /> Homeroute injoignable{routes?.error ? ` — ${routes.error}` : ''}. Vérifiez l'URL et que hr-api tourne.
+            <XCircle className="h-4 w-4 shrink-0" /> Homeroute injoignable{routes?.error ? ` — ${routes.error}` : ''}. Vérifiez l&apos;URL et que hr-api tourne.
           </div>
         )}
 

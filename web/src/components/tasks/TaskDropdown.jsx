@@ -2,6 +2,7 @@ import { useTaskContext } from '../../context/TaskContext';
 import { CheckCircle, XCircle, Loader, Clock, ChevronRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useEffect, useRef } from 'react';
+import { timeAgo } from '../../utils/formatters';
 
 const STATUS_CONFIG = {
   pending: { icon: Clock, color: 'text-gray-400', bg: 'bg-gray-400/10' },
@@ -27,19 +28,6 @@ const TYPE_LABELS = {
   proxy_reload: 'Proxy reload',
   host_power: 'Hôte',
 };
-
-function timeAgo(dateStr) {
-  if (!dateStr) return '';
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return 'à l\'instant';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `il y a ${m}min`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `il y a ${h}h`;
-  const d = Math.floor(h / 24);
-  return `il y a ${d}j`;
-}
 
 function StatusIcon({ status }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.pending;

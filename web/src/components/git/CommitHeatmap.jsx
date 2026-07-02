@@ -86,7 +86,7 @@ export default function CommitHeatmap({ data = [], weekStart = 0, loading = fals
       </div>
 
       {error ? (
-        <p className="text-xs text-red-400">Impossible de charger l'activité</p>
+        <p className="text-xs text-red-400">Impossible de charger l&apos;activité</p>
       ) : loading ? (
         <div className="flex gap-[3px] animate-pulse">
           {Array.from({ length: WEEKS }).map((_, w) => (

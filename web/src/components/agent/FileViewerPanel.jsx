@@ -3,19 +3,13 @@ import { Loader2, X, FileWarning, FileCode2 } from 'lucide-react';
 import { getSourceFile } from '../../api/client';
 import { useAgentConversations } from '../../context/AgentConversationsContext';
 import useWebSocket from '../../hooks/useWebSocket';
+import { formatBytes } from '../../utils/formatters';
 
 // Visionneuse de fichier rendue comme un panneau du split central (à côté des
 // conversations), façon éditeur VS Code. Lecture seule, retour à la ligne TOUJOURS
 // actif (pas de scroll horizontal). Le contenu se rafraîchit AUTOMATIQUEMENT quand
 // un changement local est détecté (fin de tour de l'agent via WebSocket + retour de
 // focus/visibilité pour les éditions hors-agent) — pas de bouton de rafraîchissement.
-
-function humanSize(n) {
-  if (n == null) return '';
-  if (n < 1024) return `${n} o`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} Ko`;
-  return `${(n / 1024 / 1024).toFixed(1)} Mo`;
-}
 
 export default function FileViewerPanel({ panelKey }) {
   const { slug, convos, closeConversation } = useAgentConversations();
@@ -75,7 +69,7 @@ export default function FileViewerPanel({ panelKey }) {
         <FileCode2 className="w-3.5 h-3.5 shrink-0 text-gray-500" />
         <span className="font-mono text-gray-200 truncate" title={path}>{name}</span>
         {file && !file.binary && !file.error && (
-          <span className="text-gray-600 shrink-0">{humanSize(file.size)}</span>
+          <span className="text-gray-600 shrink-0">{formatBytes(file.size)}</span>
         )}
         <button onClick={() => closeConversation(panelKey)} title="Fermer"
           className="ml-auto shrink-0 p-1 rounded-sm text-gray-500 hover:text-gray-200 hover:bg-gray-800">
@@ -90,7 +84,7 @@ export default function FileViewerPanel({ panelKey }) {
           <div className="p-4 text-[13px] text-red-400">{file.error}</div>
         ) : file?.binary ? (
           <div className="p-6 text-[13px] text-gray-500 flex items-center gap-2">
-            <FileWarning className="w-4 h-4" /> Fichier binaire — non affiché ({humanSize(file.size)}).
+            <FileWarning className="w-4 h-4" /> Fichier binaire — non affiché ({formatBytes(file.size)}).
           </div>
         ) : (
           <>

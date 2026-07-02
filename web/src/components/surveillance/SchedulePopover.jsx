@@ -97,7 +97,7 @@ export default function SchedulePopover({ schedule, onSave, disabled = false }) 
               </div>
 
               <p className="text-[11px] text-gray-500 leading-relaxed border-t border-gray-700 pt-3">
-                Lance un scan complet (toutes les apps, 3 scans chacune) à l'heure choisie.
+                Lance un scan complet (toutes les apps, 3 scans chacune) à l&apos;heure choisie.
                 Forcé : re-scanne et nettoie les findings obsolètes partout.
               </p>
             </div>

@@ -24,6 +24,8 @@ import { statusDot } from '../lib/appsUi';
 import { pushRecentSlug } from '../lib/recentApps';
 import { readStudioTabCache, writeStudioTabCache } from '../lib/openStudio';
 import { useIsNarrow } from '../hooks/useMediaQuery';
+import { useToast, Toast } from '../hooks/useToast';
+import { apiErr } from '../utils/apiErr';
 
 // Onglet top-niveau : SOURCE DE VÉRITÉ = backend (`agent_open_tabs.studio_tab`).
 // Le deep-link homepage→Studio passe par un PUT + broadcast WS `studio:tab` : un
@@ -144,6 +146,7 @@ function SettingsTab({ app, onUpdate, onDelete }) {
   const [buildCmd, setBuildCmd] = useState(app?.build_command || '');
   const [healthPath, setHealthPath] = useState(app?.health_path || '/api/health');
   const [saving, setSaving] = useState(false);
+  const { toast, showToast } = useToast();
 
   useEffect(() => {
     if (app) { setName(app.name); setVisibility(app.visibility); setRunCmd(app.run_command); setBuildCmd(app.build_command || ''); setHealthPath(app.health_path); }
@@ -151,8 +154,14 @@ function SettingsTab({ app, onUpdate, onDelete }) {
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onUpdate({ name, visibility, run_command: runCmd, build_command: buildCmd || null, health_path: healthPath }); } catch {}
-    setSaving(false);
+    try {
+      await onUpdate({ name, visibility, run_command: runCmd, build_command: buildCmd || null, health_path: healthPath });
+      showToast('Réglages sauvegardés');
+    } catch (e) {
+      showToast(apiErr(e), 'error');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -185,11 +194,12 @@ function SettingsTab({ app, onUpdate, onDelete }) {
       <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
         {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
       </button>
-      <p className="text-xs text-gray-500">Les variables d'environnement sont désormais dans l'onglet <span className="text-gray-300">Variables</span>.</p>
+      <p className="text-xs text-gray-500">Les variables d&apos;environnement sont désormais dans l&apos;onglet <span className="text-gray-300">Variables</span>.</p>
       <div className="pt-6 border-t border-gray-700">
-        <button onClick={onDelete} className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-sm flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Supprimer l'application</button>
+        <button onClick={onDelete} className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-sm flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Supprimer l&apos;application</button>
       </div>
       </div>
+      <Toast toast={toast} />
     </div>
   );
 }
@@ -214,6 +224,7 @@ export default function StudioShell({ slug }) {
   const [notFound, setNotFound] = useState(false);
   const [busy, setBusy] = useState(false);
   const [buildState, setBuildState] = useState(null);
+  const { toast, showToast } = useToast();
 
   // ── Disposition (mode 'tabs' classique vs 'split' agent+onglets) ──
   const contentRef = useRef(null);
@@ -336,9 +347,10 @@ export default function StudioShell({ slug }) {
   // ── Handlers ──
   const handleControl = useCallback(async (action) => {
     setBusy(true);
-    try { await controlApp(slug, action); } catch {}
+    try { await controlApp(slug, action); }
+    catch (e) { showToast(apiErr(e), 'error'); }
     finally { setBusy(false); }
-  }, [slug]);
+  }, [slug, showToast]);
 
   function handleSelectTab(tab) { setActiveTab(tab); }
   function handleSetLayoutMode(mode) { if (mode === 'split' && isNarrow) return; setLayoutMode(mode); }
@@ -555,6 +567,7 @@ export default function StudioShell({ slug }) {
           </div>
         </div>
       </div>
+      <Toast toast={toast} />
     </div>
   );
 }

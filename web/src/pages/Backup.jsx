@@ -12,8 +12,7 @@ import {
   revealResticPassword, runBackup, cancelBackup, getBackupRuns,
 } from '../api/client';
 import { timeAgo, formatDate, formatDuration, durationSecs, formatBytes, freshnessClasses } from '../utils/formatters';
-
-const apiErr = (e) => e?.response?.data?.error || e?.message || 'Erreur réseau';
+import { apiErr } from '../utils/apiErr';
 
 const STEPS = [
   { tag: 'git', label: 'Dépôts Git', icon: GitBranch },
@@ -338,7 +337,7 @@ function ConfigWizard({ target, onClose, onSaved, setToast }) {
                 <label className={LBL}>Mot de passe {target?.has_password && <span className="text-emerald-400">• défini</span>}</label>
                 <input className={FIELD} type="password" value={form.password} onChange={set('password')} placeholder={target?.has_password ? '•••••• (inchangé)' : ''} />
               </div>
-              <p className="text-xs text-gray-500">On se connecte au serveur pour lister ses partages — rien n'est enregistré à cette étape.</p>
+              <p className="text-xs text-gray-500">On se connecte au serveur pour lister ses partages — rien n&apos;est enregistré à cette étape.</p>
             </div>
           )}
 
@@ -352,10 +351,10 @@ function ConfigWizard({ target, onClose, onSaved, setToast }) {
                   </select>
                 ) : form.share ? (
                   <div className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 text-sm text-gray-200">
-                    {form.share} <span className="text-xs text-gray-500">— revenez à l'étape 1 pour relister</span>
+                    {form.share} <span className="text-xs text-gray-500">— revenez à l&apos;étape 1 pour relister</span>
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-500">Aucun partage — revenez à l'étape 1.</div>
+                  <div className="rounded-lg border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-500">Aucun partage — revenez à l&apos;étape 1.</div>
                 )}
               </div>
               <div><label className={LBL}>Dossier du dépôt</label><input className={FIELD} value={form.repo_subpath} onChange={set('repo_subpath')} /></div>

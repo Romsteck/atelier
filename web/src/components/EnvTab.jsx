@@ -152,7 +152,7 @@ export default function EnvTab({ slug, onRestart }) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-gray-400" />
-            <h3 className="text-sm font-medium text-gray-50">Variables d'environnement</h3>
+            <h3 className="text-sm font-medium text-gray-50">Variables d&apos;environnement</h3>
           </div>
           <button onClick={load} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-50">
             <RefreshCw className="w-3.5 h-3.5" /> Rafraîchir
@@ -161,7 +161,7 @@ export default function EnvTab({ slug, onRestart }) {
 
         {restartNeeded && (
           <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-sm bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-200 text-xs">
-            <span>Les changements s'appliquent au prochain démarrage du process.</span>
+            <span>Les changements s&apos;appliquent au prochain démarrage du process.</span>
             {onRestart && (
               <button onClick={doRestart} disabled={restarting}
                 className="px-2.5 py-1 rounded-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-100 flex items-center gap-1.5 disabled:opacity-50">

@@ -15,6 +15,8 @@ import SweepLiveView from '../components/surveillance/SweepLiveView';
 import SchedulePopover from '../components/surveillance/SchedulePopover';
 import { mergeLines } from '../components/surveillance/scanFormat';
 import useWebSocket from '../hooks/useWebSocket';
+import { useToast, Toast } from '../hooks/useToast';
+import { apiErr } from '../utils/apiErr';
 
 const SEVERITIES = [
   { key: 'critical', label: 'Critical', icon: AlertOctagon,  color: 'text-red-700 dark:text-red-300', bg: 'bg-red-500/20 border-red-500/30' },
@@ -150,6 +152,7 @@ export default function Surveillance() {
   // Findings being resolved right now (open agent conversation) across all apps.
   const [resolving, setResolving] = useState([]);
   const currentRunIdsRef = useRef(new Set());
+  const { toast, showToast } = useToast();
 
   const sweepActive = !!sweep && (sweep.status === 'running' || sweep.status === 'cancelling');
 
@@ -237,12 +240,12 @@ export default function Surveillance() {
       const r = await startSurveillanceSweep();
       setSweep(r.data?.sweep || null);
     } catch (e) {
-      if (e.response?.status !== 409) alert('Démarrage du sweep a échoué : ' + (e.response?.data?.error || e.message));
+      if (e.response?.status !== 409) showToast('Démarrage du sweep a échoué : ' + apiErr(e), 'error');
     }
   };
   const handleCancelSweep = async () => {
     try { await cancelSurveillanceSweep(); }
-    catch (e) { alert('Annulation a échoué : ' + (e.response?.data?.error || e.message)); }
+    catch (e) { showToast('Annulation a échoué : ' + apiErr(e), 'error'); }
   };
   const saveSchedule = async (patch) => {
     const next = { enabled: schedule?.enabled ?? false, hour: schedule?.hour ?? 3, cadence: schedule?.cadence ?? 'daily', ...patch };
@@ -251,7 +254,7 @@ export default function Surveillance() {
       const r = await putSweepSchedule({ enabled: next.enabled, hour: next.hour, cadence: next.cadence });
       setSchedule(r.data?.schedule || next);
     } catch (e) {
-      alert('Sauvegarde planification a échoué : ' + (e.response?.data?.error || e.message));
+      showToast('Sauvegarde planification a échoué : ' + apiErr(e), 'error');
     }
   };
 
@@ -280,6 +283,7 @@ export default function Surveillance() {
 
   return (
     <div className="h-full flex flex-col">
+      <Toast toast={toast} />
       <PageHeader title="Surveillance IA" icon={ShieldAlert}>
         <SchedulePopover schedule={schedule} onSave={saveSchedule} disabled={anyRunning} />
         {!sweepActive && (

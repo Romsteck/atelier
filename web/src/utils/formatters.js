@@ -1,7 +1,7 @@
 // Helpers de formatage partagés (temps, durée, octets, fraîcheur).
 
-export const timeAgo = (dateStr) => {
-  if (!dateStr) return 'Jamais';
+export const timeAgo = (dateStr, fallback = 'Jamais') => {
+  if (!dateStr) return fallback;
   const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (diff < 60) return 'à l’instant';
   if (diff < 3600) return `il y a ${Math.floor(diff / 60)} min`;

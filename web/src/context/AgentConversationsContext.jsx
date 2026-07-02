@@ -20,6 +20,7 @@ import {
   getAgentOpenTabs,
   setAgentOpenTabs,
 } from '../api/client';
+import { apiErr } from '../utils/apiErr';
 
 // Provider multi-conversations du mode agent. UNE source d'état + UN seul WebSocket
 // (routé par session_id, repli run_id) pour tous les panneaux. Une conversation =
@@ -606,7 +607,9 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   const refreshAll = useCallback(() => {
     listConversations(slug)
       .then((r) => setAllConvos(r.data?.conversations || []))
-      .catch(() => {});
+      // Liste best-effort (les en-têtes retombent sur les ids) — mais on trace l'échec,
+      // sinon une API en erreur est indistinguable d'un historique vide.
+      .catch((e) => console.warn('[agent] listConversations a échoué :', apiErr(e)));
   }, [slug]);
 
   // Charge la liste des sessions au montage du workspace → les noms (résumés générés
@@ -761,7 +764,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         }
         if (runId && runId !== c.runId) dispatch({ type: 'SET_RUN', key, runId });
       } catch (e) {
-        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+        dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
     },
     [slug],
@@ -820,7 +823,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
           if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
         }
       } catch (e) {
-        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+        dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
     },
     [slug],
@@ -851,7 +854,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       try {
         await planDecisionAgentRun(slug, c.runId, { request_id, approved, feedback });
       } catch (e) {
-        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+        dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
     },
     [slug],
@@ -867,7 +870,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       try {
         await setAgentMode(slug, c.runId, mode);
       } catch (e) {
-        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+        dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
     },
     [slug],
@@ -880,7 +883,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       try {
         await setAgentModel(slug, c.runId, model);
       } catch (e) {
-        dispatch({ type: 'SET_ERROR', key, error: e.response?.data?.error || e.message });
+        dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
     },
     [slug],

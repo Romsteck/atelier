@@ -13,12 +13,16 @@ export function LookupCombobox({ appSlug, relation, value, onChange, required })
   const [search, setSearch] = useState('');
   const ref = useRef(null);
 
+  // Champs extraits AVANT l'effet : deps sur les valeurs, pas sur l'objet `relation`
+  // (identité changeante à chaque render parent → refetch inutile).
+  const toTable = relation?.to_table;
+  const displayColumn = relation?.display_column;
   useEffect(() => {
-    if (!appSlug || !relation) return;
+    if (!appSlug || !toTable) return;
     setLoading(true);
-    queryAppDbRows(appSlug, relation.to_table, {
+    queryAppDbRows(appSlug, toTable, {
       limit: 500,
-      order_by: relation.display_column,
+      order_by: displayColumn,
     })
       .then((res) => {
         const d = res.data;
@@ -27,7 +31,7 @@ export function LookupCombobox({ appSlug, relation, value, onChange, required })
       })
       .catch(() => setOptions([]))
       .finally(() => setLoading(false));
-  }, [appSlug, relation?.to_table, relation?.to_column, relation?.display_column]);
+  }, [appSlug, toTable, displayColumn]);
 
   useEffect(() => {
     const handler = (e) => {

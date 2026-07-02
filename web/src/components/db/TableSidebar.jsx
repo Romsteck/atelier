@@ -23,7 +23,7 @@ export function TableSidebar({ appsWithTables, selectedAppSlug, selectedTable, o
           className="flex items-center gap-1.5 px-3 pt-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 hover:text-gray-300 border-none bg-transparent cursor-pointer text-left"
           title="Changer d'application"
         >
-          <ChevronLeft className="w-3 h-3" /> Changer d'app
+          <ChevronLeft className="w-3 h-3" /> Changer d&apos;app
         </button>
       ) : (
         <div className="px-3 pt-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">

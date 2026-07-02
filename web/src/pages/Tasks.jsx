@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CheckCircle, XCircle, Loader, Clock, ChevronRight, ListTodo } from 'lucide-react';
+import { timeAgo } from '../utils/formatters';
+import { getTasks } from '../api/client';
 
 const STATUS_CONFIG = {
   pending: { icon: Clock, color: 'text-gray-400', bg: 'bg-gray-400/10', label: 'En attente' },
@@ -27,19 +29,6 @@ const TYPE_LABELS = {
   host_power: 'Action hôte',
 };
 
-function timeAgo(dateStr) {
-  if (!dateStr) return '';
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return 'à l\'instant';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `il y a ${m}min`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `il y a ${h}h`;
-  const d = Math.floor(h / 24);
-  return `il y a ${d}j`;
-}
-
 function duration(start, end) {
   if (!start) return '';
   const s = ((end ? new Date(end) : new Date()) - new Date(start)) / 1000;
@@ -59,11 +48,9 @@ export default function Tasks() {
 
   useEffect(() => {
     setLoading(true);
-    const params = new URLSearchParams({ limit, offset });
-    if (filter) params.set('status', filter);
-    fetch(`/api/tasks?${params}`)
-      .then(r => r.json())
-      .then(data => {
+    getTasks({ limit, offset, ...(filter ? { status: filter } : {}) })
+      .then(res => {
+        const data = res.data;
         if (data?.tasks) setTasks(data.tasks);
         if (data?.total != null) setTotal(data.total);
       })

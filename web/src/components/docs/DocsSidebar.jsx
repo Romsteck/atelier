@@ -112,7 +112,7 @@ export default function DocsSidebar({ overview, selected, onSelect }) {
                       : 'text-gray-200 hover:bg-gray-800/60'}`}
       >
         <Compass className="w-4 h-4" />
-        <span className="font-medium">Vue d'ensemble</span>
+        <span className="font-medium">Vue d&apos;ensemble</span>
       </button>
 
       {/* Écrans */}

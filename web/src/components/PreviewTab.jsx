@@ -137,7 +137,7 @@ export default function PreviewTab({ slug, status, onControl }) {
             <>
               <Loader2 className="w-8 h-8 mx-auto mb-3 animate-spin text-blue-400" />
               <h3 className="text-base font-semibold text-gray-50 mb-1">Démarrage…</h3>
-              <p className="text-sm text-gray-400">L'aperçu se chargera dès que l'app sera prête.</p>
+              <p className="text-sm text-gray-400">L&apos;aperçu se chargera dès que l&apos;app sera prête.</p>
             </>
           ) : (
             <>
@@ -146,14 +146,14 @@ export default function PreviewTab({ slug, status, onControl }) {
               </div>
               <h3 className="text-base font-semibold text-gray-50 mb-1">Application arrêtée</h3>
               <p className="text-sm text-gray-400 mb-4">
-                Démarre l'application pour afficher l'aperçu de{' '}
+                Démarre l&apos;application pour afficher l&apos;aperçu de{' '}
                 <span className="font-mono text-gray-300">/apps/{slug}/</span>.
               </p>
               <button
                 onClick={() => onControl?.(slug, 'start')}
                 className="w-full px-4 py-2 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md flex items-center justify-center gap-2 transition-colors"
               >
-                <Play className="w-4 h-4" /> Démarrer l'app
+                <Play className="w-4 h-4" /> Démarrer l&apos;app
               </button>
             </>
           )}
