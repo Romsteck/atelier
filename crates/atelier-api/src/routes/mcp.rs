@@ -6,7 +6,7 @@
 //! belong to the router half, not Atelier.
 //!
 //! Implements JSON-RPC 2.0 over HTTP POST, with Bearer token authentication.
-//! Tools: app.*, db.*, docs.*, todos.*, flow.*, studio.*, git.*
+//! Tools: app.*, db.*/dv, docs.*, git.*, studio.*, scan_*/findings_*/memory_* (surveillance)
 
 use axum::Json;
 use axum::Router;
@@ -22,6 +22,31 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::state::ApiState;
+
+// ── Guard macros (shared by the tool_* handlers) ────────────────────
+// NB: macro_rules! are textually scoped — they must appear before their first
+// use, even though the items they reference (require_apps_ctx, error_response,
+// INVALID_PARAMS) are defined further down.
+
+/// Contexte apps obligatoire — remplace le `match require_apps_ctx` répété dans chaque tool_*.
+macro_rules! apps_ctx {
+    ($id:expr, $state:expr) => {
+        match require_apps_ctx(&$id, $state) {
+            Ok(c) => c,
+            Err(e) => return e,
+        }
+    };
+}
+
+/// Paramètre string obligatoire — remplace le bloc `let Some(x) = args.get(..)` + "Missing <key>".
+macro_rules! req_str {
+    ($args:expr, $key:literal, $id:expr) => {
+        match $args.get($key).and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return error_response($id, INVALID_PARAMS, concat!("Missing ", $key).into()),
+        }
+    };
+}
 
 // ── JSON-RPC types ──────────────────────────────────────────────────
 
@@ -210,26 +235,20 @@ pub async fn mcp_handler(
 // ── Tool definitions ────────────────────────────────────────────────
 
 fn tool_definitions() -> Value {
-    let mut tools = tool_definitions_core();
-    tools.as_array_mut().unwrap().extend(
-        tool_definitions_extended()
-            .as_array()
-            .unwrap()
-            .iter()
-            .cloned(),
-    );
-    tools
-        .as_array_mut()
-        .unwrap()
-        .extend(tool_definitions_apps().as_array().unwrap().iter().cloned());
-    tools.as_array_mut().unwrap().extend(
-        tool_definitions_surveillance()
-            .as_array()
-            .unwrap()
-            .iter()
-            .cloned(),
-    );
-    tools
+    // Les sous-fonctions sont des littéraux `json!([...])` — toujours des tableaux.
+    // Concaténation sans unwrap : pas de panic possible si une forme change.
+    let mut tools: Vec<Value> = Vec::new();
+    for defs in [
+        tool_definitions_core(),
+        tool_definitions_extended(),
+        tool_definitions_apps(),
+        tool_definitions_surveillance(),
+    ] {
+        if let Value::Array(items) = defs {
+            tools.extend(items);
+        }
+    }
+    Value::Array(tools)
 }
 
 /// Global-scope surveillance tools (explicit `slug`). The project-scope
@@ -658,14 +677,13 @@ async fn handle_tools_call(
 
     // Pre-contextualize: inject project slug into tools that need it
     if let Some(ref slug) = project_slug {
-        let needs_slug = tool_name.starts_with("db.") || tool_name.starts_with("docs.") || tool_name.starts_with("flow.") || matches!(
+        let needs_slug = tool_name.starts_with("db.") || tool_name.starts_with("docs.") || matches!(
             tool_name,
             "app.status" | "app.control" | "app.logs" | "app.exec" | "app.get" |
-            "app.health" | "app.regenerate_context" | "app.delete" | "app.build" |
+            "app.regenerate_context" | "app.delete" | "app.build" |
             "app.update" |
             "git.log" | "git.branches" |
-            "studio.refresh_context" |
-            "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete"
+            "studio.refresh_context"
         ) || is_project_simplified_tool(tool_name);
         if needs_slug {
             if arguments.get("slug").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
@@ -830,9 +848,7 @@ async fn tool_git_repos(id: Value, state: &McpState) -> Value {
 }
 
 async fn tool_git_log(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(repo) = args.get("repo").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing repo".into());
-    };
+    let repo = req_str!(args, "repo", id);
 
     let limit = args
         .get("limit")
@@ -871,9 +887,7 @@ async fn tool_git_log(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_git_branches(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(repo) = args.get("repo").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing repo".into());
-    };
+    let repo = req_str!(args, "repo", id);
     match state.git.get_branches(repo).await {
         Ok(branches) => {
             let data: Vec<Value> = branches
@@ -892,9 +906,7 @@ async fn tool_git_branches(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_git_activity(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(repo) = args.get("repo").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing repo".into());
-    };
+    let repo = req_str!(args, "repo", id);
     let days = args
         .get("days")
         .and_then(|v| v.as_u64())
@@ -914,12 +926,8 @@ async fn tool_git_activity(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_git_show(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(repo) = args.get("repo").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing repo".into());
-    };
-    let Some(sha) = args.get("sha").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing sha".into());
-    };
+    let repo = req_str!(args, "repo", id);
+    let sha = req_str!(args, "sha", id);
 
     match state.git.get_commit_detail(repo, sha).await {
         Ok(c) => {
@@ -971,6 +979,31 @@ fn parse_doc_type(s: &str) -> Option<DocType> {
     DocType::from_str(s)
 }
 
+/// Garde commune des tools docs à triplet (app_id, type, name) : valide
+/// `app_id` PUIS parse le type — même ordre et mêmes messages d'erreur que
+/// les blocs historiques ("Invalid app_id", "Invalid type '<s>'").
+fn docs_checked_type(id: &Value, app_id: &str, doc_type_str: &str) -> Result<DocType, Value> {
+    if !validate_app_id(app_id) {
+        return Err(tool_error(id.clone(), "Invalid app_id"));
+    }
+    match parse_doc_type(doc_type_str) {
+        Some(t) => Ok(t),
+        None => Err(tool_error(id.clone(), &format!("Invalid type '{doc_type_str}'"))),
+    }
+}
+
+/// Filtre `type` optionnel (list_entries / search) : absent → None,
+/// présent mais invalide → erreur "Invalid type '<s>'".
+fn docs_opt_type(id: &Value, args: &Value) -> Result<Option<DocType>, Value> {
+    match args.get("type").and_then(|v| v.as_str()) {
+        None => Ok(None),
+        Some(s) => match parse_doc_type(s) {
+            Some(t) => Ok(Some(t)),
+            None => Err(tool_error(id.clone(), &format!("Invalid type '{s}'"))),
+        },
+    }
+}
+
 fn entry_to_json(entry: &atelier_docs::DocEntry, diagram: Option<&str>) -> Value {
     json!({
         "app_id": entry.app_id,
@@ -983,32 +1016,28 @@ fn entry_to_json(entry: &atelier_docs::DocEntry, diagram: Option<&str>) -> Value
 }
 
 async fn tool_docs_overview(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
+    let app_id = req_str!(args, "app_id", id);
     if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
     match docs_store(state).overview(app_id) {
-        Ok(ov) => tool_success(id, serde_json::to_value(&ov).unwrap_or(json!({}))),
+        Ok(ov) => match serde_json::to_value(&ov) {
+            Ok(v) => tool_success(id, v),
+            Err(e) => tool_error(id, &format!("overview serialize failed: {e}")),
+        },
         Err(atelier_docs::StoreError::AppNotFound(_)) => tool_error(id, &format!("No docs found for '{app_id}'")),
         Err(e) => tool_error(id, &format!("overview failed: {e}")),
     }
 }
 
 async fn tool_docs_list_entries(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
+    let app_id = req_str!(args, "app_id", id);
     if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
-    let doc_type = match args.get("type").and_then(|v| v.as_str()) {
-        None => None,
-        Some(s) => match parse_doc_type(s) {
-            Some(t) => Some(t),
-            None => return tool_error(id, &format!("Invalid type '{s}'")),
-        },
+    let doc_type = match docs_opt_type(&id, args) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     match docs_store(state).list_entries(app_id, doc_type) {
         Ok(entries) => tool_success(id, json!({ "app_id": app_id, "entries": entries })),
@@ -1017,20 +1046,12 @@ async fn tool_docs_list_entries(id: Value, args: &Value, state: &McpState) -> Va
 }
 
 async fn tool_docs_get(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing type".into());
-    };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    if !validate_app_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    let Some(doc_type) = parse_doc_type(doc_type_str) else {
-        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    let app_id = req_str!(args, "app_id", id);
+    let doc_type_str = req_str!(args, "type", id);
+    let name = req_str!(args, "name", id);
+    let doc_type = match docs_checked_type(&id, app_id, doc_type_str) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     let store = docs_store(state);
     match store.read_entry(app_id, doc_type, name) {
@@ -1046,21 +1067,16 @@ async fn tool_docs_get(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_docs_search(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing query".into());
-    };
+    let query = req_str!(args, "query", id);
     let app_id = args.get("app_id").and_then(|v| v.as_str());
     if let Some(a) = app_id {
         if !validate_app_id(a) {
             return tool_error(id, "Invalid app_id");
         }
     }
-    let doc_type = match args.get("type").and_then(|v| v.as_str()) {
-        None => None,
-        Some(s) => match parse_doc_type(s) {
-            Some(t) => Some(t),
-            None => return tool_error(id, &format!("Invalid type '{s}'")),
-        },
+    let doc_type = match docs_opt_type(&id, args) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
 
@@ -1103,9 +1119,7 @@ async fn tool_docs_list_apps(id: Value, state: &McpState) -> Value {
 }
 
 async fn tool_docs_completeness(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
+    let app_id = req_str!(args, "app_id", id);
     if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
@@ -1138,8 +1152,6 @@ async fn tool_docs_completeness(id: Value, args: &Value, state: &McpState) -> Va
         }
     }
     let mut orphan_links: Vec<String> = Vec::new();
-    let all_entries = store.list_entries(app_id, None).unwrap_or_default();
-    let _ = all_entries; // (kept for potential future per-entry orphan checks)
     if let Some(ov) = overview.overview.as_ref() {
         for link in &ov.frontmatter.links {
             if !existing.contains(link) {
@@ -1166,20 +1178,12 @@ async fn tool_docs_completeness(id: Value, args: &Value, state: &McpState) -> Va
 }
 
 async fn tool_docs_diagram_get(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing type".into());
-    };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    if !validate_app_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    let Some(doc_type) = parse_doc_type(doc_type_str) else {
-        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    let app_id = req_str!(args, "app_id", id);
+    let doc_type_str = req_str!(args, "type", id);
+    let name = req_str!(args, "name", id);
+    let doc_type = match docs_checked_type(&id, app_id, doc_type_str) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     match docs_store(state).read_diagram(app_id, doc_type, name) {
         Ok(opt) => tool_success(
@@ -1196,23 +1200,13 @@ async fn tool_docs_diagram_get(id: Value, args: &Value, state: &McpState) -> Val
 }
 
 async fn tool_docs_update(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing type".into());
-    };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    let Some(body) = args.get("body").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing body".into());
-    };
-    if !validate_app_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    let Some(doc_type) = parse_doc_type(doc_type_str) else {
-        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    let app_id = req_str!(args, "app_id", id);
+    let doc_type_str = req_str!(args, "type", id);
+    let name = req_str!(args, "name", id);
+    let body = req_str!(args, "body", id);
+    let doc_type = match docs_checked_type(&id, app_id, doc_type_str) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     if doc_type != DocType::Overview && !validate_entry_name(name) {
         return tool_error(id, "Invalid name");
@@ -1274,20 +1268,12 @@ async fn tool_docs_update(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_docs_delete(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing type".into());
-    };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    if !validate_app_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    let Some(doc_type) = parse_doc_type(doc_type_str) else {
-        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    let app_id = req_str!(args, "app_id", id);
+    let doc_type_str = req_str!(args, "type", id);
+    let name = req_str!(args, "name", id);
+    let doc_type = match docs_checked_type(&id, app_id, doc_type_str) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     if doc_type == DocType::Overview {
         return tool_error(id, "Cannot delete the overview");
@@ -1317,23 +1303,13 @@ async fn tool_docs_delete(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_docs_diagram_set(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing type".into());
-    };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    let Some(mermaid) = args.get("mermaid").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing mermaid".into());
-    };
-    if !validate_app_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    let Some(doc_type) = parse_doc_type(doc_type_str) else {
-        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    let app_id = req_str!(args, "app_id", id);
+    let doc_type_str = req_str!(args, "type", id);
+    let name = req_str!(args, "name", id);
+    let mermaid = req_str!(args, "mermaid", id);
+    let doc_type = match docs_checked_type(&id, app_id, doc_type_str) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     let store = docs_store(state);
     if let Err(e) = store.write_diagram(app_id, doc_type, name, mermaid) {
@@ -1723,39 +1699,22 @@ fn require_apps_ctx<'a>(
 }
 
 async fn tool_app_list(id: Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
+    let ctx = apps_ctx!(id, state);
     let resp = ctx.list().await;
     ipc_resp_to_mcp(id, resp)
 }
 
 async fn tool_app_get(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.get(slug).await)
 }
 
 async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    let Some(stack) = args.get("stack").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing stack".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let name = req_str!(args, "name", id);
+    let stack = req_str!(args, "stack", id);
     let visibility = args
         .get("visibility")
         .and_then(|v| v.as_str())
@@ -1794,13 +1753,8 @@ async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_app_update(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let opt_str = |key: &str| args.get(key).and_then(|v| v.as_str()).map(String::from);
     let env_vars = args.get("env_vars").and_then(|v| v.as_object()).map(|m| {
         m.iter()
@@ -1827,53 +1781,29 @@ async fn tool_app_update(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_app_build(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
     ipc_resp_to_mcp(id, ctx.build(slug.to_string(), timeout_secs).await)
 }
 
 async fn tool_app_control(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(action) = args.get("action").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing action".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let action = req_str!(args, "action", id);
     ipc_resp_to_mcp(id, ctx.control(slug.to_string(), action.to_string()).await)
 }
 
 async fn tool_app_status(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.status(slug).await)
 }
 
 async fn tool_app_exec(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing command".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let command = req_str!(args, "command", id);
     let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
     ipc_resp_to_mcp(
         id,
@@ -1883,13 +1813,8 @@ async fn tool_app_exec(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_app_logs(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -1899,13 +1824,8 @@ async fn tool_app_logs(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_app_delete(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let keep_data = args
         .get("keep_data")
         .and_then(|v| v.as_bool())
@@ -1914,40 +1834,23 @@ async fn tool_app_delete(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_app_regenerate_context(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.regenerate_context(slug.to_string()).await)
 }
 
 // ── DB tool handlers ────────────────────────────────────────────────
 
 async fn tool_db_tables(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.db_list_tables(slug.to_string()).await)
 }
 
 async fn tool_db_describe(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     ipc_resp_to_mcp(
         id,
         ctx.db_describe_table(slug.to_string(), table.to_string())
@@ -1956,16 +1859,9 @@ async fn tool_db_describe(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing sql".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let sql = req_str!(args, "sql", id);
     // The postgres-dataverse backend has no raw-SQL *write* path, but a read
     // SELECT is legitimate and was the single biggest gap for the app agent:
     // it was advertised as "Run a SELECT query" yet hard-rejected. Route it to
@@ -1983,16 +1879,9 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
 /// scanner can do cross-table correlation + `_dv_audit` freeze/gap detection
 /// that the gateway `dv_*` tools can't. Read-only is enforced inside `pm_query`.
 async fn tool_pm_query(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing sql".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let sql = req_str!(args, "sql", id);
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
     ipc_resp_to_mcp(
         id,
@@ -2017,16 +1906,9 @@ fn dv_values_arg(args: &Value) -> Result<std::collections::BTreeMap<String, Valu
 }
 
 async fn tool_dv_list(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     // `query` mirrors the gateway ListQuery: { filter?, select?, orderby?, top?,
     // skip?, include_deleted?, count? }. Absent → defaults (all columns, top 50).
     let query = args.get("query").cloned().unwrap_or_else(|| json!({}));
@@ -2044,16 +1926,9 @@ async fn tool_dv_list(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_dv_get(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     let Some(id_val) = args.get("id").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing id".into());
     };
@@ -2076,16 +1951,9 @@ async fn tool_dv_get(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_dv_insert(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     let values = match dv_values_arg(args) {
         Ok(v) => v,
         Err(e) => return error_response(id, INVALID_PARAMS, e),
@@ -2104,16 +1972,9 @@ async fn tool_dv_insert(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_dv_update(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     let Some(id_val) = args.get("id").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing id".into());
     };
@@ -2146,16 +2007,9 @@ async fn tool_dv_update(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_dv_soft_delete(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     let Some(id_val) = args.get("id").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing id".into());
     };
@@ -2182,16 +2036,9 @@ async fn tool_dv_soft_delete(id: Value, args: &Value, state: &McpState) -> Value
 }
 
 async fn tool_dv_restore(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     let Some(id_val) = args.get("id").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing id".into());
     };
@@ -2217,24 +2064,14 @@ async fn tool_dv_restore(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 async fn tool_dv_schema(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, crate::mcp::dv_ops::dv_schema(ctx, slug.to_string()).await)
 }
 
 async fn tool_dv_audit_list(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
     let u = |k: &str| args.get(k).and_then(|v| v.as_u64()).map(|x| x as u32);
     ipc_resp_to_mcp(
@@ -2266,16 +2103,9 @@ fn ipc_resp_to_mcp(id: Value, resp: atelier_ipc::types::IpcResponse) -> Value {
 // ── db.execute (mutations: INSERT/UPDATE/DELETE) ──────────────────
 
 async fn tool_db_execute(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing sql".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let sql = req_str!(args, "sql", id);
     let params: Vec<Value> = args
         .get("params")
         .and_then(|v| v.as_array())
@@ -2287,13 +2117,8 @@ async fn tool_db_execute(id: Value, args: &Value, state: &McpState) -> Value {
 // ── db.overview ──────────────────────────────────────────────────────
 
 async fn tool_db_overview(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     // List tables then describe each
     let tables_resp = ctx.db_list_tables(slug.to_string()).await;
     if !tables_resp.ok {
@@ -2314,16 +2139,9 @@ async fn tool_db_overview(id: Value, args: &Value, state: &McpState) -> Value {
 // ── db.count_rows ────────────────────────────────────────────────────
 
 async fn tool_db_count_rows(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     ipc_resp_to_mcp(
         id,
         ctx.db_count_rows(slug.to_string(), table.to_string()).await,
@@ -2333,37 +2151,22 @@ async fn tool_db_count_rows(id: Value, args: &Value, state: &McpState) -> Value 
 // ── db.get_schema / db.sync_schema ───────────────────────────────────
 
 async fn tool_db_get_schema(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.db_get_schema(slug.to_string()).await)
 }
 
 async fn tool_db_sync_schema(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.db_sync_schema(slug.to_string()).await)
 }
 
 // ── db.create_table / db.drop_table ──────────────────────────────────
 
 async fn tool_db_create_table(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let Some(definition) = args.get("definition").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing definition".into());
     };
@@ -2374,16 +2177,9 @@ async fn tool_db_create_table(id: Value, args: &Value, state: &McpState) -> Valu
 }
 
 async fn tool_db_drop_table(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     ipc_resp_to_mcp(
         id,
         ctx.db_drop_table(slug.to_string(), table.to_string()).await,
@@ -2393,16 +2189,9 @@ async fn tool_db_drop_table(id: Value, args: &Value, state: &McpState) -> Value 
 // ── db.add_column / db.remove_column ─────────────────────────────────
 
 async fn tool_db_add_column(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     let Some(column) = args.get("column").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing column".into());
     };
@@ -2414,19 +2203,10 @@ async fn tool_db_add_column(id: Value, args: &Value, state: &McpState) -> Value 
 }
 
 async fn tool_db_remove_column(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
-    let Some(column) = args.get("column").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing column".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
+    let column = req_str!(args, "column", id);
     ipc_resp_to_mcp(
         id,
         ctx.db_remove_column(slug.to_string(), table.to_string(), column.to_string())
@@ -2437,13 +2217,8 @@ async fn tool_db_remove_column(id: Value, args: &Value, state: &McpState) -> Val
 // ── db.create_relation ───────────────────────────────────────────────
 
 async fn tool_db_create_relation(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     let Some(relation) = args.get("relation").cloned() else {
         return error_response(id, INVALID_PARAMS, "Missing relation".into());
     };
@@ -2456,16 +2231,9 @@ async fn tool_db_create_relation(id: Value, args: &Value, state: &McpState) -> V
 // ── db.set_display_column ────────────────────────────────────────────
 
 async fn tool_db_set_display_column(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing table".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let table = req_str!(args, "table", id);
     // `column` absent or null → clear the pin (auto mode); a string pins it.
     let column: Option<String> = match args.get("column") {
         None | Some(Value::Null) => None,
@@ -2490,23 +2258,15 @@ async fn tool_db_set_display_column(id: Value, args: &Value, state: &McpState) -
 // ── studio.refresh_context ───────────────────────────────────────────
 
 async fn tool_studio_refresh_context(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.regenerate_context(slug.to_string()).await)
 }
 
 // ── studio.refresh_all ───────────────────────────────────────────────
 
 async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
+    let ctx = apps_ctx!(id, state);
     let apps = ctx.supervisor.registry.list().await;
     let mut refreshed = 0u32;
     for app in &apps {
@@ -2540,9 +2300,7 @@ async fn tool_findings_upsert(id: Value, args: &Value, state: &McpState) -> Valu
     let Some(store) = state.surveillance.findings() else {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let slug = req_str!(args, "slug", id);
     let (Some(severity), Some(title), Some(summary), Some(plan), Some(fingerprint)) = (
         args.get("severity").and_then(|v| v.as_str()),
         args.get("title").and_then(|v| v.as_str()),
@@ -2676,12 +2434,8 @@ async fn tool_findings_delete(id: Value, args: &Value, state: &McpState) -> Valu
     let Some(store) = state.surveillance.findings() else {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(kind) = args.get("kind").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing kind".into());
-    };
+    let slug = req_str!(args, "slug", id);
+    let kind = req_str!(args, "kind", id);
     if !atelier_watcher::is_valid_kind(kind) {
         return tool_error(id, "kind must be security|code_review|business");
     }
@@ -2714,12 +2468,8 @@ async fn tool_surveillance_run(id: Value, args: &Value, state: &McpState) -> Val
     if state.surveillance.findings().is_none() {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     }
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let Some(kind) = args.get("kind").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing kind".into());
-    };
+    let slug = req_str!(args, "slug", id);
+    let kind = req_str!(args, "kind", id);
     if !atelier_watcher::is_valid_kind(kind) {
         return tool_error(id, "kind must be security|code_review|business");
     }
@@ -2741,9 +2491,7 @@ async fn tool_scan_get(id: Value, args: &Value, state: &McpState) -> Value {
     if state.surveillance.findings().is_none() {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     }
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let slug = req_str!(args, "slug", id);
     let scan = state.surveillance.scan_get(slug).await;
     let blank = scan.as_ref().map(|s| s.is_blank()).unwrap_or(true);
     tool_success(id, json!({ "scan": scan, "blank": blank }))
@@ -2754,9 +2502,7 @@ async fn tool_scan_set(id: Value, args: &Value, state: &McpState) -> Value {
     if state.surveillance.findings().is_none() {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     }
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let slug = req_str!(args, "slug", id);
     let f = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let (label, prompt, cadence, gate) = (f("label"), f("prompt"), f("cadence"), f("gate"));
     if label.trim().is_empty() || prompt.trim().is_empty() {
@@ -2793,9 +2539,7 @@ async fn tool_memory_get(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(store) = state.surveillance.memory() else {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let slug = req_str!(args, "slug", id);
     let kind = args.get("kind").and_then(|v| v.as_str());
     match store.get(slug, kind, None).await {
         Ok(items) => tool_success(id, json!({ "memory": items, "total": items.len() })),
@@ -2807,9 +2551,7 @@ async fn tool_memory_remember(id: Value, args: &Value, state: &McpState) -> Valu
     let Some(store) = state.surveillance.memory() else {
         return tool_error(id, "surveillance disabled (postgres unreachable)");
     };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
+    let slug = req_str!(args, "slug", id);
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     if !matches!(
         kind,
@@ -2820,9 +2562,7 @@ async fn tool_memory_remember(id: Value, args: &Value, state: &McpState) -> Valu
             "kind must be dismissed_pattern|recurring_issue|user_preference|applied_fix",
         );
     }
-    let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing key".into());
-    };
+    let key = req_str!(args, "key", id);
     let value = match args.get("value") {
         Some(v) => v.clone(),
         None => return error_response(id, INVALID_PARAMS, "Missing value".into()),

@@ -46,11 +46,13 @@ fn slice_name() -> String {
 
 /// Default unit name prefix for spawned apps. Override with
 /// `ATELIER_APP_UNIT_PREFIX` (default `atelier-app` → `atelier-app-{slug}.service`).
-fn unit_prefix() -> String {
+pub fn unit_prefix() -> String {
     std::env::var("ATELIER_APP_UNIT_PREFIX").unwrap_or_else(|_| "atelier-app".to_string())
 }
 
-fn unit_name(slug: &str) -> String {
+/// Nom d'unité systemd d'une app — l'unique dérivation, partagée avec les
+/// consommateurs externes (ex. `journalctl -u` côté MCP `app.logs`).
+pub fn unit_name(slug: &str) -> String {
     format!("{}-{slug}.service", unit_prefix())
 }
 

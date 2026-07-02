@@ -53,21 +53,22 @@ impl OpenTabsStore {
         }
     }
 
-    /// All `(slug, finding_id)` pairs that currently have an OPEN resolution
-    /// conversation tab. A conversation tab carries `fid` when it was launched
-    /// from the surveillance "Résoudre" button (cf. AgentConversationsContext
-    /// canonTabs). Lets the global surveillance page flag apps/findings being
-    /// resolved across machines — without the per-app Studio React context.
-    /// Degrades to empty on a down pool or query error.
-    pub async fn resolving_pairs(&self) -> Vec<(String, i64)> {
+    /// All `(slug, kind)` scan pairs that currently have an OPEN resolution
+    /// conversation tab. A conversation tab carries `sk` (scan kind) when it was
+    /// launched from the surveillance "Résoudre tout" button (cf.
+    /// AgentConversationsContext canonTabs) — the conversation resolves ALL open
+    /// findings of that scan at once. Lets the global surveillance page flag
+    /// apps/scans being resolved across machines — without the per-app Studio
+    /// React context. Degrades to empty on a down pool or query error.
+    pub async fn resolving_pairs(&self) -> Vec<(String, String)> {
         let Some(pool) = self.pool.as_ref() else {
             return Vec::new();
         };
         let rows = match query(
             r#"
-            SELECT slug, (elem->>'fid')::bigint AS fid
+            SELECT slug, elem->>'sk' AS kind
               FROM agent_open_tabs, jsonb_array_elements(tabs) AS elem
-             WHERE elem->>'t' = 'c' AND elem->>'fid' IS NOT NULL
+             WHERE elem->>'t' = 'c' AND elem->>'sk' IS NOT NULL
             "#,
         )
         .fetch_all(pool)
@@ -82,8 +83,8 @@ impl OpenTabsStore {
         rows.iter()
             .filter_map(|r| {
                 let slug: String = r.try_get("slug").ok()?;
-                let fid: i64 = r.try_get("fid").ok()?;
-                Some((slug, fid))
+                let kind: String = r.try_get("kind").ok()?;
+                Some((slug, kind))
             })
             .collect()
     }

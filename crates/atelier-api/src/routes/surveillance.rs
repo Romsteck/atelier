@@ -242,28 +242,20 @@ async fn surveillance_overview(State(state): State<ApiState>) -> impl IntoRespon
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// Findings with an OPEN resolution conversation right now (across all apps),
-/// derived from `agent_open_tabs` (conversation tabs carrying a `fid`). Lets the
-/// global surveillance page flag apps/findings being resolved and gate the sweep.
-/// Enriched with kind/title/severity from the findings table when still present.
+/// Scans with an OPEN group-resolution conversation right now (across all apps),
+/// derived from `agent_open_tabs` (conversation tabs carrying a scan kind `sk`).
+/// Lets the global surveillance page flag apps/scans being resolved and gate the
+/// sweep. Entries with an unknown kind (stale/corrupt tab state) are dropped.
 #[instrument(skip(state))]
 async fn get_resolving(State(state): State<ApiState>) -> impl IntoResponse {
-    let pairs = state.open_tabs.resolving_pairs().await;
-    let findings = state.surveillance.findings();
-    let mut out = Vec::with_capacity(pairs.len());
-    for (slug, fid) in pairs {
-        let enriched = match findings {
-            Some(store) => store.get(fid).await.ok().flatten(),
-            None => None,
-        };
-        match enriched {
-            Some(f) => out.push(json!({
-                "slug": f.slug, "finding_id": f.id, "kind": f.kind,
-                "title": f.title, "severity": f.severity, "status": f.status,
-            })),
-            None => out.push(json!({ "slug": slug, "finding_id": fid })),
-        }
-    }
+    let out: Vec<_> = state
+        .open_tabs
+        .resolving_pairs()
+        .await
+        .into_iter()
+        .filter(|(_, kind)| atelier_watcher::is_valid_kind(kind))
+        .map(|(slug, kind)| json!({ "slug": slug, "kind": kind }))
+        .collect();
     (StatusCode::OK, Json(json!({ "resolving": out }))).into_response()
 }
 

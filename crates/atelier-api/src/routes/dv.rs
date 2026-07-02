@@ -29,7 +29,7 @@ use atelier_dataverse::{
     query::{ListQuery, QueryParam, build_count_sql, build_list_sql},
 };
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -50,20 +50,27 @@ pub fn router() -> Router<ApiState> {
 
 // ── Identity / auth ────────────────────────────────────────────────────
 
+// Le manager est absent quand Postgres était injoignable au boot : 503 explicite.
+// Chaque handler DOIT passer par ce helper (ou extract_identity, qui l'appelle) —
+// remplace l'ancien `.expect("dv manager checked above")` qui reposait sur une
+// convention non typée et paniquait le task Tokio si elle était oubliée.
+fn require_dv(
+    state: &ApiState,
+) -> Result<&std::sync::Arc<atelier_dataverse::manager::DataverseManager>, Response> {
+    state.dv.as_ref().ok_or_else(|| {
+        error_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dataverse manager not initialised",
+        )
+    })
+}
+
 async fn extract_identity(
     headers: &HeaderMap,
     state: &ApiState,
     slug: &str,
 ) -> Result<Identity, Response> {
-    let dv = match state.dv.as_ref() {
-        Some(m) => m,
-        None => {
-            return Err(error_resp(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "dataverse manager not initialised",
-            ));
-        }
-    };
+    let dv = require_dv(state)?;
 
     if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(s) = auth.to_str() {
@@ -100,17 +107,7 @@ async fn extract_identity(
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn validate_slug(slug: &str) -> Result<(), Response> {
-    let ok = !slug.is_empty()
-        && slug.len() <= 64
-        && slug
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_lowercase())
-            .unwrap_or(false)
-        && slug
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if ok {
+    if atelier_apps::valid_slug(slug) {
         Ok(())
     } else {
         Err(error_resp(StatusCode::BAD_REQUEST, "invalid slug"))
@@ -345,7 +342,10 @@ async fn repair_schema(
             "repair requires user identity, not app token",
         );
     }
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_repair", e),
@@ -353,8 +353,10 @@ async fn repair_schema(
     match engine.sync_schema(params.dry_run).await {
         Ok(report) => {
             tracing::info!(slug = %slug, dry_run = params.dry_run, "dv_repair completed");
-            (StatusCode::OK, Json(serde_json::to_value(report).unwrap_or(Value::Null)))
-                .into_response()
+            match serde_json::to_value(&report) {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => db_error_resp("dv_repair_serialize", e),
+            }
         }
         Err(e) => db_error_resp("dv_repair", e),
     }
@@ -371,13 +373,19 @@ async fn get_schema(
     if let Err(r) = extract_identity(&headers, &state, &slug).await {
         return r;
     }
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
     };
     match engine.get_schema().await {
-        Ok(schema) => Json(serde_json::to_value(schema).unwrap_or(Value::Null)).into_response(),
+        Ok(schema) => match serde_json::to_value(&schema) {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => db_error_resp("dv_schema_serialize", e),
+        },
         Err(e) => db_error_resp("dv_schema", e),
     }
 }
@@ -424,7 +432,10 @@ async fn list_rows(
         Err(r) => return r,
     };
 
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
@@ -572,7 +583,10 @@ async fn get_row(
         return r;
     }
 
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
@@ -629,7 +643,10 @@ async fn insert_row(
         }
     };
 
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
@@ -725,7 +742,10 @@ async fn update_row(
 
     let id_value = parse_id_value(id);
 
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
@@ -826,7 +846,10 @@ async fn soft_delete_row(
 
     let id_value = parse_id_value(id);
 
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
@@ -910,7 +933,10 @@ async fn restore_row(
 
     let id_value = parse_id_value(id);
 
-    let dv = state.dv.as_ref().expect("dv manager checked above");
+    let dv = match require_dv(&state) {
+        Ok(dv) => dv,
+        Err(r) => return r,
+    };
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => return db_error_resp("dv_internal", e),
@@ -970,8 +996,3 @@ async fn restore_row(
     }
 }
 
-// Silence unused import warnings — `Map` is part of the JSON ergonomics
-// we may need later (e.g. for typed envelope building). Same for the
-// soft-delete restore module dependency chain.
-#[allow(dead_code)]
-fn _ergonomics(_: Map<String, Value>) {}

@@ -17,7 +17,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }
 
 atelier-common    = { workspace = true }
 atelier-docs      = { workspace = true }

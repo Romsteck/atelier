@@ -28,6 +28,7 @@ edition = "2024"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+libc = "0.2"
 
 # HTTP framework
 axum = { version = "0.8", features = ["ws", "multipart"] }

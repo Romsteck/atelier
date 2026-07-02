@@ -27,6 +27,15 @@ use crate::{MAX_OPEN_FINDINGS, SurveillanceEvent, TranscriptLine};
 /// Order in which the sweep launches an app's scans (all three run together).
 const SWEEP_KINDS: [&str; 3] = [SECURITY_KIND, CODE_REVIEW_KIND, BIZ_KIND];
 
+/// Écriture best-effort (statut terminal de run, watermark, mémoire) : l'échec ne
+/// doit pas faire échouer le scan, mais il doit se VOIR — sinon un run peut rester
+/// « running » à jamais sans aucune trace de la cause (Postgres indisponible, etc.).
+fn warn_if_err<T, E: std::fmt::Display>(op: &'static str, res: Result<T, E>) {
+    if let Err(e) = res {
+        warn!(op, error = %e, "best-effort write failed");
+    }
+}
+
 /// Minimal per-app metadata the surveillance service needs (prompt stack hint +
 /// git_watcher slug list + display name for the sweep UI).
 #[derive(Debug, Clone)]
@@ -783,12 +792,12 @@ impl SurveillanceService {
             None => match app_scan.get(&slug).await {
                 Ok(Some(s)) if !s.is_blank() => s,
                 Ok(_) => {
-                    let _ = runs.finish_skipped(run_id, "blank (scan non défini)").await;
+                    warn_if_err("finish_skipped", runs.finish_skipped(run_id, "blank (scan non défini)").await);
                     info!(slug = %slug, kind, "run skipped (blank scan)");
                     return RunOutcome::Skipped;
                 }
                 Err(e) => {
-                    let _ = runs.finish_failed(run_id, &format!("scan load failed: {e}")).await;
+                    warn_if_err("finish_failed", runs.finish_failed(run_id, &format!("scan load failed: {e}")).await);
                     warn!(slug = %slug, kind, ?e, "scan load failed");
                     return RunOutcome::Failed;
                 }
@@ -810,7 +819,7 @@ impl SurveillanceService {
         };
         if !force && open_now >= MAX_OPEN_FINDINGS {
             let reason = format!("cap: {open_now} findings open (max {MAX_OPEN_FINDINGS})");
-            let _ = runs.finish_skipped(run_id, &reason).await;
+            warn_if_err("finish_skipped", runs.finish_skipped(run_id, &reason).await);
             info!(slug = %slug, "run skipped (cap)");
             return RunOutcome::Skipped;
         }
@@ -840,14 +849,14 @@ impl SurveillanceService {
                 } else {
                     match (&last_sha, &head) {
                         (Some(last), Some(h)) if last == h => {
-                            let _ = runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await;
+                            warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await);
                             info!(slug = %slug, "run skipped (no_diff)");
                             return RunOutcome::Skipped;
                         }
                         (Some(last), Some(_)) => {
                             let d = gitutil::diff_since(&src, last).await;
                             if d.is_none() {
-                                let _ = runs.finish_skipped(run_id, "no_diff (empty range)").await;
+                                warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_diff (empty range)").await);
                                 info!(slug = %slug, "run skipped (no_diff empty)");
                                 return RunOutcome::Skipped;
                             }
@@ -867,7 +876,7 @@ impl SurveillanceService {
                     match &data_watermark {
                         None => None, // caller couldn't compute it → run unconditionally
                         Some(w) if w.is_empty() => {
-                            let _ = runs.finish_skipped(run_id, "no_new_data").await;
+                            warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_new_data").await);
                             info!(slug = %slug, "run skipped (no_new_data)");
                             return RunOutcome::Skipped;
                         }
@@ -879,7 +888,7 @@ impl SurveillanceService {
                                 .and_then(|v| v.into_iter().next())
                                 .and_then(|m| m.value.as_str().map(String::from));
                             if last.as_deref() == Some(w.as_str()) {
-                                let _ = runs.finish_skipped(run_id, "no_new_data").await;
+                                warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_new_data").await);
                                 info!(slug = %slug, "run skipped (no_new_data)");
                                 return RunOutcome::Skipped;
                             }
@@ -939,12 +948,12 @@ impl SurveillanceService {
             .await;
 
         if exec.cancelled {
-            let _ = runs.finish_cancelled(run_id).await;
+            warn_if_err("finish_cancelled", runs.finish_cancelled(run_id).await);
             info!(slug = %slug, "scan run cancelled by user");
             return RunOutcome::Cancelled;
         }
         if let Some(err) = exec.spawn_error {
-            let _ = runs.finish_failed(run_id, &err).await;
+            warn_if_err("finish_failed", runs.finish_failed(run_id, &err).await);
             self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, %err, "scan spawn failed");
             return RunOutcome::Failed;
@@ -955,7 +964,7 @@ impl SurveillanceService {
             } else {
                 exec.stderr.clone()
             };
-            let _ = runs.finish_failed(run_id, &msg).await;
+            warn_if_err("finish_failed", runs.finish_failed(run_id, &msg).await);
             self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, "scan run failed");
             return RunOutcome::Failed;
@@ -967,8 +976,9 @@ impl SurveillanceService {
             .await
             .unwrap_or(0);
         let empty = delta == 0;
-        let _ = runs
-            .finish_success(
+        warn_if_err(
+            "finish_success",
+            runs.finish_success(
                 run_id,
                 delta as i32,
                 exec.tokens_in,
@@ -976,45 +986,55 @@ impl SurveillanceService {
                 head.as_deref(),
                 empty,
             )
-            .await;
+            .await,
+        );
 
         // Record the freshness watermark for the next run's gate: the reviewed
         // git SHA for code-gated scans, the data watermark for data-gated scans.
         match scan.gate {
             Gate::Code => {
                 if let Some(h) = &head {
-                    let _ = memory
-                        .upsert(
-                            &slug,
-                            "last_run",
-                            &sha_key(kind),
-                            &serde_json::Value::String(h.clone()),
-                            None,
-                        )
-                        .await;
+                    warn_if_err(
+                        "watermark_sha",
+                        memory
+                            .upsert(
+                                &slug,
+                                "last_run",
+                                &sha_key(kind),
+                                &serde_json::Value::String(h.clone()),
+                                None,
+                            )
+                            .await,
+                    );
                 }
             }
             Gate::Data => {
                 if let Some(w) = &data_watermark {
                     if !w.is_empty() {
-                        let _ = memory
-                            .upsert(
-                                &slug,
-                                "last_run",
-                                &watermark_key(kind),
-                                &serde_json::Value::String(w.clone()),
-                                None,
-                            )
-                            .await;
+                        warn_if_err(
+                            "watermark_data",
+                            memory
+                                .upsert(
+                                    &slug,
+                                    "last_run",
+                                    &watermark_key(kind),
+                                    &serde_json::Value::String(w.clone()),
+                                    None,
+                                )
+                                .await,
+                        );
                     }
                 }
             }
             Gate::Manual => {}
         }
         // Reset consecutive-failure counter on success.
-        let _ = memory
-            .delete(&slug, "last_run", &format!("{kind}:consecutive_failures"))
-            .await;
+        warn_if_err(
+            "reset_consecutive_failures",
+            memory
+                .delete(&slug, "last_run", &format!("{kind}:consecutive_failures"))
+                .await,
+        );
 
         info!(slug = %slug, findings = delta, empty, "scan run success");
         if empty {

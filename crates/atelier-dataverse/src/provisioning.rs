@@ -319,29 +319,6 @@ fn escape_pg_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Replace the database segment of a `postgres://…/db` DSN.
-///
-/// Currently unused — provisioning builds the per-app DSN from
-/// (host, port, role, password, db) directly — but kept for future
-/// callers that need to derive a sibling DSN from the admin one.
-#[allow(dead_code)]
-fn swap_database_in_dsn(dsn: &str, new_db: &str) -> String {
-    // Find the path part: scheme://authority/path[?query]
-    let scheme_end = dsn.find("://").map(|i| i + 3).unwrap_or(0);
-    let after_scheme = &dsn[scheme_end..];
-
-    let (path_start_rel, query_part) = match after_scheme.find('?') {
-        Some(q) => (after_scheme[..q].find('/'), &after_scheme[q..]),
-        None => (after_scheme.find('/'), ""),
-    };
-
-    let prefix_len = match path_start_rel {
-        Some(p) => scheme_end + p,
-        None => dsn.len(),
-    };
-    format!("{}/{}{}", &dsn[..prefix_len], url_encode_component(new_db), query_part)
-}
-
 /// Minimal percent-encoding for the parts of a URL we control. Only encodes
 /// characters that have meaning in a URL path/userinfo. We never embed
 /// arbitrary user input here — db names, role names, and passwords are
@@ -366,6 +343,26 @@ fn url_encode_component(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replace the database segment of a `postgres://…/db` DSN. N'a jamais eu
+    /// d'appelant en prod (le DSN per-app est construit champ par champ) — vit
+    /// dans les tests qui documentent le comportement attendu de l'encodage.
+    fn swap_database_in_dsn(dsn: &str, new_db: &str) -> String {
+        // Find the path part: scheme://authority/path[?query]
+        let scheme_end = dsn.find("://").map(|i| i + 3).unwrap_or(0);
+        let after_scheme = &dsn[scheme_end..];
+
+        let (path_start_rel, query_part) = match after_scheme.find('?') {
+            Some(q) => (after_scheme[..q].find('/'), &after_scheme[q..]),
+            None => (after_scheme.find('/'), ""),
+        };
+
+        let prefix_len = match path_start_rel {
+            Some(p) => scheme_end + p,
+            None => dsn.len(),
+        };
+        format!("{}/{}{}", &dsn[..prefix_len], url_encode_component(new_db), query_part)
+    }
 
     #[test]
     fn db_and_role_names_use_app_prefix() {

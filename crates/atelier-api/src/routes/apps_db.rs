@@ -46,17 +46,7 @@ pub fn router() -> Router<ApiState> {
 }
 
 fn validate_slug(slug: &str) -> Result<(), Response> {
-    let ok = !slug.is_empty()
-        && slug.len() <= 64
-        && slug
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_lowercase())
-            .unwrap_or(false)
-        && slug
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if ok {
+    if atelier_apps::valid_slug(slug) {
         Ok(())
     } else {
         Err((
@@ -82,11 +72,6 @@ fn validate_table_name(table: &str) -> Result<(), Response> {
     }
 }
 
-async fn db_backend_for(state: &ApiState, slug: &str) -> Option<String> {
-    let app = state.app_registry.get(slug).await?;
-    Some(format!("{:?}", app.db_backend).to_lowercase().replace('_', "-"))
-}
-
 fn legacy_sqlite_response(slug: &str) -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -104,9 +89,11 @@ fn legacy_sqlite_response(slug: &str) -> Response {
 }
 
 async fn require_pg(state: &ApiState, slug: &str) -> Result<(), Response> {
-    match db_backend_for(state, slug).await.as_deref() {
-        Some("postgres-dataverse") | Some("postgresdataverse") => Ok(()),
-        Some(_) | None => Err(legacy_sqlite_response(slug)),
+    // Match direct sur l'enum — l'ancien détour `format!("{:?}")`+comparaison de String
+    // cassait silencieusement au moindre renommage de variante.
+    match state.app_registry.get(slug).await.map(|app| app.db_backend) {
+        Some(atelier_apps::DbBackend::PostgresDataverse) => Ok(()),
+        _ => Err(legacy_sqlite_response(slug)),
     }
 }
 

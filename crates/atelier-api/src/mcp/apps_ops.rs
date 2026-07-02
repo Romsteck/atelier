@@ -601,14 +601,10 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         let n = limit.unwrap_or(200).min(5000);
-        // The unit prefix moved from the legacy hr-orchestrator name (`hr-app-`) to
-        // `atelier-app-` during the 2026-05 rapatriement (overridable via
-        // ATELIER_APP_UNIT_PREFIX, mirroring the supervisor's default). Hardcoding the
-        // old prefix made journalctl read a dead unit → logs frozen at the
-        // pre-migration buffer (the documented "stuck on May 9" symptom).
-        let unit_prefix =
-            std::env::var("ATELIER_APP_UNIT_PREFIX").unwrap_or_else(|_| "atelier-app".to_string());
-        let unit = format!("{unit_prefix}-{slug}.service");
+        // Nom d'unité dérivé par le supervisor (source unique — un préfixe hardcodé
+        // ici avait causé le symptôme "logs figés au 9 mai" : journalctl lisait une
+        // unité morte après le renommage hr-app → atelier-app).
+        let unit = atelier_apps::supervisor::unit_name(&slug);
         let output = tokio::process::Command::new("journalctl")
             .args([
                 "-u",
@@ -829,23 +825,6 @@ impl AppsContext {
             relations,
             row_count,
         })
-    }
-
-    pub async fn db_query(
-        &self,
-        slug: String,
-        _sql: String,
-        _params: Vec<serde_json::Value>,
-    ) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        IpcResponse::err(
-            "raw SQL writes are not supported on the postgres-dataverse backend — \
-             for reads use the SELECT-only `db_query` tool; for writes use \
-             `dv_insert`/`dv_update`/`dv_delete` (or the REST gateway at \
-             /api/dv/{slug}/{table})",
-        )
     }
 
     pub async fn db_execute(

@@ -73,6 +73,8 @@ impl GitService {
             return Ok(repo_path);
         }
 
+        // Pas via run_git : pas de cwd (le repo n'existe pas encore, son
+        // chemin est l'argument) et le chemin reste passé en OsStr.
         let output = Command::new("git")
             .args(["init", "--bare"])
             .arg(&repo_path)
@@ -86,17 +88,12 @@ impl GitService {
         }
 
         // Enable HTTP push
-        let output = Command::new("git")
-            .args(["config", "http.receivepack", "true"])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git config")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git config http.receivepack failed: {stderr}");
-        }
+        run_git(
+            &repo_path,
+            "git config http.receivepack",
+            &["config", "http.receivepack", "true"],
+        )
+        .await?;
 
         info!(slug, path = %repo_path.display(), "Repository created");
 
@@ -169,24 +166,22 @@ impl GitService {
         // sépare les champs du header. Ces octets ne peuvent pas apparaître
         // dans un sujet/auteur git → parsing déterministe. `--numstat` ajoute,
         // après le header, une ligne `add\tdel\tpath` par fichier modifié.
-        let output = Command::new("git")
-            .args([
+        let stdout = match try_run_git(
+            &repo_path,
+            "git log",
+            &[
                 "log",
                 &format!("-{limit}"),
                 "--numstat",
                 "--no-color",
                 "--format=%x1ecommit%x1f%H%x1f%an%x1f%ae%x1f%aI%x1f%s",
-            ])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git log")?;
-
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+            ],
+        )
+        .await?
+        {
+            Some(out) => out,
+            None => return Ok(Vec::new()),
+        };
         Ok(parse_commit_log(&stdout))
     }
 
@@ -208,24 +203,22 @@ impl GitService {
             return Ok(Vec::new());
         }
 
-        let output = Command::new("git")
-            .args([
+        let stdout = match try_run_git(
+            &repo_path,
+            "git log for activity",
+            &[
                 "log",
                 &format!("--since={days}.days.ago"),
                 "--date=short",
                 "--pretty=%cd",
                 "--no-color",
-            ])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git log for activity")?;
-
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+            ],
+        )
+        .await?
+        {
+            Some(out) => out,
+            None => return Ok(Vec::new()),
+        };
         let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
         for line in stdout.lines() {
             let date = line.trim();
@@ -253,6 +246,8 @@ impl GitService {
         }
 
         // --- Passe 1 : métadonnées (sans patch). 10 champs séparés par US. ---
+        // Pas via run_git : le message « not found » est load-bearing (mappé
+        // en 404 par routes/git.rs) et doit rester au sommet de l'erreur.
         let meta_fmt =
             "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%s%x1f%b";
         let out = Command::new("git")
@@ -280,21 +275,22 @@ impl GitService {
         // --- Passe 2 : fichiers. name-status (status + chemins) et numstat
         // (add/del) sortent un enregistrement par fichier dans le même ordre →
         // on les zippe positionnellement. ---
-        let name_out = Command::new("git")
-            .args(["show", "--no-color", "--format=", "--name-status", sha])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git show (name-status)")?;
-        let num_out = Command::new("git")
-            .args(["show", "--no-color", "--format=", "--numstat", sha])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git show (numstat)")?;
-
-        let name_str = String::from_utf8_lossy(&name_out.stdout);
-        let num_str = String::from_utf8_lossy(&num_out.stdout);
+        // Échec toléré (statut jamais inspecté ici : le sha a été validé par
+        // la passe 1) → sortie vide.
+        let name_str = try_run_git(
+            &repo_path,
+            "git show (name-status)",
+            &["show", "--no-color", "--format=", "--name-status", sha],
+        )
+        .await?
+        .unwrap_or_default();
+        let num_str = try_run_git(
+            &repo_path,
+            "git show (numstat)",
+            &["show", "--no-color", "--format=", "--numstat", sha],
+        )
+        .await?
+        .unwrap_or_default();
         let stats = parse_numstat_lines(&num_str);
         let files: Vec<FileChange> = parse_name_status(&name_str)
             .into_iter()
@@ -313,14 +309,14 @@ impl GitService {
         let additions: u32 = files.iter().map(|f| f.additions).sum();
         let deletions: u32 = files.iter().map(|f| f.deletions).sum();
 
-        // --- Passe 3 : patch unifié (capé). ---
-        let patch_out = Command::new("git")
-            .args(["show", "--no-color", "--format=", "-p", sha])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git show (patch)")?;
-        let patch_full = String::from_utf8_lossy(&patch_out.stdout);
+        // --- Passe 3 : patch unifié (capé). Échec toléré → patch vide. ---
+        let patch_full = try_run_git(
+            &repo_path,
+            "git show (patch)",
+            &["show", "--no-color", "--format=", "-p", sha],
+        )
+        .await?
+        .unwrap_or_default();
         let (patch, truncated) = if patch_full.len() > MAX_PATCH_BYTES {
             let mut end = MAX_PATCH_BYTES;
             while end > 0 && !patch_full.is_char_boundary(end) {
@@ -328,7 +324,7 @@ impl GitService {
             }
             (patch_full[..end].to_string(), true)
         } else {
-            (patch_full.into_owned(), false)
+            (patch_full, false)
         };
 
         Ok(CommitDetail {
@@ -356,18 +352,10 @@ impl GitService {
             bail!("Repository '{slug}' not found");
         }
 
-        let output = Command::new("git")
-            .args(["branch"])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to run git branch")?;
-
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = match try_run_git(&repo_path, "git branch", &["branch"]).await? {
+            Some(out) => out,
+            None => return Ok(Vec::new()),
+        };
         let mut branches = Vec::new();
 
         for line in stdout.lines() {
@@ -507,23 +495,19 @@ impl GitService {
         let ssh_url = format!("git@github.com:{}/{}.git", org, slug);
 
         // Add remote "github" (remove first if exists)
-        let _ = Command::new("git")
-            .args(["remote", "remove", "github"])
-            .current_dir(&repo_path)
-            .output()
-            .await;
+        let _ = try_run_git(
+            &repo_path,
+            "git remote remove github",
+            &["remote", "remove", "github"],
+        )
+        .await;
 
-        let output = Command::new("git")
-            .args(["remote", "add", "github", &ssh_url])
-            .current_dir(&repo_path)
-            .output()
-            .await
-            .context("Failed to add github remote")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to add github remote: {stderr}");
-        }
+        run_git(
+            &repo_path,
+            "git remote add github",
+            &["remote", "add", "github", ssh_url.as_str()],
+        )
+        .await?;
 
         // Write post-receive hook
         let hooks_dir = repo_path.join("hooks");
@@ -567,11 +551,12 @@ nohup bash -c 'GIT_SSH_COMMAND="ssh -i {key} -o StrictHostKeyChecking=no" git pu
         }
 
         // Remove remote
-        let _ = Command::new("git")
-            .args(["remote", "remove", "github"])
-            .current_dir(&repo_path)
-            .output()
-            .await;
+        let _ = try_run_git(
+            &repo_path,
+            "git remote remove github",
+            &["remote", "remove", "github"],
+        )
+        .await;
 
         // Remove hook
         let hook_path = repo_path.join("hooks/post-receive");
@@ -589,6 +574,9 @@ nohup bash -c 'GIT_SSH_COMMAND="ssh -i {key} -o StrictHostKeyChecking=no" git pu
             bail!("Repository '{slug}' not found");
         }
 
+        // Pas via run_git : env GIT_SSH_COMMAND requis, et le couple
+        // status/stderr alimente la persistance last_sync/last_error AVANT de
+        // décider de l'échec.
         let output = Command::new("git")
             .args(["push", "--mirror", "github"])
             .env(
@@ -733,13 +721,11 @@ done
     // --- Private helpers ---
 
     async fn has_commits(&self, repo_path: &Path) -> bool {
-        let output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo_path)
-            .output()
-            .await;
-
-        matches!(output, Ok(o) if o.status.success())
+        try_run_git(repo_path, "git rev-parse HEAD", &["rev-parse", "HEAD"])
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     async fn build_repo_info(&self, slug: &str, repo_path: &Path) -> anyhow::Result<RepoInfo> {
@@ -750,79 +736,67 @@ done
 
         // Get HEAD ref
         let head_ref = if has_commits {
-            let output = Command::new("git")
-                .args(["symbolic-ref", "--short", "HEAD"])
-                .current_dir(repo_path)
-                .output()
-                .await;
-
-            output
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            try_run_git(
+                repo_path,
+                "git symbolic-ref HEAD",
+                &["symbolic-ref", "--short", "HEAD"],
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|out| out.trim().to_string())
         } else {
             None
         };
 
         // Get commit count
         let commit_count = if has_commits {
-            let output = Command::new("git")
-                .args(["rev-list", "--count", "HEAD"])
-                .current_dir(repo_path)
-                .output()
-                .await;
-
-            output
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .trim()
-                        .parse::<u64>()
-                        .ok()
-                })
-                .unwrap_or(0)
+            try_run_git(
+                repo_path,
+                "git rev-list --count",
+                &["rev-list", "--count", "HEAD"],
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|out| out.trim().parse::<u64>().ok())
+            .unwrap_or(0)
         } else {
             0
         };
 
         // Get last commit date
         let last_commit = if has_commits {
-            let output = Command::new("git")
-                .args(["log", "-1", "--format=%aI"])
-                .current_dir(repo_path)
-                .output()
-                .await;
-
-            output.ok().filter(|o| o.status.success()).and_then(|o| {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                DateTime::parse_from_rfc3339(&s)
-                    .map(|d| d.with_timezone(&chrono::Utc))
-                    .ok()
-            })
+            try_run_git(repo_path, "git log -1", &["log", "-1", "--format=%aI"])
+                .await
+                .ok()
+                .flatten()
+                .and_then(|out| {
+                    DateTime::parse_from_rfc3339(out.trim())
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                        .ok()
+                })
         } else {
             None
         };
 
         // Get branches
         let branches = if has_commits {
-            let output = Command::new("git")
-                .args(["branch", "--format=%(refname:short)"])
-                .current_dir(repo_path)
-                .output()
-                .await;
-
-            output
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(|l| l.to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
+            try_run_git(
+                repo_path,
+                "git branch",
+                &["branch", "--format=%(refname:short)"],
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|out| {
+                out.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -836,6 +810,38 @@ done
             branches,
         })
     }
+}
+
+/// Exécute `git <args>` dans `dir`. Échoue si le spawn échoue ou si git
+/// termine en erreur — le message d'erreur porte `op` + le stderr git.
+/// Rend stdout décodé lossy.
+async fn run_git(dir: &Path, op: &str, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .await
+        .with_context(|| format!("Failed to run {op}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{op} failed: {stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Variante à échec toléré : `Ok(None)` si git termine en erreur (cas attendu,
+/// ex. repo sans commit), `Err` uniquement si le spawn lui-même échoue.
+async fn try_run_git(dir: &Path, op: &str, args: &[&str]) -> anyhow::Result<Option<String>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .await
+        .with_context(|| format!("Failed to run {op}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
 /// Recursively compute directory size in bytes.
