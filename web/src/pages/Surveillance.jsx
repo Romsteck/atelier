@@ -6,7 +6,7 @@ import {
 import {
   getSurveillanceOverview, getSurveillanceSweep, startSurveillanceSweep,
   cancelSurveillanceSweep, getSweepSchedule, putSweepSchedule, getSurveillanceTranscript,
-  getResolvingFindings,
+  getResolvingScans,
 } from '../api/client';
 import { openStudio } from '../lib/openStudio';
 import PageHeader from '../components/PageHeader';
@@ -71,7 +71,7 @@ function RunStatus({ run }) {
 }
 
 // One scan line inside an app card — links straight to that kind's tab in the Studio.
-// `resolving` = a finding of this kind has an open resolution conversation.
+// `resolving` = this scan has an open group-resolution conversation.
 function KindRow({ slug, kind, resolving }) {
   const meta = KIND_META[kind.kind] || KIND_META.security;
   const KindIcon = meta.icon;
@@ -86,7 +86,7 @@ function KindRow({ slug, kind, resolving }) {
         {kind.label}{kind.blank ? ' (en veille)' : ''}
       </span>
       {resolving && (
-        <span className="flex items-center gap-0.5 text-[11px] text-blue-700 dark:text-blue-300" title="Résolution en cours (conversation agent ouverte)">
+        <span className="flex items-center gap-0.5 text-[11px] text-blue-700 dark:text-blue-300" title="Résolution groupée en cours (conversation agent ouverte)">
           <Wrench className="w-3 h-3 animate-pulse" />
         </span>
       )}
@@ -104,7 +104,7 @@ function KindRow({ slug, kind, resolving }) {
   );
 }
 
-// `resolving` = { count, kinds: Set<kind> } for this app (findings being resolved).
+// `resolving` = { count, kinds: Set<kind> } for this app (scans being group-resolved).
 function AppCard({ app, resolving }) {
   const resolvingKinds = resolving?.kinds || new Set();
   return (
@@ -118,7 +118,7 @@ function AppCard({ app, resolving }) {
         <span className="text-xs text-gray-500">{app.slug}</span>
         <span className="flex-1" />
         {resolving?.count > 0 && (
-          <span className="text-xs px-1.5 py-0.5 rounded-sm border bg-blue-500/20 border-blue-500/30 text-blue-700 dark:text-blue-300 flex items-center gap-1" title={`${resolving.count} finding(s) en cours de résolution`}>
+          <span className="text-xs px-1.5 py-0.5 rounded-sm border bg-blue-500/20 border-blue-500/30 text-blue-700 dark:text-blue-300 flex items-center gap-1" title={`${resolving.count} scan(s) en cours de résolution groupée`}>
             <Wrench className="w-3 h-3" /> {resolving.count}
           </span>
         )}
@@ -149,7 +149,7 @@ export default function Surveillance() {
   const [sweep, setSweep] = useState(null);
   const [transcripts, setTranscripts] = useState({});
   const [schedule, setSchedule] = useState(null);
-  // Findings being resolved right now (open agent conversation) across all apps.
+  // Scans (slug, kind) being group-resolved right now (open agent conversation) across all apps.
   const [resolving, setResolving] = useState([]);
   const currentRunIdsRef = useRef(new Set());
   const { toast, showToast } = useToast();
@@ -172,7 +172,7 @@ export default function Surveillance() {
   }, []);
 
   const reloadResolving = useCallback(() => {
-    getResolvingFindings().then((r) => setResolving(r.data?.resolving || [])).catch(() => {});
+    getResolvingScans().then((r) => setResolving(r.data?.resolving || [])).catch(() => {});
   }, []);
 
   useEffect(() => { reload(); reloadResolving(); }, [reload, reloadResolving]);
@@ -263,7 +263,7 @@ export default function Surveillance() {
     (a, b) => b.open_total - a.open_total || a.name.localeCompare(b.name)
   );
 
-  // Per-app aggregation of findings being resolved → card badge + per-kind wrench.
+  // Per-app aggregation of scans being group-resolved → card badge + per-kind wrench.
   const resolvingByApp = useMemo(() => {
     const m = new Map();
     for (const r of resolving) {
@@ -293,7 +293,7 @@ export default function Surveillance() {
             title={anyRunning
               ? 'Indisponible : un scan est en cours (lancé depuis le Studio). Attends sa fin avant de tout scanner.'
               : anyResolving
-                ? 'Indisponible : une résolution de finding est en cours (conversation agent ouverte). Ferme-la avant de tout scanner.'
+                ? 'Indisponible : une résolution groupée est en cours (conversation agent ouverte). Ferme-la avant de tout scanner.'
                 : 'Scanner toutes les apps (3 scans chacune, app par app)'}
             className="px-2 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed bg-emerald-500/20 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30"
           >

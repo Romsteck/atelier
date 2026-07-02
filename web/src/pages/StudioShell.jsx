@@ -362,13 +362,13 @@ export default function StudioShell({ slug }) {
     setStudioTab(slug, { tab, kind: null }).catch(() => { /* offline → cache local seul */ });
   }
 
-  // Lance une conversation agent pré-remplie (bouton « Résoudre » surveillance).
+  // Lance une conversation agent pré-remplie (bouton « Résoudre tout » surveillance).
   function openAgentWithPrompt(arg) {
     const prompt = typeof arg === 'string' ? arg : arg?.prompt;
     if (!prompt) return;
-    const findingId = typeof arg === 'string' ? undefined : arg?.findingId;
+    const scanKind = typeof arg === 'string' ? undefined : arg?.scanKind;
     const effort = typeof arg === 'string' ? undefined : arg?.effort;
-    setAgentLaunch({ prompt, findingId, effort, mode: 'plan', nonce: ++nonceRef.current });
+    setAgentLaunch({ prompt, scanKind, effort, mode: 'plan', nonce: ++nonceRef.current });
     if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
   }
 

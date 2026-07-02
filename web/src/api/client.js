@@ -168,8 +168,8 @@ export const deleteFinding = (slug, id) =>
 export const getScan = (slug) =>
   api.get(`/apps/${slug}/surveillance/scan`);
 
-// Findings with an open resolution conversation right now (across all apps).
-export const getResolvingFindings = () => api.get('/surveillance/resolving');
+// Scans (slug, kind) with an open group-resolution conversation right now (across all apps).
+export const getResolvingScans = () => api.get('/surveillance/resolving');
 
 // ── Automatic sweep (app-by-app, 3 scans each; manual + scheduled) ──
 export const getSurveillanceSweep = () => api.get('/surveillance/sweep');

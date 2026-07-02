@@ -3,7 +3,7 @@ import useWebSocket from '../hooks/useWebSocket';
 import { showAgentNotification, updateBadge } from '../lib/agentNotify';
 import { appendEvent } from '../lib/agentEvents';
 import { buildSettings } from '../lib/agentModels';
-import { setOpenResolveFindings } from '../lib/resolveConvos';
+import { setOpenResolveScans } from '../lib/resolveConvos';
 import {
   startAgentQuery,
   resumeAgentQuery,
@@ -90,7 +90,7 @@ function canonTabs(descriptors) {
     if (t.t === 'f') out.push({ t: 'f', path: t.path, name: t.name });
     else if (t.t === 'g') out.push({ t: 'g', sha: t.sha, short: t.short, subject: t.subject });
     else if (t.t === 'd') out.push({ t: 'd', path: t.path, status: t.status });
-    else if (t.t === 'c') out.push({ t: 'c', sid: t.sid, ...(t.fid != null ? { fid: t.fid } : {}), ...(t.eff ? { eff: t.eff } : {}) });
+    else if (t.t === 'c') out.push({ t: 'c', sid: t.sid, ...(t.sk ? { sk: t.sk } : {}), ...(t.eff ? { eff: t.eff } : {}) });
   }
   return out;
 }
@@ -122,8 +122,8 @@ const emptyConvo = (key, sid) => ({
   activeModel: null,
   activeMode: null, // mode courant ('plan'|'bypass') reflété par le backend (approbation/set_mode)
   autoSend: null, // {prompt, settings} à envoyer une fois le panneau commit (lancement depuis surveillance)
-  findingId: null, // si lancée par « Résoudre » : id du finding (gate le bouton tant que l'onglet est ouvert)
-  effort: null, // effort imposé au lancement (ex. 'max' depuis « Résoudre ») — reflété par le sélecteur du panneau
+  scanKind: null, // si lancée par « Résoudre tout » : kind du scan (gate le bouton tant que l'onglet est ouvert)
+  effort: null, // effort imposé au lancement (ex. 'max' depuis « Résoudre tout ») — reflété par le sélecteur du panneau
 });
 
 function reducer(state, a) {
@@ -139,8 +139,8 @@ function reducer(state, a) {
           key = t.sid;
           c = emptyConvo(t.sid, t.sid);
           c.loading = true;
-          if (t.fid != null) c.findingId = t.fid; // restaure le lien finding↔conversation
-          if (t.eff) c.effort = t.eff; // restaure l'effort imposé (ex. 'max' depuis « Résoudre »)
+          if (t.sk) c.scanKind = t.sk; // restaure le lien scan↔conversation
+          if (t.eff) c.effort = t.eff; // restaure l'effort imposé (ex. 'max' depuis « Résoudre tout »)
         } else if (t.t === 'f' && t.path) {
           key = `file:${t.path}`;
           c = { key, type: 'file', path: t.path, name: t.name };
@@ -194,7 +194,7 @@ function reducer(state, a) {
         addKey(t.sid, () => {
           const c = emptyConvo(t.sid, t.sid);
           c.loading = true;
-          if (t.fid != null) c.findingId = t.fid;
+          if (t.sk) c.scanKind = t.sk;
           if (t.eff) c.effort = t.eff;
           return c;
         });
@@ -234,7 +234,7 @@ function reducer(state, a) {
     case 'NEW_PANEL': {
       const c = emptyConvo(a.key, null);
       if (a.autoSend) c.autoSend = a.autoSend;
-      if (a.findingId != null) c.findingId = a.findingId;
+      if (a.scanKind) c.scanKind = a.scanKind;
       if (a.effort) c.effort = a.effort;
       // Une conversation neuve prend le focus (sinon, en mode onglets, elle s'ouvrirait
       // en arrière-plan). C'est aussi l'actif synchronisé vers les autres PCs.
@@ -542,7 +542,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
       if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
       if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
-      return c.sid ? { t: 'c', sid: c.sid, ...(c.findingId != null ? { fid: c.findingId } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
+      return c.sid ? { t: 'c', sid: c.sid, ...(c.scanKind ? { sk: c.scanKind } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
     })
     .filter(Boolean);
   // Actif persistable = identité cross-PC : le `sid` pour une conversation (sa clé peut
@@ -591,13 +591,13 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     }
   }, [state.order, state.active]);
 
-  // Publie l'ensemble des findings ayant une conversation de résolution OUVERTE, pour que
-  // la surveillance (hors de cet arbre) désactive leur bouton « Résoudre ». Recalculé à
-  // chaque changement d'onglets ; pas de reset au démontage → en mode onglets, l'état
-  // survit pendant qu'on regarde la surveillance (l'AgentWorkspace est démonté).
+  // Publie l'ensemble des kinds de scan ayant une conversation de résolution OUVERTE, pour
+  // que la surveillance (hors de cet arbre) désactive leur bouton « Résoudre tout ».
+  // Recalculé à chaque changement d'onglets ; pas de reset au démontage → en mode onglets,
+  // l'état survit pendant qu'on regarde la surveillance (l'AgentWorkspace est démonté).
   useEffect(() => {
-    const ids = state.order.map((k) => state.convos[k]?.findingId).filter((v) => v != null);
-    setOpenResolveFindings(ids);
+    const kinds = state.order.map((k) => state.convos[k]?.scanKind).filter(Boolean);
+    setOpenResolveScans(kinds);
   }, [state.order, state.convos]);
 
   // Onglet actif : propriété du provider (pour être synchronisé cross-PC). Le
@@ -770,7 +770,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     [slug],
   );
 
-  // Lancement externe (bouton « Résoudre » de la surveillance) : on crée une conversation
+  // Lancement externe (bouton « Résoudre tout » de la surveillance) : on crée une conversation
   // pré-chargée d'un `autoSend`. Garde par `nonce` → un même `launch` n'est traité qu'une fois,
   // y compris quand le provider reste monté (re-clic sans remonter AgentWorkspace).
   const launchNonce = useRef(null);
@@ -779,11 +779,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     launchNonce.current = launch.nonce;
     const settings = buildSettings({
       modelId: localStorage.getItem('agent:model') || 'opus-4-8',
-      // launch.effort (ex. 'max' depuis « Résoudre ») prime sur la préférence agent stockée.
+      // launch.effort (ex. 'max' depuis « Résoudre tout ») prime sur la préférence agent stockée.
       effort: launch.effort || localStorage.getItem('agent:effort') || 'max',
       mode: launch.mode || 'plan',
     });
-    dispatch({ type: 'NEW_PANEL', key: newKey(), autoSend: { prompt: launch.prompt, settings }, findingId: launch.findingId, effort: settings.effort });
+    dispatch({ type: 'NEW_PANEL', key: newKey(), autoSend: { prompt: launch.prompt, settings }, scanKind: launch.scanKind, effort: settings.effort });
     onLaunchConsumed?.();
   }, [launch, onLaunchConsumed]);
 

@@ -16,7 +16,7 @@ import MarkdownView from './docs/MarkdownView';
 import LiveScanPanel from './surveillance/LiveScanPanel';
 import { mergeLines } from './surveillance/scanFormat';
 import useWebSocket from '../hooks/useWebSocket';
-import { useOpenResolveFindings } from '../lib/resolveConvos';
+import { useOpenResolveScans } from '../lib/resolveConvos';
 import { useToast, Toast } from '../hooks/useToast';
 import { apiErr } from '../utils/apiErr';
 
@@ -84,7 +84,7 @@ function timeSince(iso) {
 
 // An issue row: title + présentation (summary) only. Clicking opens the side
 // drawer with the full resolution-plan document (the annex).
-function FindingCard({ finding, active, onSelect, onResolve, resolving }) {
+function FindingCard({ finding, active, onSelect }) {
   const sev = sevMeta(finding.severity);
   return (
     <div
@@ -107,29 +107,13 @@ function FindingCard({ finding, active, onSelect, onResolve, resolving }) {
             {finding.plan && <span className="flex items-center gap-0.5 text-gray-500"><FileText className="w-3 h-3" /> plan</span>}
           </div>
         </div>
-        {finding.status === 'open' && (
-          <div className="flex gap-1 shrink-0">
-            <button
-              onClick={(e) => { e.stopPropagation(); if (!resolving) onResolve(finding); }}
-              disabled={resolving}
-              title={resolving ? 'Conversation de résolution déjà ouverte — ferme-la pour relancer' : "Confier ce finding à l'agent (nouvelle conversation)"}
-              className={`px-2 py-1 text-xs border rounded-sm flex items-center gap-1 ${
-                resolving
-                  ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
-                  : 'text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200 hover:bg-blue-900/30 border-blue-500/30'
-              }`}
-            >
-              <Wrench className="w-3 h-3" /> {resolving ? 'Conversation ouverte' : 'Résoudre'}
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
 // Side drawer: the resolution-plan document (annex) for the selected issue.
-function AnnexDrawer({ finding, onClose, onResolve, onDelete, resolving }) {
+function AnnexDrawer({ finding, onClose, onDelete }) {
   const sev = sevMeta(finding.severity);
   return (
     <div className="w-[28rem] shrink-0 border-l border-gray-700 bg-gray-950/60 flex flex-col min-w-0">
@@ -161,22 +145,6 @@ function AnnexDrawer({ finding, onClose, onResolve, onDelete, resolving }) {
         )}
         <div className="text-[11px] text-gray-600">ID {finding.id} · <code className="text-gray-500">{finding.fingerprint}</code></div>
       </div>
-      {finding.status === 'open' && (
-        <div className="px-3 py-2 border-t border-gray-700 flex gap-2">
-          <button
-            onClick={() => { if (!resolving) onResolve(finding); }}
-            disabled={resolving}
-            title={resolving ? 'Conversation de résolution déjà ouverte — ferme-la pour relancer' : undefined}
-            className={`flex-1 px-2 py-1 text-xs border rounded-sm flex items-center justify-center gap-1 ${
-              resolving
-                ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
-                : 'text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200 border-blue-500/30 hover:bg-blue-900/30'
-            }`}
-          >
-            <Wrench className="w-3 h-3" /> {resolving ? 'Conversation ouverte' : "Résoudre avec l'agent"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
@@ -201,25 +169,51 @@ function RunRow({ run }) {
 
 const VALID_KINDS = ['security', 'code_review', 'business'];
 
-// Prompt préparé envoyé à l'agent quand on clique « Résoudre » sur un finding. Démarre en
-// lecture seule (l'auto-envoi force le mode Plan) ; l'agent valide le diagnostic, propose un
-// plan, puis (après approbation) corrige, déploie et clôt le finding via `findings_resolve`.
-function buildResolvePrompt(finding, slug, kind) {
-  const kindLabel = KINDS.find((k) => k.id === kind)?.label || kind;
-  return `Tu travailles sur l'app **${slug}**. Un scan de surveillance (**${kindLabel}**) a relevé le finding suivant. Investigue, confirme la cause racine, puis corrige proprement et définitivement (pas de contournement).
+// Prompt préparé envoyé à l'agent quand on clique « Résoudre tout » sur un scan : TOUS les
+// findings ouverts du kind dans une conversation unique, pour que l'agent concilie les
+// diagnostics (causes racines communes, fixes qui se recouvrent) au lieu de les traiter en
+// silo. Démarre en lecture seule (l'auto-envoi force le mode Plan) ; le déroulé en 4 phases
+// impose l'orchestration : investigation → plan consolidé → exécution suivie → vérification
+// qu'aucun finding ne reste ouvert.
+function buildResolveAllPrompt(openFindings, slug, kind, kindLabel) {
+  const n = openFindings.length;
+  const blocks = openFindings.map((f) => `### Finding #${f.id} — ${f.title}
+**Sévérité :** ${f.severity} · **Catégorie :** ${f.category}
+#### Présentation
+${f.summary || '(aucune)'}
+#### Plan proposé par le scan
+${f.plan || '(aucun)'}`).join('\n\n---\n\n');
 
-## ${finding.title}
-**Sévérité :** ${finding.severity} · **Catégorie :** ${finding.category} · **Finding #${finding.id}**
+  return `Tu travailles sur l'app **${slug}**. Le scan de surveillance **${kindLabel}** a ${n} finding${n > 1 ? 's' : ''} ouvert${n > 1 ? 's' : ''}.
+Ta mission : ${n > 1 ? 'les résoudre TOUS en une seule traite orchestrée' : 'le résoudre'}, proprement et définitivement (pas de contournement).
 
-### Présentation
-${finding.summary || '(aucune)'}
+## Findings ouverts (${n})
 
-### Plan de résolution proposé par le scan
-${finding.plan || '(aucun)'}
+${blocks}
 
 ---
 
-Commence en lecture seule : explore le code concerné, valide (ou corrige) le diagnostic ci-dessus, puis propose ton plan. Après approbation, applique le correctif, déploie (\`make deploy-app SLUG=${slug}\`), vérifie de bout en bout, puis marque le finding #${finding.id} comme résolu (tool \`findings_resolve\`).`;
+## Déroulé imposé
+
+**Phase 1 — Investigation & conciliation (lecture seule).**
+Vérifie chaque finding dans le code actuel (toujours d'actualité ? diagnostic correct ?). Croise-les :
+causes racines communes, correctifs qui se recouvrent ou se contredisent, ordre de dépendance.
+Un finding obsolète ou faux positif se traite par \`findings_delete\` / \`findings_dismiss\` (justifié), pas par un correctif.
+
+**Phase 2 — Plan consolidé.**
+Propose UN plan unique et ordonné couvrant les ${n} findings (pas ${n} plans indépendants) ;
+pour chaque étape, indique les findings couverts (#id).
+
+**Phase 3 — Exécution (après approbation).**
+Tiens une todo list avec une entrée par finding et marque-les au fil de l'eau. Corrige à la racine,
+groupe les modifications par cause racine. Commits : \`fix(surveillance:<id>): …\` (un id principal par
+commit) ; les autres findings couverts par le même commit → \`findings_resolve\` explicite avec le sha.
+Termine par build + livraison (skills \`0-build\` puis \`0-deploy\`).
+
+**Phase 4 — Vérification finale.**
+Vérifie de bout en bout que les correctifs fonctionnent, puis reliste les findings (\`findings_list\`,
+kind \`${kind}\`) : AUCUN des ${n} findings ci-dessus ne doit rester \`open\`. Ne conclus pas tant
+qu'il en reste un non traité (résolu, dismissé ou supprimé avec justification).`;
 }
 
 export default function SurveillanceTab({ slug, initialKind, onResolve }) {
@@ -252,8 +246,8 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
   // Open findings count per kind — drives the count badges on the scan tabs.
   const [openByKind, setOpenByKind] = useState({});
 
-  // Findings dont une conversation de résolution est ouverte → bouton « Résoudre » gaté.
-  const resolvingIds = useOpenResolveFindings();
+  // Kinds dont une conversation de résolution groupée est ouverte → « Résoudre tout » gaté.
+  const resolvingKinds = useOpenResolveScans();
 
   const meta = kindMeta(activeKind);
   const isBusiness = activeKind === 'business';
@@ -375,15 +369,26 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
     }
   };
 
-  // « Résoudre » → ouvre une nouvelle conversation agent (Studio.openAgentWithPrompt) avec un
-  // prompt préparé à partir du finding. Plus de clôture manuelle : l'agent s'en charge.
-  const handleResolve = (f) => {
-    // findingId voyage avec le prompt → la conversation créée le porte → le bouton se
-    // désactive tant qu'elle est ouverte (cf. useOpenResolveFindings). effort:'max' force
-    // le thinking maximal (résoudre un finding est une tâche profonde) plutôt que d'hériter
-    // de la préférence agent stockée (souvent medium).
-    onResolve?.({ prompt: buildResolvePrompt(f, slug, activeKind), findingId: f.id, effort: 'max' });
-    setSelected(null);
+  // « Résoudre tout » → ouvre une conversation agent unique (Studio.openAgentWithPrompt) chargée
+  // de TOUS les findings ouverts du kind actif. Refetch au clic : la liste `findings` affichée
+  // dépend du filtre de statut courant, le prompt doit lui embarquer les findings OUVERTS frais.
+  const handleResolveAll = async () => {
+    setBusy(true);
+    try {
+      const r = await getAppFindings(slug, { kind: activeKind, status: 'open', limit: 50 });
+      const open = r.data?.findings || [];
+      if (!open.length) return;
+      // scanKind voyage avec le prompt → la conversation créée le porte → le bouton se
+      // désactive tant qu'elle est ouverte (cf. useOpenResolveScans). effort:'max' force
+      // le thinking maximal (résoudre un scan entier est une tâche profonde) plutôt que
+      // d'hériter de la préférence agent stockée (souvent medium).
+      onResolve?.({ prompt: buildResolveAllPrompt(open, slug, activeKind, headerLabel), scanKind: activeKind, effort: 'max' });
+      setSelected(null);
+    } catch (e) {
+      showToast('Lancement de la résolution a échoué : ' + apiErr(e), 'error');
+    } finally {
+      setBusy(false);
+    }
   };
 
   // HARD-delete a finding (irreversible) — for obsolete/stale findings a human
@@ -484,6 +489,32 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
             Lancer {meta.label}
           </button>
         )}
+        {(() => {
+          const resolving = resolvingKinds.has(activeKind);
+          const disabled = busy || resolving || openCount === 0 || !!activeRun;
+          const title = resolving
+            ? 'Conversation de résolution déjà ouverte pour ce scan — ferme-la pour relancer'
+            : activeRun
+              ? 'Scan en cours — attends sa fin avant de lancer la résolution'
+              : openCount === 0
+                ? 'Aucun finding ouvert pour ce scan'
+                : `Confier les ${openCount} findings ouverts à l'agent dans une conversation unique (conciliation + résolution orchestrée)`;
+          return (
+            <button
+              onClick={handleResolveAll}
+              disabled={disabled}
+              title={title}
+              className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 ${
+                disabled
+                  ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
+                  : 'bg-blue-500/20 text-blue-700 dark:text-blue-200 hover:bg-blue-500/30 border-blue-500/30'
+              }`}
+            >
+              <Wrench className="w-3 h-3" />
+              {resolving ? 'Conversation ouverte' : `Résoudre tout${openCount > 0 ? ` (${openCount})` : ''}`}
+            </button>
+          );
+        })()}
         <div className="flex-1" />
         <div className="flex items-center gap-1 text-xs">
           {STATUSES.map((s) => (
@@ -513,7 +544,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
                 <div className="flex-1 h-px bg-gray-700/50" />
               </div>
               {items.map((f) => (
-                <FindingCard key={f.id} finding={f} active={selected?.id === f.id} onSelect={setSelected} onResolve={handleResolve} resolving={resolvingIds.has(f.id)} />
+                <FindingCard key={f.id} finding={f} active={selected?.id === f.id} onSelect={setSelected} />
               ))}
             </div>
           ))}
@@ -522,7 +553,7 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
         {/* Right side: the annex drawer (selected issue) takes priority; otherwise
             the live scan console while a run is in progress. */}
         {selected ? (
-          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onResolve={handleResolve} onDelete={handleDelete} resolving={resolvingIds.has(selected.id)} />
+          <AnnexDrawer finding={selected} onClose={() => setSelected(null)} onDelete={handleDelete} />
         ) : (activeRun || transcript.length > 0) ? (
           <LiveScanPanel
             lines={transcript}
