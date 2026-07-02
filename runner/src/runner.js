@@ -47,6 +47,18 @@ let inputClosed = false; // EOF / {type:'end'} vu → le générateur sortira (f
 let qHandle = null; // référence à la query() pour interrupt() / setPermissionMode()
 let liveMode = 'plan'; // mode produit COURANT ('plan'|'bypass') — suit setPermissionMode pour le garde-fou MCP
 let turnActive = false; // un tour est en cours (≠ session idle) — interrupt n'est SÛR que là
+// Sous-agents (tool Task/Agent) : le CLI PEUT forwarder des messages `result` pendant qu'un
+// sous-agent tourne (observé en prod : conversation marquée « terminée » en plein run —
+// composer réactivé, LiveBand disparue, deadline idle réarmée côté backend), et un tel result
+// est indiscernable par champ du result de fin de tour (SDKResultMessage n'a pas de
+// parent_tool_use_id). Non reproduit en isolation (SDK 0.3.198, sous-agents general-purpose/
+// Explore : un seul result final) → protection défensive : on tracke les Task top-level en
+// vol et on supprime les results reçus pendant ce temps ; les diag `result subtype=…` en
+// stderr documentent la mécanique réelle au prochain déclenchement.
+const pendingTasks = new Set(); // ids des tool_use Task/Agent TOP-LEVEL non encore résolus
+let interruptRequested = false; // interrupt (stdin/signal) en vol → le prochain result EST la fin du tour
+let leakGuard = null; // filet : result supprimé puis silence prolongé = on a avalé la vraie fin
+let heldResult = null; // payload du dernier result supprimé (ré-émis si le leak-guard tire)
 let onInit;
 const initPromise = new Promise((r) => { onInit = r; });
 let gotInit = false;
@@ -69,10 +81,21 @@ function waitDialog(requestId, signal) {
     }, { once: true });
   });
 }
+// Sentinelles renvoyées au modèle quand un dialogue EXPIRE (le CLI annule la requête
+// can_use_tool après un délai en headless — l'abort arrive par opts.signal). Objectif :
+// le modèle clôt son tour proprement SANS décider à la place de l'utilisateur ni re-proposer ;
+// la carte question/plan reste actionnable côté UI (réponse tardive = nouveau tour, cf. les
+// fallbacks `answer`/`plan_decision` stdin). Textes aussi reconnus par messagesToItems pour
+// que la carte reste actionnable après reload d'une session morte.
+const QUESTION_IDLE_MSG = "L'utilisateur n'a pas encore répondu à la question. Termine ton tour ici, proprement : ne choisis PAS à sa place et ne repose pas la question. Sa réponse arrivera dans un prochain message.";
+const PLAN_IDLE_MSG = "L'utilisateur n'a pas encore examiné le plan. Termine ton tour ici : ne modifie pas le plan, ne le re-propose pas et ne commence pas à implémenter. Sa décision arrivera dans un prochain message.";
 // Réponse AskUserQuestion → texte livré au modèle COMME résultat de l'outil (via deny+message,
 // seul canal de canUseTool pour transmettre du texte ; vérifié : le modèle l'exploite tel quel).
 function formatAnswerForModel(ans) {
-  if (!ans || ans.aborted || ans.cancelled) return "L'utilisateur n'a pas répondu à la question. Continue avec ton meilleur jugement.";
+  // Timeout CLI / interrupt / shutdown : ne PAS laisser le modèle décider seul.
+  if (!ans || ans.aborted) return QUESTION_IDLE_MSG;
+  // « Passer » explicite : choix délibéré de l'utilisateur → meilleur jugement (voulu).
+  if (ans.cancelled) return "L'utilisateur a choisi de ne pas répondre. Continue avec ton meilleur jugement.";
   const lines = Object.entries(ans.answers || {}).map(([q, a]) => `- ${q} → ${a}`);
   let t = lines.length ? `Réponses de l'utilisateur :\n${lines.join('\n')}` : "Réponse de l'utilisateur.";
   if (ans.response && ans.response.trim()) t += `\n\n${ans.response.trim()}`;
@@ -118,8 +141,9 @@ function closeInput() {
   inputClosed = true;
   // Débloque tout dialogue en attente (sinon le canUseTool resterait suspendu jusqu'au
   // SIGKILL du reaper) : on les résout en "non répondu" pour que le tour s'achève et que
-  // la session se termine proprement (flush du transcript sur disque).
-  for (const resolve of pendingDialogs.values()) resolve({ aborted: true });
+  // la session se termine proprement (flush du transcript sur disque). `shutdown` distingue
+  // ce chemin de l'annulation CLI (timeout headless) → pas d'event question_idle/plan_idle.
+  for (const resolve of pendingDialogs.values()) resolve({ aborted: true, shutdown: true });
   pendingDialogs.clear();
   if (qResolve) { const r = qResolve; qResolve = null; r(); }
 }
@@ -144,15 +168,40 @@ rl.on('line', (line) => {
       break;
     }
     // Décision sur un plan (ExitPlanMode) : approuver = implémenter, sinon renvoyer en révision.
+    // Fallback (dialogue expiré par l'annulation CLI, ou plus en attente) : la décision devient
+    // un tour utilisateur — symétrique du fallback `answer`. Même discipline que le chemin live :
+    // pas de tour « implémente » si le switch de mode a échoué (le SDK refuserait chaque Write
+    // pendant que l'UI afficherait bypass). Sans ce fallback la décision tardive était avalée
+    // alors que backend + front passaient en running → conversation bloquée.
     case 'plan_decision': {
       const resolve = pendingDialogs.get(msg.request_id);
       if (resolve) { pendingDialogs.delete(msg.request_id); resolve({ approved: !!msg.approved, feedback: msg.feedback }); }
+      else if (msg.approved) {
+        qHandle?.setPermissionMode('acceptEdits').then(() => {
+          liveMode = 'bypass';
+          emit({ t: 'permission_mode', mode: 'bypass' });
+          pushTurn(userMsg("J'approuve ton plan. Passe à l'implémentation maintenant."));
+        }, (e) => {
+          diag(`plan_decision tardif : setPermissionMode(acceptEdits) a échoué : ${e?.message || e}`);
+          pushTurn(userMsg("J'approuve ton plan, mais le passage en mode implémentation a échoué — reste en lecture seule et re-propose le plan."));
+        });
+      } else {
+        const why = (msg.feedback || '').trim();
+        pushTurn(userMsg(why
+          ? `Je n'approuve pas encore le plan. Retour : ${why}\nAffine-le (lecture seule) puis re-propose.`
+          : "Je n'approuve pas encore le plan. Affine-le (lecture seule) puis re-propose."));
+      }
       break;
     }
     // interrupt UNIQUEMENT si un tour tourne : sur une session idle, interrupt() casse
     // le flush de fin propre. Idle → on ignore (l'arrêt se fait par EOF stdin côté Atelier).
+    // `interruptRequested` garantit que le prochain `result` sera traité comme fin de tour
+    // même si des sous-agents étaient en vol (cf. case 'result').
     case 'interrupt':
-      if (turnActive && qHandle) qHandle.interrupt().catch((e) => diag(`interrupt() a échoué : ${e?.message || e}`));
+      if (turnActive && qHandle) {
+        interruptRequested = true;
+        qHandle.interrupt().catch((e) => diag(`interrupt() a échoué : ${e?.message || e}`));
+      }
       break;
     // Changement de mode/modèle EN COURS de session (setPermissionMode/setModel — possibles
     // en streaming-input ; l'effort, lui, est figé au démarrage, pas d'API live). On n'émet
@@ -194,7 +243,10 @@ function onShutdownSignal(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
   diag(`signal ${sig} reçu → interrupt du tour + fin de session`);
-  if (turnActive && qHandle) qHandle.interrupt().catch((e) => diag(`interrupt() a échoué : ${e?.message || e}`));
+  if (turnActive && qHandle) {
+    interruptRequested = true;
+    qHandle.interrupt().catch((e) => diag(`interrupt() a échoué : ${e?.message || e}`));
+  }
   closeInput();
 }
 process.on('SIGTERM', () => onShutdownSignal('SIGTERM'));
@@ -280,6 +332,9 @@ async function canUseTool(toolName, input, opts) {
     maskedToolUseIds.add(requestId);
     emit({ t: 'question', request_id: requestId, questions: input?.questions || [] });
     const ans = await waitDialog(requestId, opts?.signal);
+    // Annulation CLI (timeout headless) — ni shutdown ni interrupt utilisateur : signaler
+    // à l'UI que la carte reste en attente (hint « en pause ») pendant que le tour se clôt.
+    if (ans?.aborted && !ans.shutdown && !interruptRequested) emit({ t: 'question_idle', request_id: requestId });
     return { behavior: 'deny', message: formatAnswerForModel(ans) };
   }
   if (toolName === 'ExitPlanMode') {
@@ -287,6 +342,13 @@ async function canUseTool(toolName, input, opts) {
     maskedToolUseIds.add(requestId);
     emit({ t: 'plan_review', request_id: requestId, plan: input?.plan || '' });
     const dec = await waitDialog(requestId, opts?.signal);
+    if (dec?.aborted) {
+      // Annulation CLI / interrupt / shutdown : clore le tour SANS re-proposer — le deny
+      // « re-propose » historique produisait une boucle de plans qui expiraient à leur tour.
+      // La carte plan reste actionnable (decidePlan tardif → fallback stdin ou resume).
+      if (!dec.shutdown && !interruptRequested) emit({ t: 'plan_idle', request_id: requestId });
+      return { behavior: 'deny', message: PLAN_IDLE_MSG };
+    }
     if (dec?.approved) {
       // Approbation = on quitte la lecture seule pour que l'implémentation écrive vraiment,
       // DANS LA MÊME SESSION (mémoire du plan conservée). Vérifié : le switch persiste sur
@@ -514,18 +576,26 @@ function messagesToItems(msgs) {
           } else if (b.type === 'tool_result') {
             const txt = toolResultText(b.content);
             // Le tool_result d'AskUserQuestion porte la réponse (deny+message) → on l'accroche
-            // à la question au lieu de l'afficher comme résultat brut.
+            // à la question au lieu de l'afficher comme résultat brut. Sentinelle d'expiration
+            // (annulation CLI) → la carte reste ACTIONNABLE (idle, pas answered).
             if (askIds.has(b.tool_use_id)) {
               const q = items.findLast?.((it) => it.type === 'question' && it.request_id === b.tool_use_id)
                 || [...items].reverse().find((it) => it.type === 'question' && it.request_id === b.tool_use_id);
-              if (q) { q.answered = true; q.answer = txt; }
+              if (q) {
+                if (txt.includes(QUESTION_IDLE_MSG)) q.idle = true;
+                else { q.answered = true; q.answer = txt; }
+              }
               continue;
             }
             // ExitPlanMode : allow → "User has approved your plan" (is_error=false) ; deny → refusé.
+            // Sentinelle d'expiration → carte actionnable (idle, pas decided).
             if (planIds.has(b.tool_use_id)) {
               const p = items.findLast?.((it) => it.type === 'plan_review' && it.request_id === b.tool_use_id)
                 || [...items].reverse().find((it) => it.type === 'plan_review' && it.request_id === b.tool_use_id);
-              if (p) { p.decided = true; p.approved = !b.is_error; }
+              if (p) {
+                if (txt.includes(PLAN_IDLE_MSG)) p.idle = true;
+                else { p.decided = true; p.approved = !b.is_error; }
+              }
               continue;
             }
             if (planFileIds.has(b.tool_use_id)) continue; // résultat du Write de plomberie
@@ -594,9 +664,32 @@ async function* inputGen() {
 pushTurn(userMsg(prompt, init.images));
 
 let sessionEmitted = false; // `system` (session_id/model) n'est émis qu'une fois
+// Émission de la FIN DE TOUR (result + turn_done) — aussi utilisée par le leak-guard.
+function emitTurnResult(msg) {
+  emit({
+    t: 'result',
+    subtype: msg.subtype,
+    is_error: !!msg.is_error,
+    session_id: msg.session_id,
+    total_cost_usd: msg.total_cost_usd,
+    usage: msg.usage,
+    num_turns: msg.num_turns,
+    duration_ms: msg.duration_ms,
+    result: typeof msg.result === 'string' ? msg.result : undefined,
+  });
+  // Fin de tour : l'UI repasse en "idle" (prête pour le tour suivant) sans
+  // que la session soit terminée pour autant.
+  turnActive = false;
+  emit({ t: 'turn_done' });
+}
 try {
   qHandle = query({ prompt: inputGen(), options });
+  // Mode initial → l'UI et le buffer backend connaissent la vérité terrain dès le départ,
+  // sans attendre un set_mode / une approbation de plan (l'UI n'a plus à la deviner).
+  emit({ t: 'permission_mode', mode: liveMode });
   for await (const msg of qHandle) {
+    // Tout message SDK reçu après un result supprimé prouve que le tour continue → filet désarmé.
+    if (leakGuard) { clearTimeout(leakGuard); leakGuard = null; heldResult = null; }
     switch (msg.type) {
       case 'system':
         // msg.model = modèle réellement résolu (vérité terrain affichée par l'UI).
@@ -604,6 +697,11 @@ try {
         if (!sessionEmitted) {
           emit({ t: 'system', subtype: msg.subtype, session_id: msg.session_id, model: msg.model });
           sessionEmitted = true;
+        } else if (msg.subtype === 'task_started' || msg.subtype === 'task_notification') {
+          // Diagnostic uniquement : l'ordre task_notification vs result forwardé du sous-agent
+          // n'est PAS garanti → on ne s'en sert pas pour résoudre pendingTasks (le tool_result
+          // top-level fait foi, cf. case 'user').
+          diag(`system ${msg.subtype} task=${msg.task_id ?? ''} tool_use=${msg.tool_use_id ?? ''} status=${msg.status ?? ''} pending=${pendingTasks.size}`);
         }
         break;
       case 'stream_event': {
@@ -615,6 +713,13 @@ try {
         break;
       }
       case 'assistant': {
+        // Suivi des sous-agents : les Task/Agent lancés au niveau TOP (pas depuis un autre
+        // sous-agent) restent « en vol » jusqu'à leur tool_result — cf. case 'result'.
+        if (!msg.parent_tool_use_id) {
+          for (const block of msg.message?.content || []) {
+            if (block.type === 'tool_use' && (block.name === 'Task' || block.name === 'Agent')) pendingTasks.add(block.id);
+          }
+        }
         // Le texte est déjà streamé via les deltas ; ici on ne remonte que les tool_use.
         for (const block of msg.message?.content || []) {
           if (block.type !== 'tool_use') continue;
@@ -636,6 +741,8 @@ try {
       case 'user': {
         for (const block of msg.message?.content || []) {
           if (block.type !== 'tool_result') continue;
+          // Un tool_result TOP-LEVEL résout le Task correspondant (fin du sous-agent).
+          if (!msg.parent_tool_use_id) pendingTasks.delete(block.tool_use_id);
           // tool_result d'AskUserQuestion/ExitPlanMode : la réponse/décision est livrée
           // hors-bande (deny+message) → on masque le résultat brut.
           if (maskedToolUseIds.has(block.tool_use_id)) continue;
@@ -648,23 +755,42 @@ try {
         }
         break;
       }
-      case 'result':
-        emit({
-          t: 'result',
-          subtype: msg.subtype,
-          is_error: !!msg.is_error,
-          session_id: msg.session_id,
-          total_cost_usd: msg.total_cost_usd,
-          usage: msg.usage,
-          num_turns: msg.num_turns,
-          duration_ms: msg.duration_ms,
-          result: typeof msg.result === 'string' ? msg.result : undefined,
-        });
-        // Fin de tour : l'UI repasse en "idle" (prête pour le tour suivant) sans
-        // que la session soit terminée pour autant.
-        turnActive = false;
-        emit({ t: 'turn_done' });
+      case 'result': {
+        // Un result reçu pendant qu'un Task top-level est en vol est celui d'un SOUS-AGENT,
+        // pas la fin du tour → on le supprime (ni ResultFooter au milieu du fil, ni turn_done
+        // prématuré). Gardes strictes : rater une suppression est bénin (bug historique,
+        // auto-corrigé au result final) ; avaler la vraie fin bloquerait le front en running
+        // → leak-guard en filet.
+        const subagent =
+          pendingTasks.size > 0 &&      // des Task top-level attendent encore leur tool_result
+          msg.subtype === 'success' &&  // les error_* (interrupt/API/max_turns) sont des fins de tour
+          !interruptRequested &&        // interrupt utilisateur/signal → fin de tour quoi qu'il arrive
+          !inputClosed &&               // drain/shutdown → ne jamais retenir la fin
+          turnActive;                   // result hors-tour → rien à clore
+        diag(`result subtype=${msg.subtype} sid=${msg.session_id} pending=${pendingTasks.size} → ${subagent ? 'sous-agent (supprimé)' : 'fin de tour'}`);
+        if (subagent) {
+          heldResult = msg;
+          // Filet anti-blocage : si le tool_result du Task n'arrive jamais (bookkeeping faux),
+          // on force la clôture avec le dernier result retenu. Délai LONG à dessein : un
+          // sous-agent en génération LLM (entre deux tool calls) ne forwarde AUCUN message
+          // (forwardSubagentText=false) — un silence de 1-2 min est normal. Un tir à tort est
+          // récupérable (retour au bug historique, corrigé au vrai result final) ; un vrai
+          // leak sans filet bloquerait le front en running jusqu'à interrupt.
+          leakGuard = setTimeout(() => {
+            diag(`leak-guard: silence après result supprimé (pending=${[...pendingTasks].join(',')}) → turn_done forcé`);
+            leakGuard = null;
+            pendingTasks.clear();
+            const held = heldResult;
+            heldResult = null;
+            if (held) emitTurnResult(held);
+          }, 150_000);
+          break;
+        }
+        pendingTasks.clear();
+        interruptRequested = false;
+        emitTurnResult(msg);
         break;
+      }
       default:
         // status / hooks / etc. ignorés en Phase 1
         break;

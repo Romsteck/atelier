@@ -3,13 +3,20 @@
 
 // Modèles sélectionnables. Opus 4.8 par défaut = on N'ENVOIE PAS de model → le CLI
 // résout le défaut de l'abonnement, soit `claude-opus-4-8[1m]` (contexte 1M).
-// `efforts` = niveaux supportés (xhigh/max = Opus ; Haiku n'a aucun param effort).
+// `efforts` = niveaux supportés (Fable 5 = même gamme qu'Opus 4.7/4.8, thinking toujours
+// actif côté modèle — rien à configurer ici). Sonnet/Haiku retirés du sélecteur (2026-07-02).
 export const MODELS = [
   { id: 'opus-4-8', label: 'Opus 4.8', model: null, efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { id: 'fable-5', label: 'Fable 5', model: 'claude-fable-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   { id: 'opus-4-7', label: 'Opus 4.7', model: 'claude-opus-4-7', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { id: 'sonnet-4-6', label: 'Sonnet 4.6', model: 'claude-sonnet-4-6', efforts: ['low', 'medium', 'high'] },
-  { id: 'haiku-4-5', label: 'Haiku 4.5', model: 'claude-haiku-4-5', efforts: [] },
 ];
+
+// Normalise un id de modèle persisté (localStorage) : un id retiré du sélecteur
+// (ex. 'sonnet-4-6', 'haiku-4-5') retombe sur le défaut Opus — sans ça, le <select>
+// afficherait une value orpheline (vide) et la préférence stale ne serait jamais nettoyée.
+export function resolveModelId(saved) {
+  return MODELS.some((m) => m.id === saved) ? saved : 'opus-4-8';
+}
 
 // Deux modes seulement (cf. runner.js) : Plan = lecture seule (explore + planifie),
 // Bypass = pleine capacité (édite/exécute, relu via l'onglet Git).

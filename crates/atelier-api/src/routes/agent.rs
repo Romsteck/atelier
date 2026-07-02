@@ -115,6 +115,22 @@ fn fold_item(items: &mut Vec<Value>, kind: &str, data: &Value) {
             "request_id": data.get("request_id").cloned(),
             "plan": data.get("plan").and_then(|x| x.as_str()).unwrap_or(""),
         })),
+        // Dialogue expiré (annulation CLI du can_use_tool, cf. runner) : la carte reste
+        // ACTIONNABLE — on la marque `idle` (l'agent s'est mis en pause) sans la clore.
+        // Persistance reload : le snapshot d'une session vivante garde le hint.
+        "question_idle" | "plan_idle" => {
+            let ty = if kind == "question_idle" { "question" } else { "plan_review" };
+            if let Some(rid) = data.get("request_id").and_then(|x| x.as_str()) {
+                for it in items.iter_mut().rev() {
+                    if it.get("type").and_then(|x| x.as_str()) == Some(ty)
+                        && it.get("request_id").and_then(|x| x.as_str()) == Some(rid)
+                    {
+                        it["idle"] = json!(true);
+                        break;
+                    }
+                }
+            }
+        }
         "error" => items.push(json!({ "type": "error", "message": data.get("message").and_then(|x| x.as_str()).unwrap_or("erreur") })),
         _ => {}
     }

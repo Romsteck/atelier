@@ -9,7 +9,7 @@ import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, splitPath, charsToTokens, formatTokens, toolTarget } from '../lib/toolDisplay';
 import { TOOL_ICONS, useSmoothCount } from '../lib/toolPresentation';
-import { MODELS, MODES, buildSettings } from '../lib/agentModels';
+import { MODELS, MODES, buildSettings, resolveModelId } from '../lib/agentModels';
 
 // Réflexion = compteur SEUL (jamais le texte). Le front ne reçoit que `chars` (le serveur
 // n'envoie aucun détail), affiché en tokens (≈ chars/4). Non interactif, rien à déplier.
@@ -230,7 +230,7 @@ function ResultFooter({ data }) {
 // Carte de question interactive (AskUserQuestion). Affiche 1-4 questions avec options ;
 // collecte les choix + une réponse libre par question, puis renvoie { [texte_question]:
 // réponse } à la conversation via /answer (= tour suivant dans la même session).
-function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
+function QuestionCard({ questions, answered, answerText, idle, onSubmit, onCancel }) {
   const [sel, setSel] = useState(() => questions.map(() => ({ chosen: new Set(), text: '' })));
   // Option et réponse libre sont MUTUELLEMENT EXCLUSIVES (build() priorise déjà le texte) :
   // choisir une option efface la réponse libre, et saisir une réponse libre dé-sélectionne
@@ -289,15 +289,22 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
       {answered ? (
         <div className="text-[11px] text-gray-500">{answerText ? `Réponse : ${answerText}` : 'Réponse envoyée.'}</div>
       ) : (
-        <div className="flex items-center gap-2">
-          <button onClick={() => onSubmit(build())} disabled={!hasAny}
-            className="px-3 py-1 rounded-md text-[12px] bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed">
-            Répondre
-          </button>
-          <button onClick={onCancel} className="px-2 py-1 rounded-md text-[12px] text-gray-400 hover:text-gray-200 hover:bg-gray-800">
-            Passer
-          </button>
-        </div>
+        <>
+          {idle && (
+            <div className="text-[11px] italic text-amber-700 dark:text-amber-400/90">
+              L'agent s'est mis en pause en attendant ta réponse — réponds pour reprendre.
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <button onClick={() => onSubmit(build())} disabled={!hasAny}
+              className="px-3 py-1 rounded-md text-[12px] bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed">
+              Répondre
+            </button>
+            <button onClick={onCancel} className="px-2 py-1 rounded-md text-[12px] text-gray-400 hover:text-gray-200 hover:bg-gray-800">
+              Passer
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -307,7 +314,7 @@ function QuestionCard({ questions, answered, answerText, onSubmit, onCancel }) {
 // l'utilisateur d'implémenter (la session bascule en édition, même mémoire) ou de le
 // renvoyer en révision (avec remarques optionnelles). Tant que non décidé, le tour est
 // suspendu côté runner (canUseTool).
-function PlanReviewCard({ plan, decided, approved, onApprove, onReject }) {
+function PlanReviewCard({ plan, decided, approved, idle, onApprove, onReject }) {
   const [feedback, setFeedback] = useState('');
   return (
     <div className="border border-amber-500/30 bg-amber-500/5 rounded-lg p-3 my-1 space-y-2">
@@ -321,6 +328,11 @@ function PlanReviewCard({ plan, decided, approved, onApprove, onReject }) {
         </div>
       ) : (
         <>
+          {idle && (
+            <div className="text-[11px] italic text-amber-700 dark:text-amber-400/90">
+              L'agent s'est mis en pause en attendant ta décision — décide pour reprendre.
+            </div>
+          )}
           <input value={feedback} onChange={(e) => setFeedback(e.target.value)}
             placeholder="Remarques (optionnel, si tu renvoies en révision)"
             className="w-full bg-gray-800 border border-gray-700 rounded-sm px-2 py-1 text-[12px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-amber-500" />
@@ -348,7 +360,7 @@ export default function AgentPanel({ panelKey }) {
   const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, closeConversation } = useAgentConversations();
   const convo = convos[panelKey];
 
-  const [modelId, setModelId] = useState(() => localStorage.getItem('agent:model') || 'opus-4-8');
+  const [modelId, setModelId] = useState(() => resolveModelId(localStorage.getItem('agent:model')));
   // Effort de CE panneau : l'effort imposé au lancement (ex. 'max' depuis « Résoudre »)
   // prime sur la préférence stockée. Ne persiste PAS un effort synchronisé depuis la
   // conversation (sinon « Résoudre » polluerait la préférence globale) — seul un clic
@@ -380,11 +392,13 @@ export default function AgentPanel({ panelKey }) {
     setShowNew(false);
   }, []);
 
-  // Choix mémorisés → défauts des prochaines conversations. (L'effort n'est PAS persisté
-  // ici : seul un clic délibéré l'enregistre, cf. chooseEffort — pour ne pas que l'effort
-  // imposé d'une conversation « Résoudre » écrase la préférence globale.)
+  // Choix mémorisés → défauts des prochaines conversations. Le MODÈLE se persiste ici (seul
+  // onChangeModel le mute ; l'effet nettoie aussi au mount un id stale normalisé par
+  // resolveModelId). L'effort et le MODE, eux, ne sont persistés que sur clic délibéré
+  // (chooseEffort / onChangeMode) : le mode est aussi muté par la sync backend→UI
+  // (activeMode, ex. plan imposé par « Résoudre tout » ou approbation de plan) — persister
+  // cette sync écraserait la préférence globale de l'utilisateur.
   useEffect(() => { localStorage.setItem('agent:model', modelId); }, [modelId]);
-  useEffect(() => { localStorage.setItem('agent:mode', mode); }, [mode]);
 
   // Reflète l'effort imposé au lancement (ex. 'max' depuis « Résoudre ») dès qu'il est connu.
   useEffect(() => {
@@ -541,6 +555,7 @@ export default function AgentPanel({ panelKey }) {
   };
   const onChangeMode = (id) => {
     setMode(id);
+    localStorage.setItem('agent:mode', id); // choix délibéré → préférence globale
     if (live) changeMode(panelKey, id); // session vivante → setPermissionMode à chaud
   };
 
@@ -626,6 +641,7 @@ export default function AgentPanel({ panelKey }) {
           questions={it.questions}
           answered={convo.answered.has(it.request_id) || !!it.answered}
           answerText={it.answer}
+          idle={!!it.idle}
           onSubmit={(answers) => submitAnswer(it.request_id, { answers })}
           onCancel={() => submitAnswer(it.request_id, { cancelled: true })}
         />
@@ -637,6 +653,7 @@ export default function AgentPanel({ panelKey }) {
           plan={it.plan}
           decided={convo.decided.has(it.request_id) || !!it.decided}
           approved={it.approved}
+          idle={!!it.idle}
           onApprove={(feedback) => decide(it.request_id, true, feedback)}
           onReject={(feedback) => decide(it.request_id, false, feedback)}
         />

@@ -2,7 +2,7 @@ import { createContext, useContext, useReducer, useRef, useEffect, useState, use
 import useWebSocket from '../hooks/useWebSocket';
 import { showAgentNotification, updateBadge } from '../lib/agentNotify';
 import { appendEvent } from '../lib/agentEvents';
-import { buildSettings } from '../lib/agentModels';
+import { buildSettings, resolveModelId } from '../lib/agentModels';
 import { setOpenResolveScans } from '../lib/resolveConvos';
 import {
   startAgentQuery,
@@ -236,6 +236,10 @@ function reducer(state, a) {
       if (a.autoSend) c.autoSend = a.autoSend;
       if (a.scanKind) c.scanKind = a.scanKind;
       if (a.effort) c.effort = a.effort;
+      // Mode imposé au lancement (ex. plan depuis « Résoudre tout ») : seedé ici pour que
+      // le sélecteur du panneau l'affiche immédiatement (sans lui, il retombait sur la
+      // préférence localStorage — potentiellement « bypass » — alors que le run part en plan).
+      if (a.mode) c.activeMode = a.mode;
       // Une conversation neuve prend le focus (sinon, en mode onglets, elle s'ouvrirait
       // en arrière-plan). C'est aussi l'actif synchronisé vers les autres PCs.
       return { ...state, order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c }, active: a.key };
@@ -405,6 +409,18 @@ function reducer(state, a) {
             items: [...c.items, { type: 'plan_review', request_id: ev.data?.request_id, plan: ev.data?.plan || '' }],
           };
           break;
+        // Dialogue expiré côté CLI (timeout headless) : l'agent s'est mis en pause. La carte
+        // reste actionnable — on la marque `idle` pour afficher le hint « réponds pour reprendre ».
+        case 'question_idle':
+        case 'plan_idle': {
+          const ty = ev.kind === 'question_idle' ? 'question' : 'plan_review';
+          nc = {
+            ...c,
+            items: c.items.map((it) =>
+              it.type === ty && it.request_id === ev.data?.request_id ? { ...it, idle: true } : it),
+          };
+          break;
+        }
         default:
           nc = { ...c, items: appendEvent(c.items, ev) };
       }
@@ -778,12 +794,20 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     if (!launch || launch.nonce === launchNonce.current) return;
     launchNonce.current = launch.nonce;
     const settings = buildSettings({
-      modelId: localStorage.getItem('agent:model') || 'opus-4-8',
+      modelId: resolveModelId(localStorage.getItem('agent:model')),
       // launch.effort (ex. 'max' depuis « Résoudre tout ») prime sur la préférence agent stockée.
       effort: launch.effort || localStorage.getItem('agent:effort') || 'max',
       mode: launch.mode || 'plan',
     });
-    dispatch({ type: 'NEW_PANEL', key: newKey(), autoSend: { prompt: launch.prompt, settings }, scanKind: launch.scanKind, effort: settings.effort });
+    dispatch({
+      type: 'NEW_PANEL',
+      key: newKey(),
+      autoSend: { prompt: launch.prompt, settings },
+      scanKind: launch.scanKind,
+      effort: settings.effort,
+      // Seed du mode réel du run (cf. NEW_PANEL) — le sélecteur affiche « Plan » dès l'ouverture.
+      mode: settings.permission_mode === 'bypassPermissions' ? 'bypass' : 'plan',
+    });
     onLaunchConsumed?.();
   }, [launch, onLaunchConsumed]);
 
@@ -818,8 +842,12 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         if (c.runId) {
           await answerAgentRun(slug, c.runId, { request_id, ...payload });
         } else if (c.sid) {
-          // Conversation fermée : la réponse relance la session via resume.
-          const r = await resumeAgentQuery(slug, c.sid, { prompt: formatAnswer(payload) });
+          // Conversation fermée : la réponse relance la session via resume, dans le MODE
+          // où la conversation se trouvait (sans ça, un resume repartait toujours en plan).
+          const r = await resumeAgentQuery(slug, c.sid, {
+            prompt: formatAnswer(payload),
+            permission_mode: c.activeMode === 'bypass' ? 'bypassPermissions' : 'plan',
+          });
           if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
         }
       } catch (e) {
@@ -846,13 +874,24 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   );
 
   // Décision sur un plan (ExitPlanMode) : approuver = implémenter, sinon renvoyer en révision.
+  // Session morte (reapée à l'idle avec un plan en attente) : la décision RELANCE la session
+  // (resume) — approuver reprend directement en bypass pour implémenter, refuser reste en plan.
   const decidePlan = useCallback(
     async (key, request_id, approved, feedback) => {
       const c = stateRef.current.convos[key];
-      if (!c?.runId) return;
+      if (!c) return;
       dispatch({ type: 'SET_PLAN_DECIDED', key, request_id, approved });
       try {
-        await planDecisionAgentRun(slug, c.runId, { request_id, approved, feedback });
+        if (c.runId) {
+          await planDecisionAgentRun(slug, c.runId, { request_id, approved, feedback });
+        } else if (c.sid) {
+          const why = feedback?.trim();
+          const prompt = approved
+            ? "J'approuve ton plan. Passe à l'implémentation maintenant."
+            : `Je n'approuve pas encore le plan.${why ? ` Retour : ${why}` : ''} Affine-le puis re-propose.`;
+          const r = await resumeAgentQuery(slug, c.sid, { prompt, permission_mode: approved ? 'bypassPermissions' : 'plan' });
+          if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
+        }
       } catch (e) {
         dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
