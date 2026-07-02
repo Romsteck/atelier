@@ -73,7 +73,7 @@ runner-deps:
 runner: runner-deps
 	@test -f runner/src/runner.js || { echo "error: runner/src/runner.js missing — aborting" >&2; exit 1; }
 	@test -f runner/src/scan.js || { echo "error: runner/src/scan.js missing (surveillance scan runner) — aborting" >&2; exit 1; }
-	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing (npm ci --omit=optional?) — aborting" >&2; exit 1; }
+	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — le binaire natif est une optional-dep : relancer 'npm ci --omit=dev' SANS --omit=optional" >&2; exit 1; }
 
 deploy:
 ifeq ($(IS_MEDION),yes)
@@ -82,13 +82,33 @@ else
 	@$(MAKE) deploy-remote
 endif
 
-# Build en place sur Medion + install locale (sudo) dans /opt/atelier.
-deploy-local: atelier web runner
+# Gardes pré-vol partagées deploy-local/deploy-remote : un rsync --delete sur un
+# artefact absent effacerait la prod correspondante (web, /studio, runner).
+define PREFLIGHT
 	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting (a --delete rsync would wipe prod web)" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/studio/studio.html || { echo "error: $(WEB_DIST_LOCAL)/studio/studio.html missing/empty — studio build absent (a --delete rsync would wipe prod /studio)" >&2; exit 1; }
 	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
 	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — aborting (a --delete rsync would wipe prod runner)" >&2; exit 1; }
+endef
+
+# Healthcheck partagé : $(call HEALTHCHECK,<base-url>,<commande logs en cas d'échec>)
+define HEALTHCHECK
+	@echo "→ healthcheck (poll $(1)/api/health)"
+	@for i in $$(seq 1 15); do \
+	  if curl -fsS $(1)/api/health >/dev/null 2>&1; then \
+	    echo "  atelier healthy after $${i}s"; exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "error: atelier healthcheck failed after 15s" >&2; \
+	$(2); \
+	exit 1
+endef
+
+# Build en place sur Medion + install locale (sudo) dans /opt/atelier.
+deploy-local: atelier web runner
+	$(PREFLIGHT)
 	sudo install -d -o root -g root -m 0755 $(PREFIX)/bin $(PREFIX)/web $(PREFIX)/crates $(RUNNER_DST)
 	@echo "→ install atelier binary (atomic: .new + rename)"
 	sudo install -o root -g root -m 0755 $(ATELIER_BIN_LOCAL) $(BIN_DST).new
@@ -106,24 +126,11 @@ deploy-local: atelier web runner
 	sudo systemctl daemon-reload
 	@echo "→ restart atelier.service"
 	sudo systemctl restart atelier.service
-	@echo "→ healthcheck (poll $(ATELIER_API)/api/health)"
-	@for i in $$(seq 1 15); do \
-	  if curl -fsS $(ATELIER_API)/api/health >/dev/null 2>&1; then \
-	    echo "  atelier healthy after $${i}s"; exit 0; \
-	  fi; \
-	  sleep 1; \
-	done; \
-	echo "error: atelier healthcheck failed after 15s" >&2; \
-	sudo journalctl -u atelier -n 30 --no-pager; \
-	exit 1
+	$(call HEALTHCHECK,$(ATELIER_API),sudo journalctl -u atelier -n 30 --no-pager)
 
 # Fallback legacy : build local puis rsync/SSH vers Medion (lancement hors Medion).
 deploy-remote: atelier web runner
-	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
-	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting" >&2; exit 1; }
-	@test -s $(WEB_DIST_LOCAL)/studio/studio.html || { echo "error: $(WEB_DIST_LOCAL)/studio/studio.html missing/empty — studio build absent — aborting" >&2; exit 1; }
-	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
-	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — aborting" >&2; exit 1; }
+	$(PREFLIGHT)
 	@echo "→ rsync atelier binary + web/dist to $(MEDION)"
 	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):$(BIN_DST).new
 	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):$(WEB_DIST_DST)/
@@ -137,16 +144,7 @@ deploy-remote: atelier web runner
 	rsync -a --rsync-path='sudo rsync' $(RUNNER_LOCAL)/package.json $(RUNNER_LOCAL)/package-lock.json $(RUNNER_LOCAL)/.npmrc $(MEDION):$(RUNNER_DST)/
 	@echo "→ atomic swap + restart atelier.service on $(MEDION)"
 	ssh $(MEDION) 'sudo install -o root -g root -m 0755 $(BIN_DST).new $(BIN_DST) && sudo rm -f $(BIN_DST).new && sudo systemctl restart atelier.service'
-	@echo "→ healthcheck (poll http://10.0.0.254:4100/api/health)"
-	@for i in $$(seq 1 15); do \
-	  if curl -fsS http://10.0.0.254:4100/api/health >/dev/null 2>&1; then \
-	    echo "  atelier healthy after $${i}s"; exit 0; \
-	  fi; \
-	  sleep 1; \
-	done; \
-	echo "error: atelier healthcheck failed after 15s" >&2; \
-	ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager'; \
-	exit 1
+	$(call HEALTHCHECK,http://10.0.0.254:4100,ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager')
 
 deploy-app:
 	@if [ -z "$(SLUG)" ]; then echo "error: SLUG=<x> required (e.g. make deploy-app SLUG=files)" >&2; exit 1; fi

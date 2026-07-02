@@ -75,12 +75,19 @@ fi
 if [[ "$BUILD" == "--build" ]]; then
   if [[ -n "$BUILD_CMD" ]]; then
     # Build-scoped env (VITE_*/NEXT_PUBLIC_*) injected by Atelier (eval-able
-    # `export K='v'` lines; empty for apps without build-scoped vars).
-    BUILD_ENV="$(curl -fsS --max-time 10 "$ATELIER_API/api/apps/$SLUG/build-env" 2>/dev/null || true)"
+    # `export K='v'` lines; empty for apps without build-scoped vars). A fetch
+    # failure ABORTS: continuing would silently bake empty VITE_*/NEXT_PUBLIC_*
+    # values into the bundle (indistinguishable from an app with no build vars).
+    BUILD_ENV="$(curl -fsS --max-time 10 "$ATELIER_API/api/apps/$SLUG/build-env")" || {
+      echo "error: cannot fetch build-env for $SLUG from $ATELIER_API — aborting (build vars would be silently empty)" >&2
+      exit 1
+    }
     echo "→ build: cd $APP_SRC && $BUILD_CMD"
-    # Multi-line command: cd, then the exports (if any), then the build command —
-    # all in one shell so cwd + exports persist. run_on_medion %q-quotes for SSH.
-    if ! run_on_medion "cd '$APP_SRC'
+    # Multi-line command: set -e first (an aborted cd or export must not let the
+    # build run in the wrong cwd/env), then cd, exports, build — all in one shell
+    # so cwd + exports persist. run_on_medion %q-quotes for SSH.
+    if ! run_on_medion "set -e
+cd '$APP_SRC'
 ${BUILD_ENV}
 ${BUILD_CMD}"; then
       echo "error: build_command failed for $SLUG — aborting" >&2
