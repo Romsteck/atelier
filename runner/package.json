@@ -6,10 +6,16 @@
   "description": "Shim Node minimal: pilote le Claude Agent SDK et stream les events en NDJSON pour Atelier (Rust).",
   "main": "src/runner.js",
   "scripts": {
-    "smoke": "node src/runner.js"
+    "smoke": "node src/runner.js",
+    "lint": "eslint src"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.197"
+    "@anthropic-ai/claude-agent-sdk": "0.3.198"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.4.0",
+    "globals": "^17.6.0"
   },
   "engines": {
     "node": ">=18.0.0"

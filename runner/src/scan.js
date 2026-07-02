@@ -13,38 +13,18 @@
 // Aucune auth en dur, aucun secret en argv : tourne en hr-studio, OAuth abonnement via
 // HOME/CLAUDE_CONFIG_DIR ; le token MCP arrive par l'init (stdin), jamais par l'env.
 import { query, deleteSession } from '@anthropic-ai/claude-agent-sdk';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { makeIo, assertOAuthOnly, buildMcpServers, toolResultText } from './common.js';
 
-// stdout = canal d'events NDJSON ; stderr = diagnostics uniquement (jamais parsé).
-function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
-}
-function diag(msg) {
-  process.stderr.write(`[scan] ${msg}\n`);
-}
-function fail(message, code = 2) {
-  // Écrit l'erreur puis sort APRÈS le flush du pipe (un exit immédiat tronquerait la ligne).
-  process.stdout.write(JSON.stringify({ t: 'error', message }) + '\n', () => process.exit(code));
-  diag(message);
-}
+const { emit, diag, fail } = makeIo('scan');
+
 // Fin propre : émet `done`, sort dans le callback du write (flush garanti). Le driver Rust
 // voit l'EOF de stdout = fin du scan (sans attendre le timeout → run `success`, pas `failed`).
 function emitDoneAndExit() {
   process.stdout.write(JSON.stringify({ t: 'done', exit_ok: true }) + '\n', () => process.exit(0));
 }
 
-// Gardes auth (WHY) : une ANTHROPIC_API_KEY dans l'env bascule SILENCIEUSEMENT le SDK en
-// facturation clé API au lieu de l'OAuth abonnement Max20x ; un fichier de creds manquant
-// produit un 401 opaque. On échoue fort et tôt plutôt qu'en vol.
-if (process.env.ANTHROPIC_API_KEY) {
-  fail("ANTHROPIC_API_KEY présent dans l'env : le scan runner doit utiliser l'OAuth abonnement (hr-studio), pas une clé API. Abandon.");
-}
-const configDir = process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || '', '.claude');
-if (!existsSync(join(configDir, '.credentials.json'))) {
-  fail(`Credentials OAuth introuvables sous ${configDir}/.credentials.json — le scan runner doit tourner en hr-studio (login claude déjà présent).`);
-}
+await assertOAuthOnly('scan runner', fail);
 
 // Arrêt sur signal : aucune session à flush (persistSession:false), on sort directement.
 // Le driver Rust SIGKILL le groupe de process sur cancel/timeout ; ce handler couvre le
@@ -64,7 +44,7 @@ try {
   init = JSON.parse(initLine);
   if (!init || typeof init !== 'object') throw new Error('pas un objet');
 } catch (e) {
-  fail(`Init JSON invalide sur stdin : ${e?.message || e}`);
+  await fail(`Init JSON invalide sur stdin : ${e?.message || e}`);
 }
 
 const { op, prompt, cwd, model, effort, mcpEndpoint, mcpToken } = init || {};
@@ -75,23 +55,23 @@ const { op, prompt, cwd, model, effort, mcpEndpoint, mcpToken } = init || {};
 // écrite) → on supprime explicitement la session après le run. Piloté par le driver Rust pour
 // couvrir TOUS les cas (succès / échec / annulation SIGKILL, où scan.js ne peut pas se nettoyer).
 if (op === 'delete') {
+  if (!init.sessionId) await fail('op delete : champ "sessionId" manquant dans l\'init.');
   try { await deleteSession(init.sessionId, { dir: cwd }); } catch (e) { diag(`deleteSession: ${e?.message || e}`); }
   process.stdout.write(JSON.stringify({ t: 'deleted' }) + '\n', () => process.exit(0));
+  // Sortie exclusive via le callback du write ci-dessus — ne JAMAIS retomber dans le flux scan.
+  await new Promise(() => {});
 }
 
-if (!prompt) fail('Champ "prompt" manquant dans l\'init.');
+if (!prompt) await fail('Champ "prompt" manquant dans l\'init.');
 
-// MCP (WHY) : le token arrive par l'init (stdin), pas par l'env — pour que sudo ne le
-// journalise pas. L'URL porte déjà `?scope=surveillance` → le serveur n'expose et n'accepte
-// que la whitelist read-only (findings_upsert/dismiss/resolve + memory + lectures). Fallback
-// env pour le smoke-test standalone.
-const mcpServers = {};
-const token = mcpToken || process.env.MCP_TOKEN;
-if (mcpEndpoint && token) {
-  mcpServers.studio = { type: 'http', url: mcpEndpoint, headers: { Authorization: `Bearer ${token}` } };
-} else if (mcpEndpoint) {
-  diag('mcpEndpoint fourni mais token MCP absent — serveur MCP non câblé (le scan ne pourra rien signaler).');
-}
+// L'URL MCP porte déjà `?scope=surveillance` → le serveur n'expose et n'accepte que la
+// whitelist read-only (findings_upsert/dismiss/resolve + memory + lectures).
+const mcpServers = buildMcpServers(
+  mcpEndpoint,
+  mcpToken,
+  diag,
+  'mcpEndpoint fourni mais token MCP absent — serveur MCP non câblé (le scan ne pourra rien signaler).',
+);
 
 // LECTURE SEULE stricte — garantie par `disallowedTools` (couche autoritaire côté client).
 // WHY pas `permissionMode:'plan'` : 'plan' = "no execution of tools" → il empêcherait
@@ -153,14 +133,6 @@ const options = {
   ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
 };
 
-function toolResultText(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.map((x) => (x && x.type === 'text' ? x.text : `[${x?.type || 'block'}]`)).join('');
-  }
-  return '';
-}
-
 // Single-turn : prompt = string simple → la boucle se termine après le message `result`,
 // et le process sort. On émet UN événement par bloc sémantique (pas de deltas token-à-token :
 // includePartialMessages reste à false) → transcript propre, une ligne lisible par item.
@@ -218,7 +190,7 @@ try {
     }
   }
 } catch (e) {
-  fail(`query() a échoué : ${e?.message || e}`, 1);
+  await fail(`query() a échoué : ${e?.message || e}`, 1);
 }
 
 emitDoneAndExit();

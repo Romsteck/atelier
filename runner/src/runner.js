@@ -21,33 +21,12 @@ import {
   deleteSession,
   tagSession,
 } from '@anthropic-ai/claude-agent-sdk';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { makeIo, assertOAuthOnly, buildMcpServers, toolResultText } from './common.js';
 
-// stdout = canal d'events NDJSON ; stderr = diagnostics uniquement (jamais parsé).
-function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
-}
-function diag(msg) {
-  process.stderr.write(`[runner] ${msg}\n`);
-}
-function fail(message, code = 2) {
-  emit({ t: 'error', message });
-  diag(message);
-  process.exit(code);
-}
+const { emit, diag, fail } = makeIo('runner');
 
-// Gardes auth (WHY) : une ANTHROPIC_API_KEY dans l'env bascule SILENCIEUSEMENT le
-// SDK en facturation clé API au lieu de l'OAuth abonnement Max20x ; un fichier de
-// creds manquant produit un 401 opaque. On échoue fort et tôt plutôt qu'en vol.
-if (process.env.ANTHROPIC_API_KEY) {
-  fail("ANTHROPIC_API_KEY présent dans l'env : le runner doit utiliser l'OAuth abonnement (hr-studio), pas une clé API. Abandon.");
-}
-const configDir = process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || '', '.claude');
-if (!existsSync(join(configDir, '.credentials.json'))) {
-  fail(`Credentials OAuth introuvables sous ${configDir}/.credentials.json — le runner doit tourner en hr-studio (login claude déjà présent).`);
-}
+await assertOAuthOnly('runner', fail);
 
 // Toolchain sur PATH (WHY) : le runner est spawné via `sudo -H -u hr-studio` qui
 // réinitialise l'env vers son secure_path — `~/.cargo/bin` (cargo) et `~/.local/bin`
@@ -150,7 +129,7 @@ rl.on('line', (line) => {
   const s = line.trim();
   if (!s) return;
   let msg;
-  try { msg = JSON.parse(s); } catch { diag('ligne stdin non-JSON ignorée'); return; }
+  try { msg = JSON.parse(s); } catch { diag(`ligne stdin non-JSON ignorée : ${s.slice(0, 200)}`); return; }
   if (!gotInit) { gotInit = true; onInit(msg); return; }
   switch (msg.type) {
     case 'user_message':
@@ -172,21 +151,30 @@ rl.on('line', (line) => {
     }
     // interrupt UNIQUEMENT si un tour tourne : sur une session idle, interrupt() casse
     // le flush de fin propre. Idle → on ignore (l'arrêt se fait par EOF stdin côté Atelier).
-    case 'interrupt': if (turnActive && qHandle) qHandle.interrupt().catch(() => {}); break;
+    case 'interrupt':
+      if (turnActive && qHandle) qHandle.interrupt().catch((e) => diag(`interrupt() a échoué : ${e?.message || e}`));
+      break;
     // Changement de mode/modèle EN COURS de session (setPermissionMode/setModel — possibles
-    // en streaming-input ; l'effort, lui, est figé au démarrage, pas d'API live). On émet en
-    // retour pour que l'UI reflète l'état réel.
+    // en streaming-input ; l'effort, lui, est figé au démarrage, pas d'API live). On n'émet
+    // (et ne mute `liveMode`) qu'APRÈS succès : sinon l'UI et le garde-fou MCP refléteraient
+    // un mode que le SDK n'a pas réellement pris. Sur échec, on ré-émet l'état réel.
     case 'set_mode':
       if (qHandle && (msg.mode === 'plan' || msg.mode === 'bypass')) {
-        qHandle.setPermissionMode(msg.mode === 'bypass' ? 'acceptEdits' : 'plan').catch(() => {});
-        liveMode = msg.mode;
-        emit({ t: 'permission_mode', mode: msg.mode });
+        qHandle.setPermissionMode(msg.mode === 'bypass' ? 'acceptEdits' : 'plan').then(() => {
+          liveMode = msg.mode;
+          emit({ t: 'permission_mode', mode: msg.mode });
+        }, (e) => {
+          diag(`setPermissionMode(${msg.mode}) a échoué : ${e?.message || e}`);
+          emit({ t: 'permission_mode', mode: liveMode }); // re-synchronise l'UI sur l'état réel
+        });
       }
       break;
     case 'set_model':
       if (qHandle) {
-        qHandle.setModel(msg.model || undefined).catch(() => {});
-        emit({ t: 'model', model: msg.model || null });
+        qHandle.setModel(msg.model || undefined).then(
+          () => emit({ t: 'model', model: msg.model || null }),
+          (e) => diag(`setModel(${msg.model || 'défaut'}) a échoué : ${e?.message || e}`),
+        );
       }
       break;
     case 'end': closeInput(); break;
@@ -206,7 +194,7 @@ function onShutdownSignal(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
   diag(`signal ${sig} reçu → interrupt du tour + fin de session`);
-  if (turnActive && qHandle) qHandle.interrupt().catch(() => {});
+  if (turnActive && qHandle) qHandle.interrupt().catch((e) => diag(`interrupt() a échoué : ${e?.message || e}`));
   closeInput();
 }
 process.on('SIGTERM', () => onShutdownSignal('SIGTERM'));
@@ -215,9 +203,9 @@ process.on('SIGINT', () => onShutdownSignal('SIGINT'));
 let init;
 try {
   init = await initPromise;
-  if (!init || typeof init !== 'object') fail('init JSON invalide sur stdin.');
+  if (!init || typeof init !== 'object') await fail('init JSON invalide sur stdin.');
 } catch (e) {
-  fail(`Init JSON invalide sur stdin : ${e?.message || e}`);
+  await fail(`Init JSON invalide sur stdin : ${e?.message || e}`);
 }
 
 const {
@@ -242,21 +230,14 @@ if (op) {
 }
 
 // prompt vide TOLÉRÉ si des images sont jointes (tour image-only).
-if (!prompt && !(Array.isArray(init.images) && init.images.length)) fail('Champ "prompt" manquant dans l\'init.');
+if (!prompt && !(Array.isArray(init.images) && init.images.length)) await fail('Champ "prompt" manquant dans l\'init.');
 
-// MCP (WHY) : le token arrive par l'init (stdin), pas par l'env — pour ne pas que
-// sudo le journalise. Fallback env pour le smoke-test standalone.
-const mcpServers = {};
-const token = mcpToken || process.env.MCP_TOKEN;
-if (mcpEndpoint && token) {
-  mcpServers.studio = {
-    type: 'http',
-    url: mcpEndpoint,
-    headers: { Authorization: `Bearer ${token}` },
-  };
-} else if (mcpEndpoint) {
-  diag('mcpEndpoint fourni mais token MCP absent — serveur MCP non câblé.');
-}
+const mcpServers = buildMcpServers(
+  mcpEndpoint,
+  mcpToken,
+  diag,
+  'mcpEndpoint fourni mais token MCP absent — serveur MCP non câblé.',
+);
 
 // Deux modes produit, mappés sur le SDK + un canUseTool UNIQUE qui est le host complet :
 //   - 'plan' (défaut, SÛR) : permissionMode SDK 'plan'. Le SDK applique nativement la
@@ -310,7 +291,17 @@ async function canUseTool(toolName, input, opts) {
       // Approbation = on quitte la lecture seule pour que l'implémentation écrive vraiment,
       // DANS LA MÊME SESSION (mémoire du plan conservée). Vérifié : le switch persiste sur
       // les tours suivants. On notifie l'UI pour qu'elle reflète le passage Plan → Bypass.
-      await qHandle?.setPermissionMode('acceptEdits').catch(() => {});
+      // Si le switch SDK échoue, on N'allow PAS : le SDK serait resté en plan et refuserait
+      // silencieusement chaque Write pendant que l'UI afficherait bypass.
+      try {
+        await qHandle?.setPermissionMode('acceptEdits');
+      } catch (e) {
+        diag(`setPermissionMode(acceptEdits) a échoué : ${e?.message || e}`);
+        return {
+          behavior: 'deny',
+          message: `Le passage en mode implémentation a échoué (${e?.message || e}). Reste en lecture seule et re-propose le plan.`,
+        };
+      }
       liveMode = 'bypass';
       emit({ t: 'permission_mode', mode: 'bypass' });
       return { behavior: 'allow', updatedInput: input };
@@ -415,14 +406,6 @@ const options = {
   ...(resume ? { resume } : {}),
   ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
 };
-
-function toolResultText(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.map((x) => (x && x.type === 'text' ? x.text : `[${x?.type || 'block'}]`)).join('');
-  }
-  return '';
-}
 
 // RÉDUCTION DU PAYLOAD (WHY) : l'UI n'affiche qu'un libellé compact « verbe + cible » par
 // appel d'outil (l'action en cours en live, le reste replié). Envoyer l'`input` intégral
@@ -590,9 +573,9 @@ async function runIntrospection(op, init) {
   rl.close();
   process.stdin.destroy();
   process.stdout.write(JSON.stringify(result) + '\n', () => process.exit(0));
-  // On NE retombe JAMAIS dans le chemin chat (sinon son `fail("prompt manquant")`
-  // ferait un process.exit(2) qui tronquerait l'écriture ci-dessus encore en vol).
-  // On sort exclusivement via le callback de write ci-dessus.
+  // On NE retombe JAMAIS dans le chemin chat (son `fail("prompt manquant")` émettrait une
+  // erreur parasite en concurrence avec le résultat ci-dessus). Sortie exclusive via le
+  // callback de write.
   await new Promise(() => {});
 }
 
@@ -688,7 +671,7 @@ try {
     }
   }
 } catch (e) {
-  fail(`query() a échoué : ${e?.message || e}`, 1);
+  await fail(`query() a échoué : ${e?.message || e}`, 1);
 }
 
 // Sortie de boucle = générateur d'entrée terminé (EOF/{type:'end'}) = fin de session.
