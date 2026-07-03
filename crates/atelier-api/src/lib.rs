@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::json;
 use state::ApiState;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
@@ -67,7 +68,25 @@ pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
         }
     }
 
-    app
+    // Filet global : sans lui, un panic de handler avorte la tâche hyper et le
+    // client reçoit une connexion coupée (pas de statut) au lieu d'un 500 JSON.
+    app.layer(CatchPanicLayer::custom(handle_panic))
+}
+
+fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    let detail = if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "unknown panic".to_string()
+    };
+    tracing::error!(panic = %detail, "handler panicked — returning 500");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"success": false, "error": "internal server error"})),
+    )
+        .into_response()
 }
 
 async fn api_404() -> impl IntoResponse {

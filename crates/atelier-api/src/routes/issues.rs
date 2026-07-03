@@ -100,7 +100,7 @@ async fn post_issue(
         }
         Err(e) => {
             warn!(slug = %slug, err = %e, "platform_issues insert failed");
-            fail(StatusCode::INTERNAL_SERVER_ERROR, format!("insert issue: {e}"))
+            crate::routes::internal_err("insert issue", e)
         }
     }
 }
@@ -149,7 +149,7 @@ async fn patch_issue(
         Ok(None) => fail(StatusCode::NOT_FOUND, "issue id introuvable"),
         Err(e) => {
             warn!(id = %id, err = %e, "platform_issues update failed");
-            fail(StatusCode::INTERNAL_SERVER_ERROR, format!("update issue: {e}"))
+            crate::routes::internal_err("update issue", e)
         }
     }
 }
@@ -166,7 +166,7 @@ async fn delete_issue(State(state): State<ApiState>, Path(id): Path<String>) -> 
         Ok(false) => fail(StatusCode::NOT_FOUND, "issue id introuvable"),
         Err(e) => {
             warn!(id = %id, err = %e, "platform_issues delete failed");
-            fail(StatusCode::INTERNAL_SERVER_ERROR, format!("delete issue: {e}"))
+            crate::routes::internal_err("delete issue", e)
         }
     }
 }

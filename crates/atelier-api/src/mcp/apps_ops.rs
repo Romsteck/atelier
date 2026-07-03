@@ -367,6 +367,9 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        // Guarded read-modify-write; released before reconcile_app_env below,
+        // which re-acquires the same per-slug guard.
+        let guard = self.supervisor.registry.lock_slug(&slug).await;
         let mut app = match self.supervisor.registry.get(&slug).await {
             Some(a) => a,
             None => return IpcResponse::err(format!("app not found: {slug}")),
@@ -431,6 +434,7 @@ impl AppsContext {
             error!(slug = %slug, error = %e, "AppUpdate: registry upsert failed");
             return IpcResponse::err(format!("registry upsert failed: {e}"));
         }
+        drop(guard);
 
         // Push updated edge route if visibility changed
         let auth_required = matches!(app.visibility, Visibility::Private);
@@ -494,20 +498,42 @@ impl AppsContext {
         } else {
             warn!(slug = %slug, domain = %app.domain, "AppDelete: edge client unavailable, route not cleaned");
         }
-        // 3. Remove from registry
-        if let Err(e) = self.supervisor.registry.remove(&slug).await {
-            error!(slug = %slug, error = %e, "AppDelete: registry remove failed");
-            return IpcResponse::err(format!("registry remove failed: {e}"));
-        }
-        // 4. Release port
-        if let Err(e) = self.supervisor.port_registry.release(&slug).await {
-            warn!(slug = %slug, error = %e, "AppDelete: port release failed");
+        // 3. Remove from registry + release port, under the per-slug guard so a
+        // concurrent env/state mutation can't re-upsert the row after removal.
+        {
+            let _guard = self.supervisor.registry.lock_slug(&slug).await;
+            if let Err(e) = self.supervisor.registry.remove(&slug).await {
+                error!(slug = %slug, error = %e, "AppDelete: registry remove failed");
+                return IpcResponse::err(format!("registry remove failed: {e}"));
+            }
+            // 4. Release port
+            if let Err(e) = self.supervisor.port_registry.release(&slug).await {
+                warn!(slug = %slug, error = %e, "AppDelete: port release failed");
+            }
         }
         // 5. Purge des remontées plateforme de l'app (best-effort). WHY même quand
         // keep_data : ce sont des frictions PLATEFORME, pas de la donnée d'app ;
         // une app supprimée n'a plus de chat qui les contextualise.
         self.issues.delete_by_slug(&slug).await;
         if !keep_data {
+            // De-provision the dataverse database (base app_{slug} + rôle +
+            // entrée secrets + pool évincé). Sans ça, chaque delete laissait
+            // une base/rôle orphelins, et recréer le même slug adoptait
+            // l'ancien schéma. Best-effort loggé, comme le reste du delete.
+            if app.has_db {
+                match &self.dataverse_manager {
+                    Some(mgr) => {
+                        if let Err(e) = mgr.drop_app(&slug).await {
+                            warn!(slug = %slug, error = %e, "AppDelete: dataverse drop_app failed — orphan db likely");
+                        } else {
+                            info!(slug = %slug, "AppDelete: dataverse database dropped");
+                        }
+                    }
+                    None => {
+                        warn!(slug = %slug, "AppDelete: dataverse manager unavailable — db not dropped");
+                    }
+                }
+            }
             let dir = app.app_dir();
             if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
                 warn!(slug = %slug, dir = %dir.display(), error = %e, "AppDelete: rm -rf failed");

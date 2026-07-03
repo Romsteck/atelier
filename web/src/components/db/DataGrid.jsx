@@ -118,8 +118,11 @@ export function DataGrid({
 
   const allSelected = rows.length > 0 && selectedRows.size === rows.length;
 
-  // Hide _display columns from the grid (they're used by Lookup rendering)
-  const visibleColumns = columns.filter(col => !col.endsWith('_display'));
+  // Hide _display columns from the grid (they're used by Lookup rendering).
+  // `version` hors schéma = verrou optimiste serveur (If-Match), transporté sur
+  // chaque row mais pas une donnée — masqué SAUF si l'app a une vraie colonne
+  // `version` dans son schéma.
+  const visibleColumns = columns.filter(col => !col.endsWith('_display') && !(col === 'version' && !schemaMap[col]));
 
   return (
     <div className="relative h-full">

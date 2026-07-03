@@ -459,10 +459,26 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       });
   }, [slug]);
 
+  // Re-fetch du snapshot serveur (autoritaire) de chaque conversation ouverte keyée
+  // par sid — running d'abord. Partagé entre le reconnect WS (epoch) et l'event
+  // `resync` (subscriber laggé) : dans les deux cas des events ont été perdus.
+  const resyncAllSnapshots = useCallback(() => {
+    const st = stateRef.current;
+    const sids = st.order
+      .filter((k) => { const c = st.convos[k]; return c && c.sid && k === c.sid; })
+      .map((k) => st.convos[k])
+      .sort((a, b) => Number(b.running) - Number(a.running))
+      .map((c) => c.sid);
+    for (const sid of sids) fetchSnapshot(sid);
+  }, [fetchSnapshot]);
+
   // UN seul WebSocket pour tout le workspace : events de run (routés par session_id/
   // run_id) + sync de l'ensemble des onglets ouverts (changement venu d'un autre PC).
   const { epoch } = useWebSocket({
     'agent:event': (d) => { if (d) dispatch({ type: 'WS', ev: d }); },
+    // Le serveur signale un buffer broadcast dépassé (events agent perdus) : l'état
+    // local est troué → même re-sync de snapshots qu'au reconnect.
+    'resync': (m) => { if (m?.channel === 'agent:event') resyncAllSnapshots(); },
     'agent:open-tabs': (d) => {
       if (!d || d.slug !== slug) return;
       const incoming = canonTabs(d.tabs);
@@ -491,14 +507,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   useEffect(() => {
     if (epoch === 0 || epoch === prevEpoch.current) return;
     prevEpoch.current = epoch;
-    const st = stateRef.current;
-    const sids = st.order
-      .filter((k) => { const c = st.convos[k]; return c && c.sid && k === c.sid; })
-      .map((k) => st.convos[k])
-      .sort((a, b) => Number(b.running) - Number(a.running))
-      .map((c) => c.sid);
-    for (const sid of sids) fetchSnapshot(sid);
-  }, [epoch, fetchSnapshot]);
+    resyncAllSnapshots();
+  }, [epoch, resyncAllSnapshots]);
 
   // Chargement initial (par slug) : l'état des onglets est AUTORITAIRE côté serveur
   // (sync cross-PC). On le charge, re-fetche les snapshots des conversations, et amorce

@@ -73,7 +73,11 @@ export default function useWebSocket(handlers, opts = {}) {
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
-          handlersRef.current[msg.type]?.(msg.data);
+          // `resync` (subscriber broadcast laggé côté serveur : events perdus) porte
+          // son payload À PLAT ({channel, dropped}), pas sous `data` → on délivre le
+          // message entier pour que le consommateur puisse router par `channel`.
+          if (msg.type === 'resync') handlersRef.current.resync?.(msg);
+          else handlersRef.current[msg.type]?.(msg.data);
         } catch {
           // ignore parse errors
         }

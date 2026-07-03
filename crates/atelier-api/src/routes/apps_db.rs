@@ -6,12 +6,13 @@
 //! attendu par le frontend.
 //!
 //! Lecture : `db/schema`, `db/tables`, `db/tables/{t}`, `db/tables/{t}/rows`.
-//! Écriture (admin, identité `system`, verrou optimiste géré côté serveur) :
-//! `POST db/tables/{t}/insert`, `PATCH/DELETE db/tables/{t}/rows/{id}`. Le SQL
-//! brut n'existe plus (postgres-dataverse) — ces endpoints sont la voie admin.
+//! Écriture (admin, identité `system`, verrou optimiste `If-Match` comme la
+//! passerelle `/api/dv`) : `POST db/tables/{t}/insert`, `PATCH/DELETE
+//! db/tables/{t}/rows/{id}`. Le SQL brut n'existe plus (postgres-dataverse) —
+//! ces endpoints sont la voie admin.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -132,10 +133,7 @@ async fn get_schema(
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("dataverse engine: {e}"),
-            );
+            return crate::routes::internal_err("dataverse engine", e);
         }
     };
     match engine.get_schema().await {
@@ -148,10 +146,7 @@ async fn get_schema(
             );
             ok_data(schema)
         }
-        Err(e) => err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("get_schema: {e}"),
-        ),
+        Err(e) => crate::routes::internal_err("get_schema", e),
     }
 }
 
@@ -188,19 +183,13 @@ async fn list_tables(
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("dataverse engine: {e}"),
-            );
+            return crate::routes::internal_err("dataverse engine", e);
         }
     };
     let names = match engine.list_tables().await {
         Ok(t) => t,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list_tables: {e}"),
-            );
+            return crate::routes::internal_err("list_tables", e);
         }
     };
 
@@ -246,19 +235,13 @@ async fn describe_table(
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("dataverse engine: {e}"),
-            );
+            return crate::routes::internal_err("dataverse engine", e);
         }
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("get_schema: {e}"),
-            );
+            return crate::routes::internal_err("get_schema", e);
         }
     };
     let Some(t) = schema.tables.iter().find(|x| x.name == table) else {
@@ -406,19 +389,13 @@ async fn query_rows(
     let engine = match dv.engine_for(&slug).await {
         Ok(e) => e,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("dataverse engine: {e}"),
-            );
+            return crate::routes::internal_err("dataverse engine", e);
         }
     };
     let schema = match engine.get_schema().await {
         Ok(s) => s,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("get_schema: {e}"),
-            );
+            return crate::routes::internal_err("get_schema", e);
         }
     };
     let table_def: &TableDefinition =
@@ -497,7 +474,7 @@ async fn query_rows(
         Ok(r) => r,
         Err(e) => {
             warn!(slug = %slug, table = %table, ?e, "AppDbQueryRows failed");
-            return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}"));
+            return crate::routes::internal_err("query", e);
         }
     };
 
@@ -511,7 +488,10 @@ async fn query_rows(
 
     // Strip system bookkeeping columns from rows (DbExplorer doesn't render
     // them — homeroute does the same filtering before sending the wire response).
-    const HIDDEN: &[&str] = &["is_deleted", "version"];
+    // `version` reste porté par les rows (le client le renvoie en `If-Match`
+    // sur PATCH/DELETE — verrou optimiste) mais n'apparaît pas dans `columns`.
+    const HIDDEN: &[&str] = &["is_deleted"];
+    const NON_COLUMNS: &[&str] = &["version"];
 
     let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut cleaned_rows: Vec<Value> = raw_rows
@@ -521,7 +501,9 @@ async fn query_rows(
                 let mut new_map = serde_json::Map::new();
                 for (k, v) in map {
                     if !HIDDEN.contains(&k.as_str()) {
-                        col_set.insert(k.clone());
+                        if !NON_COLUMNS.contains(&k.as_str()) {
+                            col_set.insert(k.clone());
+                        }
                         new_map.insert(k, v);
                     }
                 }
@@ -566,9 +548,12 @@ async fn query_rows(
 
 // ── Admin writes (postgres-dataverse via DV engine) ─────────────────────
 //
-// The DbExplorer is an admin tool: it acts as `Identity::system()` and the
-// optimistic-lock version is read server-side, so the browser never has to
-// track row versions. Mirrors the gateway write path in `routes::dv`.
+// The DbExplorer is an admin tool: it acts as `Identity::system()`. The
+// optimistic-lock version comes from the client's `If-Match` header (the
+// version it LOADED via query_rows), mirroring the gateway write path in
+// `routes::dv`. It used to be re-read server-side just before the write,
+// which made the precondition check vacuous: an edit based on a stale row
+// silently clobbered any concurrent change.
 
 async fn engine_and_schema(
     state: &ApiState,
@@ -587,31 +572,33 @@ async fn engine_and_schema(
         )
     })?;
     let engine = dv.engine_for(slug).await.map_err(|e| {
-        err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("dataverse engine: {e}"))
+        crate::routes::internal_err("dataverse engine", e)
     })?;
     let schema = engine
         .get_schema()
         .await
-        .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("get_schema: {e}")))?;
+        .map_err(|e| crate::routes::internal_err("get_schema", e))?;
     Ok((engine, schema))
 }
 
-/// Read the current optimistic-lock version of a live row, server-side.
-async fn current_version(
-    engine: &atelier_dataverse::DataverseEngine,
-    table_def: &TableDefinition,
-    id_value: &Value,
-) -> Result<i32, Response> {
-    let get = build_get(table_def, id_value, false);
-    match run_get(engine.pool(), table_def, &get.sql, &get.params).await {
-        Ok(Some(row)) => row
-            .get("version")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
-            .ok_or_else(|| err_response(StatusCode::INTERNAL_SERVER_ERROR, "row missing version")),
-        Ok(None) => Err(err_response(StatusCode::NOT_FOUND, "row not found")),
-        Err(e) => Err(err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("get: {e}"))),
-    }
+/// Optimistic-lock version from the client's `If-Match` header (integer, bare
+/// or double-quoted). 428 without le header, 400 si illisible.
+fn if_match_version(headers: &HeaderMap) -> Result<i32, Response> {
+    let Some(raw) = headers.get(axum::http::header::IF_MATCH) else {
+        return Err(err_response(
+            StatusCode::PRECONDITION_REQUIRED,
+            "missing If-Match header (row version)",
+        ));
+    };
+    raw.to_str()
+        .ok()
+        .and_then(|s| s.trim().trim_matches('"').parse::<i32>().ok())
+        .ok_or_else(|| {
+            err_response(
+                StatusCode::BAD_REQUEST,
+                "invalid If-Match header (expected the integer row version)",
+            )
+        })
 }
 
 /// POST /api/apps/{slug}/db/tables/{table}/insert
@@ -665,7 +652,7 @@ async fn insert_row(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("insert: unexpected {other:?}"),
         ),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("insert: {e}")),
+        Err(e) => crate::routes::internal_err("insert", e),
     }
 }
 
@@ -673,6 +660,7 @@ async fn insert_row(
 async fn update_row(
     State(state): State<ApiState>,
     Path((slug, table, id)): Path<(String, String, String)>,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Response {
     if let Err(r) = validate_slug(&slug) {
@@ -696,7 +684,7 @@ async fn update_row(
     let Some(table_def) = schema.tables.iter().find(|t| t.name == table) else {
         return err_response(StatusCode::NOT_FOUND, format!("table '{table}' not found"));
     };
-    let version = match current_version(&engine, table_def, &id_value).await {
+    let version = match if_match_version(&headers) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -741,7 +729,7 @@ async fn update_row(
             "row changed concurrently — refresh and retry",
         ),
         Ok(MutationOutcome::NotFound) => err_response(StatusCode::NOT_FOUND, "row not found"),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("update: {e}")),
+        Err(e) => crate::routes::internal_err("update", e),
     }
 }
 
@@ -749,6 +737,7 @@ async fn update_row(
 async fn delete_row(
     State(state): State<ApiState>,
     Path((slug, table, id)): Path<(String, String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     if let Err(r) = validate_slug(&slug) {
         return r;
@@ -767,7 +756,7 @@ async fn delete_row(
     let Some(table_def) = schema.tables.iter().find(|t| t.name == table) else {
         return err_response(StatusCode::NOT_FOUND, format!("table '{table}' not found"));
     };
-    let version = match current_version(&engine, table_def, &id_value).await {
+    let version = match if_match_version(&headers) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -797,6 +786,6 @@ async fn delete_row(
             "row changed concurrently — refresh and retry",
         ),
         Ok(MutationOutcome::NotFound) => err_response(StatusCode::NOT_FOUND, "row not found"),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}")),
+        Err(e) => crate::routes::internal_err("delete", e),
     }
 }

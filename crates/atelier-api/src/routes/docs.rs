@@ -41,7 +41,7 @@ async fn list_apps(State(state): State<ApiState>) -> impl IntoResponse {
     let store = store(&state);
     let app_ids = match store.list_app_ids() {
         Ok(v) => v,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => return crate::routes::internal_err("docs", e),
     };
     let mut apps = Vec::with_capacity(app_ids.len());
     for app_id in app_ids {
@@ -75,7 +75,7 @@ async fn get_overview(
         Err(atelier_docs::StoreError::AppNotFound(_)) => {
             err(StatusCode::NOT_FOUND, "App not found").into_response()
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => crate::routes::internal_err("docs", e),
     }
 }
 
@@ -110,7 +110,7 @@ async fn list_entries(
             "entries": entries,
         }))
         .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => crate::routes::internal_err("docs", e),
     }
 }
 
@@ -151,7 +151,7 @@ async fn get_entry(
         Err(atelier_docs::StoreError::EntryNotFound { .. }) => {
             err(StatusCode::NOT_FOUND, "Entry not found").into_response()
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => crate::routes::internal_err("docs", e),
     }
 }
 
@@ -175,7 +175,7 @@ async fn get_diagram(
             "mermaid": opt,
         }))
         .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => crate::routes::internal_err("docs", e),
     }
 }
 
@@ -221,7 +221,7 @@ async fn search(State(state): State<ApiState>, Query(q): Query<SearchQuery>) -> 
             "results": hits,
         }))
         .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => crate::routes::internal_err("docs", e),
     }
 }
 
@@ -238,7 +238,7 @@ async fn completeness(
         Err(atelier_docs::StoreError::AppNotFound(_)) => {
             return err(StatusCode::NOT_FOUND, "App not found").into_response();
         }
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+        Err(e) => return crate::routes::internal_err("docs", e),
     };
     let mut missing_summaries: Vec<String> = Vec::new();
     let mut missing_diagrams: Vec<String> = Vec::new();

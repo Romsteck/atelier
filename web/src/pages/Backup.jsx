@@ -451,7 +451,7 @@ export default function Backup() {
 
   useEffect(() => { reload(); }, [reload]);
 
-  useWebSocket({
+  const { epoch } = useWebSocket({
     'backup:live': (data) => {
       setLive(data);
       // Nouveau run → réinitialise la map d'étapes (ref pour comparer sans re-render).
@@ -490,7 +490,18 @@ export default function Backup() {
         setRunning(true);
       }
     },
+    // Subscriber laggé côté serveur (events `backup:live` perdus) → l'état local peut
+    // être périmé (event terminal raté = bouton bloqué sur « Arrêter »), on re-fetch.
+    'resync': (m) => { if (m?.channel === 'backup:live') reload(); },
   });
+
+  // Réconciliation au reconnect WS : `running` est posé de façon optimiste et ne
+  // retombe que sur l'event `backup:live` terminal — si le WS a coupé pendant un run,
+  // cet event est perdu. `reload()` re-lit le statut serveur (autoritaire) et
+  // repose `running` depuis `status.running`.
+  useEffect(() => {
+    if (epoch > 0) reload();
+  }, [epoch, reload]);
 
   const trigger = async () => {
     setTriggering(true);

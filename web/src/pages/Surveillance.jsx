@@ -227,6 +227,13 @@ export default function Surveillance() {
     },
     // A resolution conversation opened/closed anywhere → recompute the indicators.
     'agent:open-tabs': () => reloadResolving(),
+    // Subscriber laggé côté serveur (events surveillance perdus) → l'état local est
+    // troué, on re-fetch tout (même chemin que le reconnect par epoch ci-dessous).
+    'resync': (m) => {
+      if (typeof m?.channel === 'string' && m.channel.startsWith('surveillance:')) {
+        reload(); hydrateSweep(); reloadResolving();
+      }
+    },
   });
   // Re-sync after a WS reconnect (the broadcast channel doesn't replay history).
   // Inclut `reload()` : un scan démarré pendant que l'onglet était gelé (mobile / mise en

@@ -196,6 +196,33 @@ impl RunsStore {
         .await?;
         Ok(res.rows_affected())
     }
+
+    /// Runtime reconciliation (periodic reaper): mark failed the rows stuck in
+    /// 'running' since before `cutoff` that the service no longer tracks in
+    /// memory (`exclude` = the genuinely in-flight run ids). Complements
+    /// `reconcile_interrupted` (boot-time, blanket): a terminal write lost to a
+    /// Postgres outage is settled online instead of waiting for the next boot.
+    /// The `status = 'running'` guard makes a late terminal-write retry racing
+    /// this UPDATE harmless (whichever lands first, the row leaves 'running').
+    pub async fn fail_stale_running(
+        &self,
+        cutoff: DateTime<Utc>,
+        exclude: &[Uuid],
+    ) -> anyhow::Result<u64> {
+        let res = query(
+            r#"
+            UPDATE surveillance_runs
+               SET status = 'failed', finished_at = now(),
+                   error = 'interrupted'
+             WHERE status = 'running' AND started_at < $1 AND id <> ALL($2)
+            "#,
+        )
+        .bind(cutoff)
+        .bind(exclude)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 fn row_to_run(row: &PgRow) -> anyhow::Result<Run> {

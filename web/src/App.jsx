@@ -5,6 +5,7 @@ import { AuthProvider } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
 import { AppsProvider } from './context/AppsContext';
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import Tasks from './pages/Tasks';
 import TaskDetail from './pages/TaskDetail';
 import Git from './pages/Git';
@@ -37,6 +38,7 @@ function App() {
     <AuthProvider>
       <TaskProvider>
         <AppsProvider>
+          <ErrorBoundary>
           <Layout>
           <Routes>
             {/* Landing = galerie d'apps */}
@@ -65,6 +67,7 @@ function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           </Layout>
+          </ErrorBoundary>
         </AppsProvider>
       </TaskProvider>
     </AuthProvider>

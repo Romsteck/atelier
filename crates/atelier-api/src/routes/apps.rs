@@ -386,6 +386,26 @@ async fn control_app(
         return r;
     }
     info!(slug = %slug, action = %body.action, "AppControl");
+    // Same per-slug lock as build/ship: a restart racing a ship window (or a
+    // second restart whose stop kills the first one's fresh start) must be
+    // refused, not interleaved. try_lock → 409, never queue.
+    let lock = {
+        let mut map = state.build_locks.lock().await;
+        map.entry(slug.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let Ok(_guard) = lock.try_lock() else {
+        warn!(slug = %slug, action = %body.action, "AppControl: another operation in progress");
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "success": false,
+                "error": format!("another build/deploy or lifecycle action is already running for '{slug}' — retry once it finishes")
+            })),
+        )
+            .into_response();
+    };
     let result = match body.action.as_str() {
         "start" => state.supervisor.start(&slug).await,
         "stop" => state.supervisor.stop(&slug).await,

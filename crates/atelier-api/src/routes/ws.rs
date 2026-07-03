@@ -55,6 +55,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "agent:event", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "agent:event", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -70,6 +73,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "agent:open-tabs", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "agent:open-tabs", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -85,6 +91,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "studio:tab", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "studio:tab", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -100,6 +109,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "backup:live", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "backup:live", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -115,6 +127,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "homeroute:routes", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "homeroute:routes", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -130,6 +145,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "surveillance:event", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "surveillance:event", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -145,6 +163,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "surveillance:transcript", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "surveillance:transcript", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -160,6 +181,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "surveillance:sweep", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "surveillance:sweep", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -175,6 +199,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "app:state", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "app:state", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -190,6 +217,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "app:build", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "app:build", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -205,6 +235,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "source:changed", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "source:changed", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -220,6 +253,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "app:log", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "app:log", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -235,6 +271,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "log:entry", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "log:entry", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -253,6 +292,9 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "task:update", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "task:update", n).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -273,4 +315,17 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     }
 
     debug!("ws client disconnected");
+}
+
+/// Tell the client it missed `dropped` events on `channel` so it can refetch a
+/// fresh snapshot. Without this, a dropped terminal event (`turn_done`,
+/// `question`, backup `done`…) leaves the UI stuck on stale incremental state
+/// with no way to notice.
+async fn send_resync(
+    socket: &mut WebSocket,
+    channel: &str,
+    dropped: u64,
+) -> Result<(), axum::Error> {
+    let msg = json!({ "type": "resync", "channel": channel, "dropped": dropped });
+    socket.send(Message::Text(msg.to_string().into())).await
 }

@@ -7,8 +7,13 @@
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
+
+// parking_lot plutôt que std::sync::Mutex : pas d'empoisonnement. Avec std, un
+// panic survenu sous guard empoisonnait RUNS/SID_RUN et TOUS les endpoints
+// agent paniquaient ensuite sur .lock().unwrap() jusqu'au restart du service.
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use axum::{
@@ -61,7 +66,7 @@ static SDK_UPDATING: AtomicBool = AtomicBool::new(false);
 
 /// Écrit une ligne NDJSON sur le stdin du runner d'un run. `false` si inconnu/terminé.
 fn send_input(run_id: &str, line: String) -> bool {
-    RUNS.lock().unwrap().get(run_id).map(|r| r.input_tx.send(line).is_ok()).unwrap_or(false)
+    RUNS.lock().get(run_id).map(|r| r.input_tx.send(line).is_ok()).unwrap_or(false)
 }
 
 fn user_item(text: &str) -> Value {
@@ -138,7 +143,7 @@ fn fold_item(items: &mut Vec<Value>, kind: &str, data: &Value) {
 
 /// Replie l'event dans le buffer du run (si encore présent au registre).
 fn fold_into_run(run_id: &str, kind: &str, data: &Value) {
-    if let Some(r) = RUNS.lock().unwrap().get_mut(run_id) {
+    if let Some(r) = RUNS.lock().get_mut(run_id) {
         // `permission_mode` n'est pas un item de transcript : il met à jour le mode courant
         // (exposé dans le snapshot pour survivre au reload), pas le fil.
         if kind == "permission_mode" {
@@ -529,7 +534,7 @@ async fn query(
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
-    RUNS.lock().unwrap().insert(
+    RUNS.lock().insert(
         run_id.clone(),
         RunState {
             slug: slug.clone(),
@@ -564,7 +569,6 @@ async fn cancel(
     // session) sans retirer l'entrée : run_agent la nettoie une fois le flush terminé.
     let sent = RUNS
         .lock()
-        .unwrap()
         .get_mut(&run_id)
         .and_then(|r| r.cancel_tx.take())
         .map(|tx| tx.send(()).is_ok())
@@ -618,7 +622,7 @@ async fn message(
     let display_text = if body.text.trim().is_empty() && n_images > 0 { "🖼 image".to_string() } else { body.text.clone() };
     if send_input(&run_id, line) {
         // Le runner ne ré-émet pas le tour user → on l'ajoute au buffer (reload).
-        if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+        if let Some(r) = RUNS.lock().get_mut(&run_id) {
             r.items.push(user_item(&display_text));
             r.turn_active = true; // nouveau tour soumis
         }
@@ -671,7 +675,7 @@ async fn answer(
             }
             parts.join("\n")
         };
-        if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+        if let Some(r) = RUNS.lock().get_mut(&run_id) {
             r.turn_active = true; // la réponse relance/poursuit le tour suspendu
             for it in r.items.iter_mut().rev() {
                 if it.get("type").and_then(|x| x.as_str()) == Some("question")
@@ -718,7 +722,7 @@ async fn plan_decision(
     .to_string();
     if send_input(&run_id, line) {
         // Marque le plan_review décidé dans le buffer (reload).
-        if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+        if let Some(r) = RUNS.lock().get_mut(&run_id) {
             r.turn_active = true; // approbation/renvoi poursuit le tour suspendu
             for it in r.items.iter_mut().rev() {
                 if it.get("type").and_then(|x| x.as_str()) == Some("plan_review")
@@ -756,7 +760,7 @@ async fn set_mode(
     }
     let line = json!({ "type": "set_mode", "mode": body.mode }).to_string();
     if send_input(&run_id, line) {
-        if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+        if let Some(r) = RUNS.lock().get_mut(&run_id) {
             r.mode = body.mode.clone();
         }
         info!(run_id = %run_id, "agent mode changed");
@@ -827,8 +831,8 @@ fn pending_dialog(items: &[Value]) -> Value {
 /// liste `live` ET à y injecter les sessions pas encore flushées sur disque.
 fn live_sessions_for(slug: &str) -> Vec<(String, String, String)> {
     let sid_runs: Vec<(String, String)> =
-        SID_RUN.lock().unwrap().iter().map(|(s, r)| (s.clone(), r.clone())).collect();
-    let runs = RUNS.lock().unwrap();
+        SID_RUN.lock().iter().map(|(s, r)| (s.clone(), r.clone())).collect();
+    let runs = RUNS.lock();
     sid_runs
         .into_iter()
         .filter_map(|(sid, rid)| {
@@ -918,9 +922,9 @@ async fn get_conversation(
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
     // Session vivante → fil servi depuis le buffer mémoire (pas encore sur disque).
-    let rid = SID_RUN.lock().unwrap().get(&sid).cloned();
+    let rid = SID_RUN.lock().get(&sid).cloned();
     if let Some(rid) = rid {
-        let snap = RUNS.lock().unwrap().get(&rid).map(|r| (r.items.clone(), r.mode.clone(), r.turn_active));
+        let snap = RUNS.lock().get(&rid).map(|r| (r.items.clone(), r.mode.clone(), r.turn_active));
         if let Some((items, mode, turn_active)) = snap {
             // `running` (tour en vol) + `pending` (dialogue non résolu) permettent au
             // frontend de restaurer l'indicateur de réflexion / la carte d'attente après
@@ -985,9 +989,9 @@ async fn delete_conversation(
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
     // Conversation vivante sur cette session → on la coupe avant de supprimer le fichier.
-    let rid = SID_RUN.lock().unwrap().get(&sid).cloned();
+    let rid = SID_RUN.lock().get(&sid).cloned();
     if let Some(rid) = rid {
-        if let Some(tx) = RUNS.lock().unwrap().get_mut(&rid).and_then(|r| r.cancel_tx.take()) {
+        if let Some(tx) = RUNS.lock().get_mut(&rid).and_then(|r| r.cancel_tx.take()) {
             let _ = tx.send(());
         }
     }
@@ -1208,8 +1212,8 @@ async fn run_agent(
                         if t == "system" && session_id.is_none() {
                             if let Some(sid) = obj.get("session_id").and_then(|x| x.as_str()) {
                                 session_id = Some(sid.to_string());
-                                SID_RUN.lock().unwrap().insert(sid.to_string(), run_id.clone());
-                                if let Some(r) = RUNS.lock().unwrap().get_mut(&run_id) {
+                                SID_RUN.lock().insert(sid.to_string(), run_id.clone());
+                                if let Some(r) = RUNS.lock().get_mut(&run_id) {
                                     r.session_id = Some(sid.to_string());
                                 }
                                 info!(run_id = %run_id, session_id = %sid, "agent session bound");
@@ -1258,18 +1262,39 @@ async fn run_agent(
     };
     let exit_ok = status.map(|s| s.success()).unwrap_or(false);
     // Un exit non-clean HORS arrêt demandé est un vrai échec : on remonte la queue de
-    // stderr du runner (diagnostics, jamais de secret) pour le diagnostic.
+    // stderr du runner (diagnostics, jamais de secret) pour le diagnostic, ET on
+    // publie un event `error` — sans lui, un runner mort en plein tour (OOM, crash
+    // SDK) se manifestait par un tour évaporé sans aucune explication dans l'UI.
     if !exit_ok && !cancelled {
         let tail: String = stderr.chars().rev().take(800).collect::<String>().chars().rev().collect();
         warn!(run_id = %run_id, timed_out, stderr_tail = %tail, "agent runner exited non-clean");
+        let msg = if timed_out {
+            "Le runner de l'agent a dépassé le délai maximum et a été arrêté.".to_string()
+        } else if tail.trim().is_empty() {
+            "Le runner de l'agent s'est arrêté de façon inattendue.".to_string()
+        } else {
+            format!(
+                "Le runner de l'agent s'est arrêté de façon inattendue : {}",
+                tail.trim()
+            )
+        };
+        publish(
+            &events,
+            &run_id,
+            session_id.as_deref(),
+            &slug,
+            &mut seq,
+            "error",
+            json!({"message": msg}),
+        );
     }
     info!(run_id = %run_id, exit_ok, cancelled, timed_out, "agent run done");
     // Conversation plus vivante : on la retire des registres. La session est sur disque
     // (persistée par le SDK de façon incrémentale) → snapshot/list la reliront depuis là.
     if let Some(sid) = &session_id {
-        SID_RUN.lock().unwrap().remove(sid);
+        SID_RUN.lock().remove(sid);
     }
-    RUNS.lock().unwrap().remove(&run_id);
+    RUNS.lock().remove(&run_id);
     publish(
         &events,
         &run_id,
@@ -1290,7 +1315,7 @@ async fn run_agent(
 pub async fn drain_agent_runs(deadline: Duration) {
     // Prendre les cancel_tx HORS du lock (on ne tient pas un std Mutex à travers un await).
     let cancels: Vec<oneshot::Sender<()>> = {
-        let mut runs = RUNS.lock().unwrap();
+        let mut runs = RUNS.lock();
         runs.values_mut().filter_map(|r| r.cancel_tx.take()).collect()
     };
     let n = cancels.len();
@@ -1304,14 +1329,14 @@ pub async fn drain_agent_runs(deadline: Duration) {
     // Chaque run_agent retire son entrée de RUNS en fin de flush → RUNS vide = drain terminé.
     let _ = tokio::time::timeout(deadline, async {
         loop {
-            if RUNS.lock().unwrap().is_empty() {
+            if RUNS.lock().is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await;
-    let remaining = RUNS.lock().unwrap().len();
+    let remaining = RUNS.lock().len();
     info!(remaining, "agent drain complete");
 }
 

@@ -114,8 +114,13 @@ export const queryAppDbRows = (slug, table, body) => api.post(`/apps/${slug}/db/
 // Admin row writes — routed through the dataverse engine (postgres-dataverse).
 // No raw SQL: inserts/updates/deletes go through these typed endpoints.
 export const insertAppDbRow = (slug, table, row) => api.post(`/apps/${slug}/db/tables/${table}/insert`, row);
-export const updateAppDbRow = (slug, table, id, patch) => api.patch(`/apps/${slug}/db/tables/${table}/rows/${id}`, patch);
-export const deleteAppDbRow = (slug, table, id) => api.delete(`/apps/${slug}/db/tables/${table}/rows/${id}`);
+// Verrou optimiste : PATCH/DELETE exigent `If-Match: <version>` (version portée par
+// chaque ligne de la query rows). 428 si absent, 412 si la ligne a changé entre-temps.
+const ifMatch = (version) => (version != null ? { headers: { 'If-Match': String(version) } } : undefined);
+export const updateAppDbRow = (slug, table, id, patch, version) =>
+  api.patch(`/apps/${slug}/db/tables/${table}/rows/${id}`, patch, ifMatch(version));
+export const deleteAppDbRow = (slug, table, id, version) =>
+  api.delete(`/apps/${slug}/db/tables/${table}/rows/${id}`, ifMatch(version));
 export const getAppDbSchema = (slug) => api.get(`/apps/${slug}/db/schema`);
 export const syncAppDbSchema = (slug) => api.post(`/apps/${slug}/db/sync`);
 export const createAppDbTable = (slug, body) => api.post(`/apps/${slug}/db/tables`, body);

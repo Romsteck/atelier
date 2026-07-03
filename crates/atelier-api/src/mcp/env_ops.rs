@@ -295,6 +295,7 @@ impl AppsContext {
         if value.contains('\n') || value.contains('\r') {
             anyhow::bail!("env values cannot contain newlines");
         }
+        let _guard = self.supervisor.registry.lock_slug(slug).await;
         let mut app = self
             .supervisor
             .registry
@@ -317,6 +318,7 @@ impl AppsContext {
         if is_platform_key(key) {
             anyhow::bail!("'{key}' is platform-managed and cannot be removed");
         }
+        let _guard = self.supervisor.registry.lock_slug(slug).await;
         let mut app = self
             .supervisor
             .registry
@@ -399,6 +401,7 @@ impl AppsContext {
         slug: &str,
         dry_run: bool,
     ) -> anyhow::Result<ReconcileReport> {
+        let _guard = self.supervisor.registry.lock_slug(slug).await;
         let mut app = self
             .supervisor
             .registry

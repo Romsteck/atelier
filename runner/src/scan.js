@@ -24,6 +24,17 @@ function emitDoneAndExit() {
   process.stdout.write(JSON.stringify({ t: 'done', exit_ok: true }) + '\n', () => process.exit(0));
 }
 
+// Échec MCP fatal : les findings passent par les tools MCP (findings_upsert), pas par
+// stdout — si le serveur MCP est injoignable/refusé (token invalide → 401), le scan
+// sortirait quand même en exit 0 et le run serait marqué `success_empty` (faux « tout
+// est clean »). L'event `error` porte un `code` machine (`mcp_auth_failed`) que le
+// driver Rust (claude.rs) mappe en run FAILED. Sortie flush-safe, comme fail().
+function failMcp(message) {
+  diag(message);
+  process.stdout.write(JSON.stringify({ t: 'error', code: 'mcp_auth_failed', message }) + '\n', () => process.exit(2));
+  return new Promise(() => {});
+}
+
 await assertOAuthOnly('scan runner', fail);
 
 // Arrêt sur signal : aucune session à flush (persistSession:false), on sort directement.
@@ -136,16 +147,36 @@ const options = {
 // Single-turn : prompt = string simple → la boucle se termine après le message `result`,
 // et le process sort. On émet UN événement par bloc sémantique (pas de deltas token-à-token :
 // includePartialMessages reste à false) → transcript propre, une ligne lisible par item.
+
+// Corrèle tool_use (nom) → tool_result (tool_use_id) pour détecter les échecs d'AUTH des
+// tools MCP en vol (token tourné/invalide après le handshake : le serveur re-vérifie le
+// Bearer à chaque requête HTTP). Signalé une seule fois — le premier échec condamne les
+// appels suivants.
+const toolNames = new Map();
+const MCP_AUTH_RE = /\b401\b|unauthorized|invalid[ _-]?token|authentication/i;
+let mcpAuthReported = false;
+
 try {
   let sessionEmitted = false;
   for await (const msg of query({ prompt, options })) {
     switch (msg.type) {
-      case 'system':
+      case 'system': {
         if (!sessionEmitted) {
           emit({ t: 'system', subtype: msg.subtype, session_id: msg.session_id, model: msg.model });
           sessionEmitted = true;
         }
+        // Serveur MCP non connecté à l'init (token invalide → 401 dès le handshake, le
+        // SDK marque le serveur `failed`) : inutile de dérouler un scan complet qui ne
+        // pourra rien signaler — on avorte immédiatement. La session vient d'être émise
+        // ci-dessus, donc le cleanup post-run côté Rust reste possible.
+        if (msg.subtype === 'init' && Object.keys(mcpServers).length) {
+          const dead = (msg.mcp_servers || []).find((s) => s.status === 'failed' || s.status === 'needs-auth');
+          if (dead) {
+            await failMcp(`MCP auth failed (server '${dead.name}' ${dead.status} at init) — findings not recorded`);
+          }
+        }
         break;
+      }
       case 'assistant':
         for (const b of msg.message?.content || []) {
           if (b.type === 'text' && b.text) emit({ t: 'assistant', text: b.text });
@@ -154,6 +185,7 @@ try {
           // (→ tokens ≈ chars/4 côté front) : le texte ne quitte pas le runner = impossible à fuiter.
           else if (b.type === 'thinking' && b.thinking) emit({ t: 'thinking', chars: b.thinking.length });
           else if (b.type === 'tool_use') {
+            toolNames.set(b.id, b.name);
             // Le scan n'est pas censé appeler ces 2 dialogues (refusés par canUseTool) ;
             // on ne les remonte pas comme outils pour ne pas polluer la console.
             if (b.name === 'AskUserQuestion' || b.name === 'ExitPlanMode') continue;
@@ -165,11 +197,25 @@ try {
       case 'user':
         for (const b of msg.message?.content || []) {
           if (b.type !== 'tool_result') continue;
+          const text = toolResultText(b.content);
+          // Tool MCP en échec d'auth (401/unauthorized/invalid token) : l'agent ne peut
+          // plus écrire de findings mais le process sortirait quand même en exit 0. On
+          // signale l'échec au driver Rust (run FAILED) sans interrompre le tour : le
+          // `result` final arrive et le comptage de tokens reste intact.
+          const toolName = toolNames.get(b.tool_use_id) || '';
+          if (!mcpAuthReported && b.is_error && toolName.startsWith('mcp__') && MCP_AUTH_RE.test(text)) {
+            mcpAuthReported = true;
+            emit({
+              t: 'error',
+              code: 'mcp_auth_failed',
+              message: `MCP auth failed (${toolName}: ${text.slice(0, 160)}) — findings not recorded`,
+            });
+          }
           emit({
             t: 'tool_result',
             tool_use_id: b.tool_use_id,
             is_error: !!b.is_error,
-            text: toolResultText(b.content).slice(0, 4000),
+            text: text.slice(0, 4000),
           });
         }
         break;

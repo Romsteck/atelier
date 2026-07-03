@@ -95,7 +95,7 @@ async fn list_findings_global(
             .into_response(),
         Err(e) => {
             warn!(?e, "list findings failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            crate::routes::internal_err("surveillance", e)
         }
     }
 }
@@ -118,7 +118,7 @@ async fn list_findings_app(
             .into_response(),
         Err(e) => {
             warn!(?e, "list findings app failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            crate::routes::internal_err("surveillance", e)
         }
     }
 }
@@ -136,14 +136,14 @@ async fn surveillance_overview(State(state): State<ApiState>) -> impl IntoRespon
         Ok(rows) => rows,
         Err(e) => {
             warn!(?e, "overview: count_open_grouped failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            return crate::routes::internal_err("surveillance", e);
         }
     };
     let latest = match runs.latest_per_app_kind().await {
         Ok(rows) => rows,
         Err(e) => {
             warn!(?e, "overview: latest_per_app_kind failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            return crate::routes::internal_err("surveillance", e);
         }
     };
 
@@ -287,7 +287,7 @@ async fn start_sweep(State(state): State<ApiState>) -> impl IntoResponse {
         Err(e) if e == "sweep already running" || e == "scan in progress" => {
             (StatusCode::CONFLICT, Json(json!({ "error": e }))).into_response()
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("surveillance", e),
     }
 }
 
@@ -304,7 +304,7 @@ async fn cancel_sweep(State(state): State<ApiState>) -> impl IntoResponse {
 async fn get_sweep_schedule(State(state): State<ApiState>) -> impl IntoResponse {
     match state.surveillance.sweep_schedule_get().await {
         Some(Ok(cfg)) => (StatusCode::OK, Json(json!({ "schedule": cfg }))).into_response(),
-        Some(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Some(Err(e)) => crate::routes::internal_err("surveillance", e),
         None => err503(),
     }
 }
@@ -333,7 +333,7 @@ async fn put_sweep_schedule(
             Json(json!({ "ok": true, "schedule": cfg })),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("surveillance", e),
     }
 }
 
@@ -358,11 +358,11 @@ async fn dismiss_finding(
         Ok(Some(f)) if f.slug == slug => f,
         Ok(Some(_)) => return err(StatusCode::NOT_FOUND, "slug mismatch"),
         Ok(None) => return err(StatusCode::NOT_FOUND, "finding not found"),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return crate::routes::internal_err("surveillance", e),
     };
     match findings.dismiss(id).await {
         Ok(_) => {}
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return crate::routes::internal_err("surveillance", e),
     }
     if let Some(memory) = state.surveillance.memory() {
         let value = json!({
@@ -401,11 +401,11 @@ async fn resolve_finding(
         Ok(Some(f)) if f.slug == slug => f,
         Ok(Some(_)) => return err(StatusCode::NOT_FOUND, "slug mismatch"),
         Ok(None) => return err(StatusCode::NOT_FOUND, "finding not found"),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return crate::routes::internal_err("surveillance", e),
     };
     match findings.resolve(id, body.commit_sha.as_deref()).await {
         Ok(_) => {}
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return crate::routes::internal_err("surveillance", e),
     }
     if let Some(memory) = state.surveillance.memory() {
         let value = json!({
@@ -438,7 +438,7 @@ async fn delete_finding(
         Ok(Some(f)) if f.slug == slug => f,
         Ok(Some(_)) => return err(StatusCode::NOT_FOUND, "slug mismatch"),
         Ok(None) => return err(StatusCode::NOT_FOUND, "finding not found"),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return crate::routes::internal_err("surveillance", e),
     };
     match findings.delete(id, &slug, &item.kind).await {
         Ok(Some(_)) => {
@@ -446,7 +446,7 @@ async fn delete_finding(
             (StatusCode::OK, Json(json!({"ok": true}))).into_response()
         }
         Ok(None) => err(StatusCode::NOT_FOUND, "finding not found"),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => crate::routes::internal_err("surveillance", e),
     }
 }
 
@@ -544,7 +544,11 @@ async fn run_surveillance(
             Json(json!({"ok": true, "run_id": run_id, "slug": slug})),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        // Single-flight par (app, kind) : un scan identique est déjà en vol
+        // (double-clic « Scanner », ou collision avec un run du sweep) → 409,
+        // même mapping que le conflit sweep dans `start_sweep` ci-dessus.
+        Err(e) if e == atelier_watcher::ERR_SCAN_ALREADY_RUNNING => err(StatusCode::CONFLICT, e),
+        Err(e) => crate::routes::internal_err("surveillance", e),
     }
 }
 
@@ -618,6 +622,6 @@ async fn list_runs(
             Json(json!({"runs": items, "total": items.len()})),
         )
             .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => crate::routes::internal_err("surveillance", e),
     }
 }

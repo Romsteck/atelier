@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{Semaphore, broadcast, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::claude::{ClaudeRunner, ClaudeScanConfig};
@@ -27,12 +28,46 @@ use crate::{MAX_OPEN_FINDINGS, SurveillanceEvent, TranscriptLine};
 /// Order in which the sweep launches an app's scans (all three run together).
 const SWEEP_KINDS: [&str; 3] = [SECURITY_KIND, CODE_REVIEW_KIND, BIZ_KIND];
 
-/// Écriture best-effort (statut terminal de run, watermark, mémoire) : l'échec ne
-/// doit pas faire échouer le scan, mais il doit se VOIR — sinon un run peut rester
-/// « running » à jamais sans aucune trace de la cause (Postgres indisponible, etc.).
+/// Erreur typée du single-flight par (app, kind) — comparée telle quelle par le
+/// handler HTTP (`routes/surveillance.rs`) pour mapper en 409, même mécanique
+/// que le conflit sweep ("sweep already running").
+pub const ERR_SCAN_ALREADY_RUNNING: &str = "scan already running for this app/kind";
+
+/// Écriture best-effort (watermark, mémoire) : l'échec ne doit pas faire échouer
+/// le scan, mais il doit se VOIR. Les statuts TERMINAUX de run passent par
+/// `finish_with_retry` ci-dessous, pas par ce helper.
 fn warn_if_err<T, E: std::fmt::Display>(op: &'static str, res: Result<T, E>) {
     if let Err(e) = res {
         warn!(op, error = %e, "best-effort write failed");
+    }
+}
+
+/// Écriture TERMINALE de run (`finish_*`) avec retry borné (2s/5s/10s). WHY :
+/// contrairement aux écritures de progression (best-effort via `warn_if_err`),
+/// une écriture terminale perdue laisse la row `running` à jamais (dashboard
+/// bloqué jusqu'au prochain boot) — typiquement Postgres indisponible à la FIN
+/// d'un long scan. Après épuisement des retries on abandonne en `error!` : le
+/// reaper périodique (`stale_run_reaper`) rattrapera la row.
+async fn finish_with_retry<F, Fut>(op: &'static str, mut write: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    const BACKOFF_SECS: [u64; 3] = [2, 5, 10];
+    let mut attempt = 0;
+    loop {
+        match write().await {
+            Ok(()) => return,
+            Err(e) if attempt < BACKOFF_SECS.len() => {
+                warn!(op, attempt = attempt + 1, error = %e, "terminal run write failed — retrying");
+                tokio::time::sleep(Duration::from_secs(BACKOFF_SECS[attempt])).await;
+                attempt += 1;
+            }
+            Err(e) => {
+                error!(op, error = %e, "terminal run write failed after retries — row left 'running' until reaped");
+                return;
+            }
+        }
     }
 }
 
@@ -169,6 +204,16 @@ struct SweepInner {
     active_runs: Vec<Uuid>,
 }
 
+/// One in-flight scan tracked in `Inner::running`, keyed by (slug, kind).
+/// `run_id` is `None` only during the short window between the single-flight
+/// reservation and the DB row creation (`launch_run`). `cancel` is `take()`n on
+/// cancel, but the entry itself stays until `execute` settles — so a new run of
+/// the same pair cannot start while the killed subprocess winds down.
+struct RunningScan {
+    run_id: Option<Uuid>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
 #[derive(Clone)]
 pub struct SurveillanceService {
     inner: Arc<Inner>,
@@ -200,9 +245,11 @@ struct Inner {
     /// (re)opens the tab mid-run can replay the conversation so far instead of
     /// only seeing new lines. Dropped when the run ends (ephemeral).
     transcripts: Mutex<HashMap<Uuid, Vec<TranscriptLine>>>,
-    /// In-flight runs, keyed by run id, with a oneshot to cancel each. Present
-    /// only while a run executes (inserted by `execute`, removed when it ends).
-    running: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+    /// In-flight scans keyed by (slug, kind) — la clé EST le single-flight par
+    /// couple : check + insertion atomiques sous ce lock dans `launch_run`
+    /// (AVANT la création de la row, sinon fenêtre TOCTOU), retrait par
+    /// `execute` quand le run se termine.
+    running: Mutex<HashMap<(String, String), RunningScan>>,
     enabled: bool,
 }
 
@@ -285,6 +332,11 @@ impl SurveillanceService {
                     Err(e) => warn!(?e, "surveillance: stale-run reconciliation failed"),
                 }
             }
+            // Réconciliation périodique en ligne : un run dont l'écriture terminale
+            // a été perdue (Postgres down à la fin du scan, malgré les retries de
+            // `finish_with_retry`) resterait 'running' jusqu'au prochain boot — le
+            // reaper le rattrape toutes les 10 min.
+            tokio::spawn(svc.clone().stale_run_reaper(cfg.driver.timeout * 2));
             // Automatic sweep scheduler (boucle Tokio, off par défaut — activable
             // via PUT /api/surveillance/sweep/schedule). git_watcher auto-résout
             // les findings depuis les commits `fix(surveillance:N)`.
@@ -596,17 +648,22 @@ impl SurveillanceService {
 
     /// Request cancellation of an in-flight run. Returns true if the run was
     /// found running (its scan subprocess is then killed and the run recorded
-    /// as `cancelled`); false if it already finished or never existed. Removing
-    /// the sender + sending fires the oneshot the run's `exec` is awaiting.
+    /// as `cancelled`); false if it already finished, is already cancelling, or
+    /// never existed. Le sender est `take()`n mais l'entrée (slug, kind) reste
+    /// dans `running` jusqu'à ce que `execute` se termine — le single-flight
+    /// tient donc pendant toute la descente du process annulé.
     pub fn cancel_run(&self, run_id: Uuid) -> bool {
-        let sender = self.inner.running.lock().unwrap().remove(&run_id);
-        match sender {
-            Some(tx) => {
-                let _ = tx.send(());
-                true
+        let mut running = self.inner.running.lock().unwrap();
+        for scan in running.values_mut() {
+            if scan.run_id == Some(run_id) {
+                if let Some(tx) = scan.cancel.take() {
+                    let _ = tx.send(());
+                    return true;
+                }
+                return false;
             }
-            None => false,
         }
+        false
     }
 
     /// Broadcast a live event. No-op if there are no subscribers.
@@ -700,6 +757,8 @@ impl SurveillanceService {
         data_watermark: Option<String>,
     ) -> Result<Uuid, String> {
         // Manual runs respect the gates (force=false) — same behavior as before.
+        // Le single-flight par (slug, kind) est appliqué dans `launch_run`
+        // (Err(ERR_SCAN_ALREADY_RUNNING) → 409 côté HTTP).
         let (run_id, _handle) = self.launch_run(slug, kind, trigger, false, data_watermark).await?;
         Ok(run_id)
     }
@@ -722,14 +781,38 @@ impl SurveillanceService {
         let Some(runs) = self.inner.runs.as_ref() else {
             return Err("surveillance disabled (postgres unreachable)".into());
         };
-        let run_id = runs
-            .start(&slug, kind, trigger, None)
-            .await
-            .map_err(|e| format!("failed to create run: {e}"))?;
+        // Single-flight par (app, kind) : check + réservation ATOMIQUES sous le
+        // même lock (un double-clic « Scanner » lançait deux scans concurrents du
+        // même couple → findings dupliqués, triage incohérent). Réservé AVANT la
+        // création de la row : réserver après aurait laissé une fenêtre TOCTOU où
+        // deux rows 'running' naissent. Couvre aussi une collision manuel/sweep.
+        let key = (slug.clone(), kind.to_string());
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        {
+            let mut running = self.inner.running.lock().unwrap();
+            if running.contains_key(&key) {
+                return Err(ERR_SCAN_ALREADY_RUNNING.into());
+            }
+            running.insert(
+                key.clone(),
+                RunningScan { run_id: None, cancel: Some(cancel_tx) },
+            );
+        }
+        let run_id = match runs.start(&slug, kind, trigger, None).await {
+            Ok(id) => id,
+            Err(e) => {
+                self.inner.running.lock().unwrap().remove(&key);
+                return Err(format!("failed to create run: {e}"));
+            }
+        };
+        if let Some(scan) = self.inner.running.lock().unwrap().get_mut(&key) {
+            scan.run_id = Some(run_id);
+        }
         let svc = self.clone();
         let kind = kind.to_string();
         let handle = tokio::spawn(async move {
-            svc.execute(run_id, slug, kind, force, data_watermark).await
+            svc.execute(run_id, slug, kind, force, data_watermark, cancel_rx)
+                .await
         });
         Ok((run_id, handle))
     }
@@ -741,22 +824,20 @@ impl SurveillanceService {
         kind: String,
         force: bool,
         data_watermark: Option<String>,
+        cancel_rx: oneshot::Receiver<()>,
     ) -> RunOutcome {
-        // Register a cancel channel for the whole run lifetime so a stop request
-        // can kill the scan subprocess. The Sender is held in the registry
-        // until the run ends, so the Receiver only fires on an explicit cancel.
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        self.inner
-            .running
-            .lock()
-            .unwrap()
-            .insert(run_id, cancel_tx);
-
+        // Le slot single-flight (slug, kind) + le canal cancel ont été réservés
+        // par `launch_run` (atomiquement, avant la row) ; cette fonction possède
+        // leur libération une fois le run terminé.
         self.emit("run", &slug, "started");
         let outcome = self
             .execute_inner(run_id, &slug, &kind, force, data_watermark, cancel_rx)
             .await;
-        self.inner.running.lock().unwrap().remove(&run_id);
+        self.inner
+            .running
+            .lock()
+            .unwrap()
+            .remove(&(slug.clone(), kind.clone()));
         // Drop the buffered transcript — the run has settled (panel disappears).
         self.inner.transcripts.lock().unwrap().remove(&run_id);
         // A run almost always touches findings; emit a final event so any open
@@ -792,12 +873,16 @@ impl SurveillanceService {
             None => match app_scan.get(&slug).await {
                 Ok(Some(s)) if !s.is_blank() => s,
                 Ok(_) => {
-                    warn_if_err("finish_skipped", runs.finish_skipped(run_id, "blank (scan non défini)").await);
+                    finish_with_retry("finish_skipped", || {
+                        runs.finish_skipped(run_id, "blank (scan non défini)")
+                    })
+                    .await;
                     info!(slug = %slug, kind, "run skipped (blank scan)");
                     return RunOutcome::Skipped;
                 }
                 Err(e) => {
-                    warn_if_err("finish_failed", runs.finish_failed(run_id, &format!("scan load failed: {e}")).await);
+                    let msg = format!("scan load failed: {e}");
+                    finish_with_retry("finish_failed", || runs.finish_failed(run_id, &msg)).await;
                     warn!(slug = %slug, kind, ?e, "scan load failed");
                     return RunOutcome::Failed;
                 }
@@ -819,7 +904,7 @@ impl SurveillanceService {
         };
         if !force && open_now >= MAX_OPEN_FINDINGS {
             let reason = format!("cap: {open_now} findings open (max {MAX_OPEN_FINDINGS})");
-            warn_if_err("finish_skipped", runs.finish_skipped(run_id, &reason).await);
+            finish_with_retry("finish_skipped", || runs.finish_skipped(run_id, &reason)).await;
             info!(slug = %slug, "run skipped (cap)");
             return RunOutcome::Skipped;
         }
@@ -849,14 +934,20 @@ impl SurveillanceService {
                 } else {
                     match (&last_sha, &head) {
                         (Some(last), Some(h)) if last == h => {
-                            warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_diff (HEAD unchanged)").await);
+                            finish_with_retry("finish_skipped", || {
+                                runs.finish_skipped(run_id, "no_diff (HEAD unchanged)")
+                            })
+                            .await;
                             info!(slug = %slug, "run skipped (no_diff)");
                             return RunOutcome::Skipped;
                         }
                         (Some(last), Some(_)) => {
                             let d = gitutil::diff_since(&src, last).await;
                             if d.is_none() {
-                                warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_diff (empty range)").await);
+                                finish_with_retry("finish_skipped", || {
+                                    runs.finish_skipped(run_id, "no_diff (empty range)")
+                                })
+                                .await;
                                 info!(slug = %slug, "run skipped (no_diff empty)");
                                 return RunOutcome::Skipped;
                             }
@@ -876,7 +967,10 @@ impl SurveillanceService {
                     match &data_watermark {
                         None => None, // caller couldn't compute it → run unconditionally
                         Some(w) if w.is_empty() => {
-                            warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_new_data").await);
+                            finish_with_retry("finish_skipped", || {
+                                runs.finish_skipped(run_id, "no_new_data")
+                            })
+                            .await;
                             info!(slug = %slug, "run skipped (no_new_data)");
                             return RunOutcome::Skipped;
                         }
@@ -888,7 +982,10 @@ impl SurveillanceService {
                                 .and_then(|v| v.into_iter().next())
                                 .and_then(|m| m.value.as_str().map(String::from));
                             if last.as_deref() == Some(w.as_str()) {
-                                warn_if_err("finish_skipped", runs.finish_skipped(run_id, "no_new_data").await);
+                                finish_with_retry("finish_skipped", || {
+                                    runs.finish_skipped(run_id, "no_new_data")
+                                })
+                                .await;
                                 info!(slug = %slug, "run skipped (no_new_data)");
                                 return RunOutcome::Skipped;
                             }
@@ -948,14 +1045,25 @@ impl SurveillanceService {
             .await;
 
         if exec.cancelled {
-            warn_if_err("finish_cancelled", runs.finish_cancelled(run_id).await);
+            finish_with_retry("finish_cancelled", || runs.finish_cancelled(run_id)).await;
             info!(slug = %slug, "scan run cancelled by user");
             return RunOutcome::Cancelled;
         }
         if let Some(err) = exec.spawn_error {
-            warn_if_err("finish_failed", runs.finish_failed(run_id, &err).await);
+            finish_with_retry("finish_failed", || runs.finish_failed(run_id, &err)).await;
             self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, %err, "scan spawn failed");
+            return RunOutcome::Failed;
+        }
+        // Échec MCP fatal signalé par scan.js (auth/connexion) : l'agent écrit ses
+        // findings via les tools MCP — ce run n'a rien pu enregistrer, le marquer
+        // success_empty serait un faux « tout est clean ». FAILED explicite, même
+        // quand le process sort en exit 0. Testé AVANT exit_ok : le message typé
+        // prime sur le stderr brut quand scan.js a avorté (exit 2) sur ce cas.
+        if let Some(mcp_err) = exec.mcp_error.as_deref() {
+            finish_with_retry("finish_failed", || runs.finish_failed(run_id, mcp_err)).await;
+            self.note_failure(&slug, kind, memory).await;
+            error!(slug = %slug, kind, error = %mcp_err, "scan MCP failure — findings not recorded");
             return RunOutcome::Failed;
         }
         if !exec.exit_ok {
@@ -964,7 +1072,7 @@ impl SurveillanceService {
             } else {
                 exec.stderr.clone()
             };
-            warn_if_err("finish_failed", runs.finish_failed(run_id, &msg).await);
+            finish_with_retry("finish_failed", || runs.finish_failed(run_id, &msg)).await;
             self.note_failure(&slug, kind, memory).await;
             warn!(slug = %slug, "scan run failed");
             return RunOutcome::Failed;
@@ -976,8 +1084,7 @@ impl SurveillanceService {
             .await
             .unwrap_or(0);
         let empty = delta == 0;
-        warn_if_err(
-            "finish_success",
+        finish_with_retry("finish_success", || {
             runs.finish_success(
                 run_id,
                 delta as i32,
@@ -986,8 +1093,8 @@ impl SurveillanceService {
                 head.as_deref(),
                 empty,
             )
-            .await,
-        );
+        })
+        .await;
 
         // Record the freshness watermark for the next run's gate: the reviewed
         // git SHA for code-gated scans, the data watermark for data-gated scans.
@@ -1065,6 +1172,37 @@ impl SurveillanceService {
                 count = next,
                 "surveillance: 3+ consecutive failures — check scan agent auth/install"
             );
+        }
+    }
+
+    /// Boucle de réconciliation périodique (10 min) : marque `failed` les rows
+    /// encore `running` plus vieilles que `stale_after` (2× le timeout de scan)
+    /// ET absentes de la map `running` en mémoire — forcément des fantômes
+    /// (écriture terminale perdue pendant une indispo Postgres, malgré les
+    /// retries de `finish_with_retry`). Pendant du `reconcile_interrupted()` de
+    /// boot, mais en ligne : plus besoin d'attendre un restart.
+    async fn stale_run_reaper(self, stale_after: Duration) {
+        let stale = chrono::Duration::from_std(stale_after)
+            .unwrap_or_else(|_| chrono::Duration::seconds(1200));
+        let mut tick = tokio::time::interval(Duration::from_secs(600));
+        loop {
+            tick.tick().await;
+            let Some(runs) = self.inner.runs.as_ref() else {
+                return; // noop mode — jamais spawné dans ce cas, pure ceinture.
+            };
+            let in_flight: Vec<Uuid> = self
+                .inner
+                .running
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|s| s.run_id)
+                .collect();
+            match runs.fail_stale_running(Utc::now() - stale, &in_flight).await {
+                Ok(0) => {}
+                Ok(n) => warn!(count = n, "surveillance: stale 'running' runs reaped (marked failed)"),
+                Err(e) => warn!(?e, "surveillance: stale-run reaper tick failed"),
+            }
         }
     }
 }

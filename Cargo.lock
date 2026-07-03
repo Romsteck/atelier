@@ -124,6 +124,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "libc",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",

@@ -16,9 +16,22 @@ import { Pagination } from '../components/db/Pagination';
 import { RowFormModal } from '../components/db/RowFormModal';
 import { DeleteConfirmModal } from '../components/db/DeleteConfirmModal';
 import { AppPicker } from '../components/db/AppPicker';
-import { Download, Plus, Trash2, RefreshCw, Database } from 'lucide-react';
+import { Download, Plus, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import { useToast, Toast } from '../hooks/useToast';
+import { apiErr } from '../utils/apiErr';
+
+// Mapping filtres UI → filtres structurés de la passerelle (partagé entre le
+// chargement de page et l'export CSV complet).
+function buildApiFilters(filters) {
+  const opMap = { eq: 'eq', neq: 'ne', gt: 'gt', gte: 'gte', lt: 'lt', lte: 'lte', like: 'like', is_null: 'is_null', not_null: 'is_not_null' };
+  return filters.map(f => ({ column: f.column, op: opMap[f.op] || 'eq', value: f.value }));
+}
+
+// Export CSV : pagination serveur + plafond de sécurité (une table de plusieurs
+// millions de lignes ne doit pas geler l'onglet ni assommer la passerelle).
+const EXPORT_PAGE_SIZE = 1000;
+const EXPORT_MAX_ROWS = 50000;
 
 export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -67,6 +80,9 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
   // Tiroir « Tables » (mobile <lg) : la sidebar 224px déborderait à 375px.
   const [tablesOpen, setTablesOpen] = useState(false);
+
+  // Export CSV en cours (fetch paginé de toutes les lignes).
+  const [exporting, setExporting] = useState(false);
 
   const { toast, showToast } = useToast(3000);
 
@@ -168,14 +184,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
       const expand = (schemaData?.relations || []).map(r => r.from_column);
 
       // Build structured filters from UI filters
-      const apiFilters = filters.map(f => {
-        const opMap = { eq: 'eq', neq: 'ne', gt: 'gt', gte: 'gte', lt: 'lt', lte: 'lte', like: 'like', is_null: 'is_null', not_null: 'is_not_null' };
-        return {
-          column: f.column,
-          op: opMap[f.op] || 'eq',
-          value: f.value,
-        };
-      });
+      const apiFilters = buildApiFilters(filters);
 
       // Le endpoint structuré renvoie déjà `total` (count filtré, hors soft-delete) :
       // pas de 2ᵉ requête count séparée — un aller-retour de moins par chargement.
@@ -259,9 +268,19 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     if (row) setEditingRow(row);
   }
 
-  async function handleUpdateRow(id, patch) {
+  async function handleUpdateRow(id, patch, version) {
     if (!selectedAppSlug || !selectedTable || id == null) return;
-    await updateAppDbRow(selectedAppSlug, selectedTable, id, patch);
+    try {
+      await updateAppDbRow(selectedAppSlug, selectedTable, id, patch, version);
+    } catch (e) {
+      // 412 = verrou optimiste : la ligne a bougé depuis son chargement. On recharge
+      // la page (état frais) et on laisse la modale afficher le message.
+      if (e.response?.status === 412) {
+        await loadTableData();
+        throw new Error('Cette ligne a été modifiée entre-temps — recharge et réessaie', { cause: e });
+      }
+      throw e;
+    }
     await loadTableData();
     showToast('Ligne mise à jour');
   }
@@ -277,38 +296,86 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   // ── Delete rows ──
   async function handleDeleteSelected() {
     if (!selectedAppSlug || !selectedTable || !result) return;
-    const ids = Array.from(selectedRows)
-      .map(idx => result.rows[idx]?.id)
-      .filter(v => v != null);
-    for (const id of ids) {
-      await deleteAppDbRow(selectedAppSlug, selectedTable, id);
-    }
+    const targets = Array.from(selectedRows)
+      .map(idx => result.rows[idx])
+      .filter(r => r?.id != null);
+    // allSettled : un échec à mi-parcours ne doit ni bloquer les autres suppressions
+    // ni rester muet — on refresh la grille dans tous les cas, puis on récapitule.
+    const settled = await Promise.allSettled(
+      targets.map(r => deleteAppDbRow(selectedAppSlug, selectedTable, r.id, r.version))
+    );
     setSelectedRows(new Set());
     await loadTableData();
-    showToast(`${ids.length} ligne(s) supprimée(s)`);
+    const failed = settled.filter(s => s.status === 'rejected');
+    const okCount = settled.length - failed.length;
+    if (failed.length > 0) {
+      const conflicts = failed.filter(f => f.reason?.response?.status === 412);
+      const reason = conflicts.length === failed.length
+        ? 'ligne(s) modifiée(s) entre-temps — recharge et réessaie'
+        : apiErr(failed[0].reason);
+      // Affiché par DeleteConfirmModal (qui reste ouverte sur échec).
+      throw new Error(`${okCount} ligne(s) supprimée(s), ${failed.length} échec(s) : ${reason}`);
+    }
+    showToast(`${okCount} ligne(s) supprimée(s)`);
   }
 
-  // ── Export CSV ──
-  function handleExportCSV() {
-    if (!result || result.rows.length === 0) return;
-    const visibleCols = result.columns.filter(c => !c.endsWith('_display'));
-    const headers = visibleCols.join(',');
-    const rows = result.rows.map(row =>
-      visibleCols.map(col => {
-        const val = row[col];
-        if (val == null) return '';
-        const str = String(val);
-        return str.includes(',') || str.includes('"') || str.includes('\n') ? `"${str.replace(/"/g, '""')}"` : str;
-      }).join(',')
-    );
-    const csv = [headers, ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${selectedTable || 'export'}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  // ── Export CSV ── (toutes les lignes filtrées/triées, pas seulement la page courante)
+  async function handleExportCSV() {
+    if (!selectedAppSlug || !selectedTable || !result || exporting) return;
+    setExporting(true);
+    try {
+      const apiFilters = buildApiFilters(filters);
+      const allRows = [];
+      let columns = null;
+      let total = 0;
+      for (let offset = 0; allRows.length < EXPORT_MAX_ROWS; offset += EXPORT_PAGE_SIZE) {
+        const res = await queryAppDbRows(selectedAppSlug, selectedTable, {
+          filters: apiFilters,
+          limit: EXPORT_PAGE_SIZE,
+          offset,
+          order_by: sortColumn || undefined,
+          order_desc: sortDesc,
+        });
+        const data = unwrap(res);
+        const rows = data?.rows || [];
+        if (!columns) { columns = data?.columns || []; total = data?.total || 0; }
+        allRows.push(...rows);
+        if (rows.length < EXPORT_PAGE_SIZE) break;
+      }
+      const truncated = allRows.length > EXPORT_MAX_ROWS || total > EXPORT_MAX_ROWS;
+      if (allRows.length > EXPORT_MAX_ROWS) allRows.length = EXPORT_MAX_ROWS;
+
+      // `_display` = colonnes techniques du rendu Lookup ; `version` (hors schéma)
+      // = verrou optimiste serveur — ni l'un ni l'autre ne sont des données.
+      const schemaCols = new Set((schema?.columns || []).map(c => c.name));
+      const visibleCols = (columns || []).filter(c => !c.endsWith('_display') && !(c === 'version' && !schemaCols.has(c)));
+      const headers = visibleCols.join(',');
+      const rows = allRows.map(row =>
+        visibleCols.map(col => {
+          const val = row[col];
+          if (val == null) return '';
+          const str = String(val);
+          return str.includes(',') || str.includes('"') || str.includes('\n') ? `"${str.replace(/"/g, '""')}"` : str;
+        }).join(',')
+      );
+      const csv = [headers, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${selectedTable || 'export'}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      if (truncated) {
+        showToast(`Export tronqué à ${EXPORT_MAX_ROWS.toLocaleString()} lignes (table plus grande)`, 'error');
+      } else {
+        showToast(`${allRows.length.toLocaleString()} ligne(s) exportée(s)`);
+      }
+    } catch (e) {
+      showToast(`Export CSV a échoué : ${apiErr(e)}`, 'error');
+    } finally {
+      setExporting(false);
+    }
   }
 
   // ── Select table ──
@@ -445,8 +512,15 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}
-                    <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
-                      <Download className="w-3.5 h-3.5" />
+                    <button
+                      onClick={handleExportCSV}
+                      disabled={!result?.rows?.length || exporting}
+                      className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer disabled:opacity-30 flex items-center gap-1"
+                      title="Exporter CSV (toutes les lignes)"
+                    >
+                      {exporting
+                        ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /><span className="text-[11px]">Export…</span></>
+                        : <Download className="w-3.5 h-3.5" />}
                     </button>
                     <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-gray-50 hover:bg-gray-700 rounded-sm border-none bg-transparent cursor-pointer" title="Actualiser">
                       <RefreshCw className="w-3.5 h-3.5" />

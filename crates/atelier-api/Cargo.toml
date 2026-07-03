@@ -31,5 +31,6 @@ atelier-backup  = { workspace = true }
 sqlx-core    = { workspace = true }
 sqlx-postgres = { workspace = true }
 reqwest      = { workspace = true }
+parking_lot  = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

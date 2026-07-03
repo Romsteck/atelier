@@ -46,7 +46,7 @@ async fn status(State(state): State<ApiState>) -> impl IntoResponse {
     }
     match state.backup.status().await {
         Ok(s) => (StatusCode::OK, Json(json!(s))).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("backup", e),
     }
 }
 
@@ -57,7 +57,7 @@ async fn get_target(State(state): State<ApiState>) -> impl IntoResponse {
     }
     match state.backup.target().await {
         Ok(t) => (StatusCode::OK, Json(json!({ "target": t }))).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("backup", e),
     }
 }
 
@@ -121,7 +121,7 @@ async fn reveal_password(State(state): State<ApiState>) -> impl IntoResponse {
     match state.backup.reveal_restic_password().await {
         Ok(Some(pw)) => (StatusCode::OK, Json(json!({"password": pw}))).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "dépôt non encore initialisé (lancez une première sauvegarde)"),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("backup", e),
     }
 }
 
@@ -169,7 +169,7 @@ async fn list_runs(State(state): State<ApiState>, Query(q): Query<RunsQuery>) ->
     let offset = q.offset.unwrap_or(0);
     match state.backup.list_runs(limit, offset).await {
         Ok((runs, total)) => (StatusCode::OK, Json(json!({"runs": runs, "total": total}))).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("backup", e),
     }
 }
 
@@ -182,6 +182,6 @@ async fn get_run(State(state): State<ApiState>, Path(id): Path<uuid::Uuid>) -> i
         // `run` embarque déjà ses snapshots (champ `snapshots`).
         Ok(Some(run)) => (StatusCode::OK, Json(json!({"run": run}))).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "run introuvable"),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => crate::routes::internal_err("backup", e),
     }
 }

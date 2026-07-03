@@ -56,11 +56,7 @@ pub fn router() -> Router<ApiState> {
 }
 
 fn err500(e: impl std::fmt::Display) -> axum::response::Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": format!("{e}")})),
-    )
-        .into_response()
+    crate::routes::internal_err("git", e)
 }
 
 async fn list_repos(State(state): State<ApiState>) -> impl IntoResponse {

@@ -172,23 +172,30 @@ impl AppSupervisor {
 
     /// Start an app: assign port, launch systemd transient unit, attach watcher + health loop.
     pub async fn start(&self, slug: &str) -> Result<()> {
-        let mut app = self
-            .registry
-            .get(slug)
-            .await
-            .ok_or_else(|| anyhow!("app not found: {slug}"))?;
-
-        if app.port == 0 {
-            let port = self
-                .port_registry
-                .assign(slug)
+        // Guarded read-modify-write: the port assignment must not clobber a
+        // concurrent registry mutation (env edit, state change). Dropped
+        // before update_app_state below, which takes the same guard.
+        let app = {
+            let _guard = self.registry.lock_slug(slug).await;
+            let mut app = self
+                .registry
+                .get(slug)
                 .await
-                .with_context(|| format!("assigning port for {slug}"))?;
-            app.port = port;
-            if let Err(e) = self.registry.upsert(app.clone()).await {
-                warn!(app_slug = slug, error = %e, "start: failed to persist assigned port to registry");
+                .ok_or_else(|| anyhow!("app not found: {slug}"))?;
+
+            if app.port == 0 {
+                let port = self
+                    .port_registry
+                    .assign(slug)
+                    .await
+                    .with_context(|| format!("assigning port for {slug}"))?;
+                app.port = port;
+                if let Err(e) = self.registry.upsert(app.clone()).await {
+                    warn!(app_slug = slug, error = %e, "start: failed to persist assigned port to registry");
+                }
             }
-        }
+            app
+        };
 
         let proc_arc = self.get_or_create_process(slug, app.port).await;
         {
@@ -413,6 +420,9 @@ impl AppSupervisor {
     }
 
     async fn update_app_state(&self, slug: &str, state: AppState) {
+        // Guarded read-modify-write: a state flip racing an env edit would
+        // otherwise silently drop one of the two writes (full-blob upsert).
+        let _guard = self.registry.lock_slug(slug).await;
         if let Some(mut app) = self.registry.get(slug).await {
             if app.state != state {
                 app.state = state;

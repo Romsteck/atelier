@@ -124,6 +124,7 @@ impl ClaudeRunner {
                     tokens_out: None,
                     spawn_error: Some(format!("spawn scan runner (sudo node) failed: {e}")),
                     cancelled: false,
+                    mcp_error: None,
                 };
             }
         };
@@ -166,6 +167,7 @@ impl ClaudeRunner {
         let mut tokens_in: Option<i32> = None;
         let mut tokens_out: Option<i32> = None;
         let mut session_id: Option<String> = None;
+        let mut mcp_error: Option<String> = None;
         let mut cancelled = false;
         let mut timed_out = false;
         if let Some(out) = child.stdout.take() {
@@ -196,6 +198,23 @@ impl ClaudeRunner {
                                             };
                                             tokens_in = g("input_tokens");
                                             tokens_out = g("output_tokens");
+                                        }
+                                    }
+                                    // Erreur MCP fatale typée (code `mcp_*`) émise par scan.js :
+                                    // les findings passent par les tools MCP, donc ce run n'a
+                                    // rien pu enregistrer même s'il sort en exit 0 — service.rs
+                                    // mappe ce signal en run FAILED (jamais success_empty).
+                                    Some("error") if mcp_error.is_none() => {
+                                        if v.get("code")
+                                            .and_then(|x| x.as_str())
+                                            .is_some_and(|c| c.starts_with("mcp_"))
+                                        {
+                                            mcp_error = Some(
+                                                v.get("message")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or("MCP auth failed — findings not recorded")
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                     _ => {}
@@ -246,6 +265,9 @@ impl ClaudeRunner {
                 tokens_out: None,
                 spawn_error: None,
                 cancelled: false,
+                // Cause racine plus précise qu'un timeout brut si l'auth MCP était
+                // déjà morte avant que le run ne traîne jusqu'au timeout.
+                mcp_error,
             };
         }
         if cancelled {
@@ -257,6 +279,7 @@ impl ClaudeRunner {
                 tokens_out: None,
                 spawn_error: None,
                 cancelled: true,
+                mcp_error: None,
             };
         }
 
@@ -273,6 +296,7 @@ impl ClaudeRunner {
             tokens_out,
             spawn_error: None,
             cancelled: false,
+            mcp_error,
         }
     }
 

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::warn;
 
 use atelier_common::control_db::sqlx::{PgPool, PgRow, Row, query};
@@ -21,6 +22,10 @@ use crate::types::Application;
 pub struct AppRegistry {
     pool: PgPool,
     apps: Arc<RwLock<Vec<Application>>>,
+    /// Per-slug guards serialising read-modify-write cycles (`get` → mutate →
+    /// `upsert`). `upsert` replaces the whole JSONB blob, so two unguarded
+    /// concurrent writers silently drop each other's changes.
+    mutation_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl AppRegistry {
@@ -31,7 +36,19 @@ impl AppRegistry {
         Ok(Self {
             pool,
             apps: Arc::new(RwLock::new(apps)),
+            mutation_locks: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Take the mutation guard for `slug`. Hold it across any `get` → mutate →
+    /// `upsert` cycle; independent slugs don't contend. Never hold it across a
+    /// call that acquires it itself.
+    pub async fn lock_slug(&self, slug: &str) -> OwnedMutexGuard<()> {
+        let entry = {
+            let mut map = self.mutation_locks.lock().await;
+            map.entry(slug.to_string()).or_default().clone()
+        };
+        entry.lock_owned().await
     }
 
     /// Snapshot all apps (from the in-memory cache).

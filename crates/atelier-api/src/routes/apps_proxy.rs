@@ -32,6 +32,7 @@
 //! - Connexion upstream avec timeout 10s ; durée + raison de fermeture loggés.
 //! - Si upstream tombe : close du browser avec code 1011 (server error).
 
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -56,8 +57,24 @@ use tracing::{info, instrument, warn};
 
 use crate::state::ApiState;
 
-/// 32 MiB cap on HTTP request body. WebSocket frames are unaffected.
-const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// Shared upstream client. `connect_timeout` bounds the dial to a dead/hung
+/// port; there is deliberately NO total timeout — request and response bodies
+/// are streamed and may legitimately outlive any fixed budget (SSE, large
+/// downloads/uploads). Hang detection is per-request via
+/// [`UPSTREAM_HEADERS_TIMEOUT`] around `send()`.
+static PROXY_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .expect("reqwest client builder with static config cannot fail")
+});
+
+/// Budget for the upstream to produce response *headers*. `send()` resolves as
+/// soon as headers arrive, so streaming responses (SSE, downloads) are not
+/// bounded by this; only an app that accepted the connection but never answers
+/// trips it. Generous because a streamed request body (upload) must also fit
+/// inside this window.
+const UPSTREAM_HEADERS_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Upstream WS connect timeout. Beyond this, we close the browser with 1011.
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -193,17 +210,18 @@ async fn http_forward(slug: String, upstream_path: String, port: u16, req: Reque
         }
     };
 
-    let body = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
-        Ok(b) => b,
-        Err(err) => {
-            warn!(slug = %slug, error = %err, "apps_proxy: body too large or read error");
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
-        }
-    };
+    // Stream the request body through instead of buffering it (no size cap,
+    // no RAM proportional to the upload). reqwest sends it chunked, so the
+    // original content-length must NOT be forwarded alongside (protocol
+    // mismatch); hyper recomputes framing itself.
+    let body = reqwest::Body::wrap_stream(req.into_body().into_data_stream());
 
     let mut fwd_headers = reqwest::header::HeaderMap::new();
     for (name, value) in original_headers.iter() {
-        if is_hop_by_hop(name.as_str()) || name.as_str().eq_ignore_ascii_case("host") {
+        if is_hop_by_hop(name.as_str())
+            || name.as_str().eq_ignore_ascii_case("host")
+            || name.as_str().eq_ignore_ascii_case("content-length")
+        {
             continue;
         }
         if let (Ok(n), Ok(v)) = (
@@ -215,18 +233,25 @@ async fn http_forward(slug: String, upstream_path: String, port: u16, req: Reque
     }
     inject_forwarded_headers_reqwest(&mut fwd_headers, &slug, &original_headers);
 
-    let client = Client::new();
-    let upstream_resp = match client
+    let send = PROXY_CLIENT
         .request(upstream_method, &upstream_url)
         .headers(fwd_headers)
         .body(body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(err) => {
+        .send();
+    let upstream_resp = match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, send).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(err)) => {
             warn!(slug = %slug, port, url = %upstream_url, error = %err, "apps_proxy: upstream connection failed");
             return (StatusCode::BAD_GATEWAY, format!("upstream {slug} unreachable"))
+                .into_response();
+        }
+        Err(_) => {
+            warn!(
+                slug = %slug, port, url = %upstream_url,
+                timeout_secs = UPSTREAM_HEADERS_TIMEOUT.as_secs(),
+                "apps_proxy: upstream did not answer in time"
+            );
+            return (StatusCode::GATEWAY_TIMEOUT, format!("upstream {slug} timed out"))
                 .into_response();
         }
     };
@@ -246,15 +271,10 @@ async fn http_forward(slug: String, upstream_path: String, port: u16, req: Reque
         }
     }
 
-    let body_bytes = match upstream_resp.bytes().await {
-        Ok(b) => b,
-        Err(err) => {
-            warn!(slug = %slug, error = %err, "apps_proxy: upstream body read failed");
-            return (StatusCode::BAD_GATEWAY, "upstream body error").into_response();
-        }
-    };
-
-    let mut response = Response::new(Body::from(body_bytes));
+    // Stream the response body: bytes reach the browser as the app emits them
+    // (SSE/chunked work, no full-buffer in RAM). A mid-stream upstream error
+    // surfaces as a truncated body — the status line is already gone.
+    let mut response = Response::new(Body::from_stream(upstream_resp.bytes_stream()));
     *response.status_mut() = status;
     *response.headers_mut() = resp_headers;
     response

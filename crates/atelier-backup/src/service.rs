@@ -330,6 +330,57 @@ impl BackupService {
         });
     }
 
+    /// Mirror disque du mot de passe restic, à côté des secrets dataverse
+    /// (root-only). Volontairement HORS des sources sauvegardées : le chiffrer
+    /// avec lui-même n'aurait aucun intérêt — c'est une copie de survie locale.
+    fn password_mirror_path(&self) -> Option<std::path::PathBuf> {
+        self.inner
+            .sources
+            .dv_secrets
+            .parent()
+            .map(|p| p.join("restic-repo-password"))
+    }
+
+    async fn read_password_mirror(&self) -> Option<String> {
+        let path = self.password_mirror_path()?;
+        let content = tokio::fs::read_to_string(&path).await.ok()?;
+        let pw = content.trim().to_string();
+        if pw.is_empty() {
+            return None;
+        }
+        warn!(path = %path.display(), "restic password absent de Postgres — repris depuis le mirror disque");
+        Some(pw)
+    }
+
+    async fn write_password_mirror(&self, pw: &str) {
+        if pw.is_empty() {
+            return;
+        }
+        let Some(path) = self.password_mirror_path() else {
+            return;
+        };
+        if matches!(tokio::fs::read_to_string(&path).await, Ok(existing) if existing.trim() == pw) {
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        match tokio::fs::write(&path, format!("{pw}\n")).await {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                }
+                info!(path = %path.display(), "mirror disque du mot de passe restic écrit");
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "échec écriture du mirror du mot de passe restic");
+            }
+        }
+    }
+
     async fn execute(&self, run_id: Uuid, mut cancel_rx: oneshot::Receiver<()>) {
         self.execute_inner(run_id, &mut cancel_rx).await;
         self.inner.running.lock().unwrap().take();
@@ -347,12 +398,22 @@ impl BackupService {
             _ => return self.fail(run_id, "cible non configurée").await,
         };
         if t.restic_password.as_deref().unwrap_or("").is_empty() {
-            let pw = gen_password();
+            // Ligne PG vide mais mirror disque présent = base atelier_meta
+            // perdue/recréée : reprendre le mot de passe existant, sinon un
+            // nouveau rendrait tous les snapshots existants illisibles.
+            let pw = match self.read_password_mirror().await {
+                Some(pw) => pw,
+                None => gen_password(),
+            };
             if let Err(e) = store.set_restic_password(&pw).await {
                 return self.fail(run_id, &format!("init mot de passe dépôt: {e}")).await;
             }
             t.restic_password = Some(pw);
         }
+        // Mirror disque (0600) : la base qu'on sauvegarde est précisément ce que
+        // ce mot de passe protège — sans copie hors-Postgres, perdre atelier_meta
+        // rendait le dépôt restic définitivement illisible (dépendance circulaire).
+        self.write_password_mirror(t.restic_password.as_deref().unwrap_or("")).await;
         let env = match rclone::build_env(&self.inner.rclone_bin, &t).await {
             Ok(e) => e,
             Err(e) => return self.fail(run_id, &e).await,

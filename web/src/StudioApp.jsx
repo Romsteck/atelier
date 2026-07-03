@@ -3,6 +3,7 @@ import { Routes, Route, useParams } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
 import StudioShell from './pages/StudioShell';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // Slug absent (`/studio/` nu) → rien à éditer : on quitte vers la homepage. WHY
 // `window.location` et pas <Navigate to="/"> : avec `basename="/studio"`, un
@@ -24,10 +25,12 @@ export default function StudioApp() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <Routes>
-          <Route path="/:slug" element={<StudioRoute />} />
-          <Route path="*" element={<RedirectHome />} />
-        </Routes>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/:slug" element={<StudioRoute />} />
+            <Route path="*" element={<RedirectHome />} />
+          </Routes>
+        </ErrorBoundary>
       </AuthProvider>
     </ThemeProvider>
   );

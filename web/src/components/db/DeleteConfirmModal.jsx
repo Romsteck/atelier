@@ -3,13 +3,18 @@ import { X, Trash2, Loader2 } from 'lucide-react';
 
 export function DeleteConfirmModal({ count, onConfirm, onClose }) {
   const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState(null);
 
   const handleDelete = async () => {
     setDeleting(true);
+    setError(null);
     try {
       await onConfirm();
       onClose();
-    } catch {
+    } catch (err) {
+      // Échec (total ou partiel) : la modale reste ouverte et affiche le récapitulatif
+      // remonté par onConfirm (la grille a déjà été rafraîchie côté DbExplorer).
+      setError(err?.response?.data?.error || err?.message || 'Erreur');
       setDeleting(false);
     }
   };
@@ -25,10 +30,11 @@ export function DeleteConfirmModal({ count, onConfirm, onClose }) {
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-4">
+        <div className="p-4 space-y-3">
           <p className="text-sm text-gray-300">
             Supprimer {count} ligne{count > 1 ? 's' : ''} selectionnee{count > 1 ? 's' : ''} ? Cette action est irreversible.
           </p>
+          {error && <div className="text-xs text-red-400 bg-red-500/10 rounded-sm px-3 py-2">{error}</div>}
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
           <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-gray-50">

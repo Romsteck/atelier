@@ -51,6 +51,12 @@ pub struct ScanExec {
     /// True when the run was killed via its cancel oneshot (user-requested
     /// stop). Distinct from `failed` so the caller records a clean `cancelled`.
     pub cancelled: bool,
+    /// Fatal MCP failure reported by scan.js (`{t:"error", code:"mcp_*"}`), with
+    /// its message. Findings flow through the MCP tools, so when MCP auth dies
+    /// the process can still exit 0 with zero findings — without this signal the
+    /// run would be recorded `success_empty` (silent false negative). When set,
+    /// the run must finish `failed`, never `empty`.
+    pub mcp_error: Option<String>,
 }
 
 /// Build the full prompt for a run from the app's scan definition (its

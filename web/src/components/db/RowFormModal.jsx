@@ -63,7 +63,8 @@ export function RowFormModal({ mode = 'add', columns, relations, appSlug, initia
       });
       if (isEdit) {
         const id = initialRow?.id;
-        await onSubmit(id, row);
+        // `version` = verrou optimiste serveur (header If-Match côté client API).
+        await onSubmit(id, row, initialRow?.version);
       } else {
         await onSubmit(row);
       }
@@ -139,6 +140,21 @@ export function RowFormModal({ mode = 'add', columns, relations, appSlug, initia
   );
 }
 
+// Valeur MultiChoice stockée : normalement un tableau JSON, mais une donnée
+// legacy/saisie à la main (`"a,b"`) ou corrompue ne doit pas faire crasher le
+// rendu (un JSON.parse qui throw blanchirait tout le Studio) → fallback tolérant.
+function parseMultiChoice(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return value.split(',').map(s => s.trim()).filter(Boolean);
+  }
+}
+
 function FieldInput({ col, cfg, relation, appSlug, value, onChange }) {
   const baseClass = "w-full bg-gray-900 text-gray-50 text-sm rounded-sm px-3 py-1.5 border border-gray-600 outline-hidden focus:border-blue-500";
 
@@ -169,7 +185,7 @@ function FieldInput({ col, cfg, relation, appSlug, value, onChange }) {
 
   // MultiChoice → checkboxes
   if (col.field_type === 'MultiChoice' && col.choices?.length > 0) {
-    const selected = value ? (typeof value === 'string' ? JSON.parse(value || '[]') : value) : [];
+    const selected = parseMultiChoice(value);
     return (
       <div className="flex flex-wrap gap-2">
         {col.choices.map(c => (
