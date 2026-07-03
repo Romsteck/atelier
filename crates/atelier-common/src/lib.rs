@@ -5,6 +5,7 @@ pub mod homeroute;
 pub mod identity;
 pub mod issue_store;
 pub mod logging;
+pub mod notification_store;
 pub mod task_store;
 pub mod tasks;
 

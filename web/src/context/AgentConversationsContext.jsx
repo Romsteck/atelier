@@ -1,6 +1,6 @@
 import { createContext, useContext, useReducer, useRef, useEffect, useState, useCallback } from 'react';
 import useWebSocket from '../hooks/useWebSocket';
-import { showAgentNotification, updateBadge } from '../lib/agentNotify';
+import { showAgentNotification, setBadgeSlice } from '../lib/notify';
 import { appendEvent } from '../lib/agentEvents';
 import { buildSettings, resolveModelId } from '../lib/agentModels';
 import { setOpenResolveScans } from '../lib/resolveConvos';
@@ -683,9 +683,10 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     for (const k of [...prevRunning.current.keys()]) if (!st.convos[k]) prevRunning.current.delete(k);
   }, [state, slug, convName]);
 
-  // Pastille PWA = nombre de non-lus ; effacée au démontage du workspace.
-  useEffect(() => { updateBadge(unread.size); }, [unread]);
-  useEffect(() => () => updateBadge(0), []);
+  // Pastille PWA = tranche « agent » du badge agrégé (les notifications
+  // plateforme posent leur propre tranche) ; effacée au démontage du workspace.
+  useEffect(() => { setBadgeSlice('agent', unread.size); }, [unread]);
+  useEffect(() => () => setBadgeSlice('agent', 0), []);
 
   // Efface le « non lu » de la conversation active dès qu'elle est visible (ouverture
   // d'onglet OU retour au premier plan sur l'onglet déjà actif).

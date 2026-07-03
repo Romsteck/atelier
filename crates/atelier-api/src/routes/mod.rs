@@ -40,6 +40,7 @@ pub mod hooks;
 pub mod issues;
 pub mod logs;
 pub mod mcp;
+pub mod notifications;
 pub mod source;
 pub mod surveillance;
 pub mod tasks;

@@ -469,7 +469,8 @@ struct ShipBody {
 
 /// `POST /api/apps/{slug}/ship`
 ///
-/// Thin HTTP wrapper around the MCP `app.ship` op. Stops the supervised
+/// Thin HTTP wrapper around `AppsContext::ship` (aussi exposé comme tool MCP
+/// `ship` en scope projet — même lock, même canal build). Stops the supervised
 /// process and restarts it. Build artefacts are expected to already be in
 /// `/var/lib/atelier/apps/<slug>/src/`. If `ATELIER_BUILD_HOST` is set, an
 /// optional SSH+rsync step pulls pre-built artefacts from that host first.

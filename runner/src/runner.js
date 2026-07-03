@@ -319,11 +319,14 @@ liveMode = isPlan ? 'plan' : 'bypass';
 // (Write/Edit/Bash…) ; les tools MCP arrivent dans canUseTool même en Plan (vérifié), donc
 // sans cette liste le blanket-allow exécuterait `mcp__studio__exec` (root) en lecture seule.
 // Allowlist par suffixe (nom sans préfixe mcp__<server>__) : lectures uniquement.
+// Exceptions assumées : `notify_user` (communication vers l'utilisateur, écrit dans la
+// méta-DB seulement — jamais dans l'app) et `env_list` (lecture, secrets masqués serveur).
 const MCP_READONLY = new Set([
   'findings_list', 'memory_get', 'runs_list', 'pm_query', 'status', 'logs',
   'db_tables', 'db_schema', 'db_query', 'db_overview', 'db_count_rows', 'db_get_schema',
   'docs_overview', 'docs_list_entries', 'docs_get', 'docs_search', 'docs_completeness',
   'docs_diagram_get', 'git_log', 'git_branches', 'scan_get',
+  'notify_user', 'env_list',
 ]);
 
 async function canUseTool(toolName, input, opts) {

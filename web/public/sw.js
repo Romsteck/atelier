@@ -65,17 +65,22 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Clic sur une notification « réponse de l'agent prête » → focus l'onglet Studio de
-// l'app concernée s'il est ouvert, sinon en ouvre un (onglet Code = AgentWorkspace).
+// Clic sur une notification → focus l'onglet correspondant s'il est ouvert, sinon
+// en ouvre un. Deux familles de payload :
+//  - agent (« réponse prête ») : `data.slug` → Studio de l'app (chemin historique) ;
+//  - plateforme (notify_user / journal) : `data.target` explicite — `/studio/<slug>`
+//    ou `/?notif=1` (homepage, tiroir notifications ouvert par NotificationsContext).
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const data = event.notification.data || {};
-  const slug = data.slug;
-  const target = slug ? `/studio/${slug}?tab=code` : '/';
+  const target = data.target || (data.slug ? `/studio/${data.slug}?tab=code` : '/');
+  // Path de matching : un onglet déjà ouvert sur ce préfixe est focusé plutôt
+  // que d'ouvrir un doublon (les query params du target ne matchent pas l'URL).
+  const matchPath = target.startsWith('/studio/') ? target.split('?')[0] : null;
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      const hit = slug ? all.find((c) => c.url.includes(`/studio/${slug}`)) : all[0];
+      const hit = matchPath ? all.find((c) => c.url.includes(matchPath)) : all[0];
       if (hit) {
         await hit.focus();
         return;

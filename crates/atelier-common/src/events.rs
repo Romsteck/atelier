@@ -48,6 +48,10 @@ pub struct EventBus {
     /// Homeroute reverse-proxy route change (assign/remove/toggle/settings →
     /// websocket) so the Settings page reloads its app-routes view live.
     pub homeroute_routes: broadcast::Sender<HomerouteRoutesEvent>,
+    /// Platform notifications (notification store → websocket). Publié par le
+    /// NotificationStore UNIQUEMENT après persistance ; le front décide du
+    /// rendu (drawer, badge, notif système PWA pour kind=notice).
+    pub notify: broadcast::Sender<NotifyEvent>,
 }
 
 impl EventBus {
@@ -73,6 +77,7 @@ impl EventBus {
             agent_open_tabs: broadcast::channel(64).0,
             studio_tab: broadcast::channel(64).0,
             homeroute_routes: broadcast::channel(16).0,
+            notify: broadcast::channel(128).0,
         }
     }
 }
@@ -389,6 +394,54 @@ pub struct StudioTabEvent {
 pub struct HomerouteRoutesEvent {
     pub slug: String,
     pub action: String,
+}
+
+/// Une notification plateforme (persistée dans `platform_notifications`,
+/// publiée APRÈS insert réussi — jamais d'event fantôme). `action` porte la
+/// nature de l'event pour la cohérence multi-onglets : `created` transporte la
+/// notification complète ; `read`/`deleted` ne portent que l'`id` ; `read_all`
+/// rien. `kind=action` = journal auto des mutations MCP d'un agent projet ;
+/// `kind=notice` = notification explicite (notify_user, système).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifyEvent {
+    /// "created" | "read" | "read_all" | "deleted"
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ts: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub level: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<String>,
+}
+
+impl NotifyEvent {
+    /// Event de mutation (read/read_all/deleted) — seul l'id compte.
+    pub fn mutation(action: &str, id: Option<&str>) -> Self {
+        Self {
+            action: action.into(),
+            id: id.map(String::from),
+            ts: String::new(),
+            slug: None,
+            source: String::new(),
+            kind: String::new(),
+            level: String::new(),
+            title: None,
+            body: None,
+            read_at: None,
+        }
+    }
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

@@ -262,3 +262,14 @@ export const commitSource = (slug, message) =>
   api.post(`/apps/${slug}/source/git/commit`, { message });
 export const pushSource = (slug) =>
   api.post(`/apps/${slug}/source/git/push`, {}, { timeout: 60000 });
+
+// ========== Notifications plateforme (cloche + tiroir, canal agent → utilisateur) ==========
+// Live via WS `notify:event` (created + mutations read/read_all/deleted).
+export const getNotifications = (params = {}) =>
+  api.get('/notifications', { params });
+export const markNotificationRead = (id) =>
+  api.post(`/notifications/${id}/read`);
+export const markAllNotificationsRead = () =>
+  api.post('/notifications/read-all');
+export const deleteNotification = (id) =>
+  api.delete(`/notifications/${id}`);

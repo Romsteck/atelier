@@ -4,7 +4,7 @@ import {
   notificationsSupported,
   notificationPermission,
   requestNotificationPermission,
-} from '../lib/agentNotify';
+} from '../lib/notify';
 
 // Opt-in (geste utilisateur requis) aux notifications « réponse de l'agent prête ».
 // La permission est par-origine : l'accorder ici vaut pour la homepage ET le Studio.

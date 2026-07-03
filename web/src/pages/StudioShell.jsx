@@ -10,6 +10,8 @@ import EnvTab from '../components/EnvTab';
 import BuildBadge from '../components/BuildBadge';
 import ThemeToggle from '../components/ThemeToggle';
 import NotificationsToggle from '../components/NotificationsToggle';
+import NotificationBell from '../components/notifications/NotificationBell';
+import NotificationDrawer from '../components/notifications/NotificationDrawer';
 import {
   Code2, BookOpen, Database, ScrollText, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Play, Square, Trash2, RefreshCw,
@@ -470,6 +472,10 @@ export default function StudioShell({ slug }) {
         </div>
       </div>
       <div className="flex items-center gap-1 shrink-0">
+        <div className="relative">
+          <NotificationBell />
+          <NotificationDrawer contextSlug={slug} />
+        </div>
         <NotificationsToggle compact />
         <ThemeToggle />
       </div>

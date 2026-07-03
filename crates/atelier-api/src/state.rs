@@ -9,6 +9,7 @@ use atelier_apps::context::ContextGenerator;
 use atelier_common::agent_ui_state::OpenTabsStore;
 use atelier_common::events::EventBus;
 use atelier_common::issue_store::PlatformIssueStore;
+use atelier_common::notification_store::NotificationStore;
 use atelier_common::task_store::TaskStore;
 
 #[derive(Clone)]
@@ -39,6 +40,13 @@ pub struct ApiState {
     /// `/api/issues*` (triage dev). No-op/vide quand Postgres est down.
     pub issues: PlatformIssueStore,
 
+    /// Notifications plateforme (canal agent → utilisateur) : tool MCP
+    /// `notify_user` + journal automatique des actions des agents, dans
+    /// `atelier_meta.platform_notifications`. Le store publie lui-même sur le
+    /// canal `notify` de l'EventBus (relayé en WS `notify:event`). No-op/vide
+    /// quand Postgres est down.
+    pub notifications: NotificationStore,
+
     // Dataverse
     pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
 
@@ -50,7 +58,7 @@ pub struct ApiState {
     pub context_generator: Arc<ContextGenerator>,
 
     /// Per-slug build/ship locks, created once at boot and shared by the HTTP
-    /// `ship` route and the MCP `app.build`/`app.ship` handlers. Without a
+    /// `ship` route and the MCP `app.build`/`ship` tool handlers. Without a
     /// shared map each request rebuilds an empty one and the BUILD_BUSY guard
     /// never fires.
     pub build_locks:
@@ -94,6 +102,7 @@ impl ApiState {
         task_store: Arc<TaskStore>,
         open_tabs: OpenTabsStore,
         issues: PlatformIssueStore,
+        notifications: NotificationStore,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
         events: Arc<EventBus>,
@@ -116,6 +125,7 @@ impl ApiState {
             task_store,
             open_tabs,
             issues,
+            notifications,
             dv,
             events,
             app_registry,

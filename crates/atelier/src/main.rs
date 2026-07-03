@@ -100,6 +100,15 @@ async fn main() -> Result<()> {
     // pas des apps → rien ne doit subsister au niveau projet). Idempotent.
     let issues = atelier_common::issue_store::PlatformIssueStore::new(meta_pool.clone());
     issues.backfill_from_files(&apps_src_root).await;
+    // EventBus créé AVANT les stores : le NotificationStore embarque le sender
+    // du canal `notify` (insert + publish indissociables).
+    let events = Arc::new(atelier_common::events::EventBus::new());
+    // Notifications plateforme (notify_user + journal d'actions des agents).
+    let notifications = atelier_common::notification_store::NotificationStore::new(
+        meta_pool.clone(),
+        events.notify.clone(),
+    );
+    notifications.prune_old_actions().await;
     let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
     // Apps supervisor wiring. The registries (apps + ports) live in the shared
@@ -115,7 +124,6 @@ async fn main() -> Result<()> {
     if let Err(err) = backfill_control_plane(&registry_pool, &apps_data_dir, &apps_state_dir).await {
         warn!(?err, "control-plane backfill skipped/failed");
     }
-    let events = Arc::new(atelier_common::events::EventBus::new());
     let app_registry = atelier_apps::AppRegistry::new(registry_pool.clone())
         .await
         .expect("Failed to load app registry from Postgres");
@@ -182,6 +190,7 @@ async fn main() -> Result<()> {
         task_store,
         open_tabs,
         issues,
+        notifications,
         apps_src_root,
         apps_runtime_root,
         events,
@@ -222,6 +231,15 @@ async fn main() -> Result<()> {
         let ctx = atelier_api::mcp::apps_ops::AppsContext::from_api_state(&state);
         let reports = ctx.reconcile_all_env(!apply).await;
         info!(apply, apps = reports.len(), "boot env reconcile sweep complete");
+
+        // Boot context regen : le contexte généré (rules/skills/.mcp.json) suit
+        // le BINAIRE — un deploy Atelier qui change les renderers se propage aux
+        // workspaces dès le restart, sans attendre un AppUpdate ni un
+        // `studio.refresh_all` manuel. Idempotent (write_if_changed) ; CLAUDE.md
+        // agent-owned intouché (write_if_missing) ; purge aussi les artefacts
+        // obsolètes (scripts de skills retirés, rules legacy).
+        let (ok, total) = ctx.regenerate_all_contexts().await;
+        info!(ok, total, "boot context regen complete");
     }
 
     let web_dist_opt = if web_dist.is_dir() { Some(web_dist) } else { None };

@@ -4,6 +4,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
 import { AppsProvider } from './context/AppsContext';
+import { NotificationsProvider } from './context/NotificationsContext';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import Tasks from './pages/Tasks';
@@ -38,6 +39,7 @@ function App() {
     <AuthProvider>
       <TaskProvider>
         <AppsProvider>
+          <NotificationsProvider>
           <ErrorBoundary>
           <Layout>
           <Routes>
@@ -68,6 +70,7 @@ function App() {
           </Routes>
           </Layout>
           </ErrorBoundary>
+          </NotificationsProvider>
         </AppsProvider>
       </TaskProvider>
     </AuthProvider>

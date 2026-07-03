@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Routes, Route, useParams } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
+import { NotificationsProvider } from './context/NotificationsContext';
 import StudioShell from './pages/StudioShell';
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -25,12 +26,14 @@ export default function StudioApp() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <ErrorBoundary>
-          <Routes>
-            <Route path="/:slug" element={<StudioRoute />} />
-            <Route path="*" element={<RedirectHome />} />
-          </Routes>
-        </ErrorBoundary>
+        <NotificationsProvider>
+          <ErrorBoundary>
+            <Routes>
+              <Route path="/:slug" element={<StudioRoute />} />
+              <Route path="*" element={<RedirectHome />} />
+            </Routes>
+          </ErrorBoundary>
+        </NotificationsProvider>
       </AuthProvider>
     </ThemeProvider>
   );

@@ -113,6 +113,36 @@ CREATE INDEX IF NOT EXISTS platform_issues_status_idx ON platform_issues (status
 CREATE INDEX IF NOT EXISTS platform_issues_slug_idx   ON platform_issues (slug);
 
 -- ---------------------------------------------------------------------------
+-- platform_notifications — notifications & journal d'actions plateforme (canal
+-- agent → utilisateur). Alimentée par le tool MCP `notify_user` (kind=notice),
+-- le journal AUTOMATIQUE des mutations MCP des agents projet (kind=action,
+-- inséré par handle_tools_call) et la plateforme elle-même (source=system).
+--   source  = agent | scan | system | user   (émetteur)
+--   kind    = notice (mérite l'attention de Romain — badge/notif PWA)
+--           | action (journal auto — né lu : read_at = created_at)
+--   level   = info | warn | error
+--   slug    = app émettrice (NULL = plateforme ; pas de FK, même raison que
+--             platform_issues — le hook AppDelete purge explicitement)
+--   read_at = NULL tant que non lue
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS platform_notifications (
+    id          TEXT         PRIMARY KEY,
+    slug        TEXT,
+    source      TEXT         NOT NULL DEFAULT 'system',
+    kind        TEXT         NOT NULL DEFAULT 'notice',
+    level       TEXT         NOT NULL DEFAULT 'info',
+    title       TEXT         NOT NULL,
+    body        TEXT,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    read_at     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS platform_notifications_unread_idx
+    ON platform_notifications (created_at DESC) WHERE read_at IS NULL;
+CREATE INDEX IF NOT EXISTS platform_notifications_slug_idx
+    ON platform_notifications (slug);
+
+-- ---------------------------------------------------------------------------
 -- ---------------------------------------------------------------------------
 -- homeroute_settings — singleton de configuration de la liaison vers le reverse
 -- proxy Homeroute (hr-api). Atelier appelle l'API EXISTANTE de Homeroute

@@ -108,6 +108,9 @@ pub struct AppsContext {
     /// Remontées plateforme (`atelier_meta.platform_issues`) — purgées au delete
     /// d'app pour ne pas laisser de remontées orphelines dans le triage dev.
     pub issues: atelier_common::issue_store::PlatformIssueStore,
+    /// Notifications plateforme (`atelier_meta.platform_notifications`) —
+    /// purgées au delete d'app, même raison que `issues`.
+    pub notifications: atelier_common::notification_store::NotificationStore,
 }
 
 impl AppsContext {
@@ -130,6 +133,7 @@ impl AppsContext {
             build_locks: state.build_locks.clone(),
             app_build_tx: state.events.app_build.clone(),
             issues: state.issues.clone(),
+            notifications: state.notifications.clone(),
         }
     }
 
@@ -515,6 +519,7 @@ impl AppsContext {
         // keep_data : ce sont des frictions PLATEFORME, pas de la donnée d'app ;
         // une app supprimée n'a plus de chat qui les contextualise.
         self.issues.delete_by_slug(&slug).await;
+        self.notifications.delete_by_slug(&slug).await;
         if !keep_data {
             // De-provision the dataverse database (base app_{slug} + rôle +
             // entrée secrets + pool évincé). Sans ça, chaque delete laissait
@@ -776,6 +781,28 @@ impl AppsContext {
         }
         info!(slug = %slug, "AppRegenerateContext ok");
         IpcResponse::ok_data(serde_json::json!({ "ok": true }))
+    }
+
+    /// Régénère le contexte de TOUTES les apps + le root (une seule fois, pas
+    /// N× comme quand on boucle sur `regenerate_context`). `db_tables`
+    /// best-effort par app ; un échec par app est warn-only, la passe continue.
+    /// Appelée au boot (le contexte généré suit le BINAIRE : un deploy qui
+    /// change les renderers doit se propager sans attendre un AppUpdate) et par
+    /// le tool MCP `studio.refresh_all`. Idempotent (`write_if_changed`).
+    pub async fn regenerate_all_contexts(&self) -> (u32, usize) {
+        let all = self.supervisor.registry.list().await;
+        let mut ok = 0u32;
+        for app in &all {
+            let db_tables = self.dv_list_tables_opt(&app.slug, app.has_db).await;
+            match self.context_generator.generate_for_app(app, &all, db_tables) {
+                Ok(()) => ok += 1,
+                Err(e) => warn!(slug = %app.slug, error = %e, "context regen failed"),
+            }
+        }
+        if let Err(e) = self.context_generator.generate_root(&all) {
+            warn!(error = %e, "root context regen failed");
+        }
+        (ok, all.len())
     }
 
     // ── App DB ─────────────────────────────────────────────────

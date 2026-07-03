@@ -19,7 +19,9 @@
 //!   - `src/.claude/rules/workflow.md`         — workflow dev
 //!   - `src/.claude/rules/docs.md`             — usage obligatoire de `docs.*`
 //!   - `src/.claude/rules/claude-md-upkeep.md` — règle de maintenance de CLAUDE.md
-//!   - `src/.claude/skills/0-build/{SKILL.md,build.sh}`
+//!   - `src/.claude/rules/report-issues.md`    — quand/comment remonter une friction plateforme
+//!   - `src/.claude/skills/0-build/{SKILL.md,build.sh}` — seul script bash restant (stream cargo/pnpm)
+//!   - `src/.claude/skills/{0-deploy,0-report-issue}/SKILL.md` — pointent vers les tools MCP `ship`/`issue_report` (scripts curl supprimés 2026-07-03)
 //!   - `src/.claude/skills/{0-status,0-logs,0-db-info,0-surveillance}/SKILL.md`
 //!
 //! Fichiers workspace-root (pour le Studio global `studio.mynetwk.biz`,
@@ -179,20 +181,23 @@ impl ContextGenerator {
         log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
         log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
 
+        // 0-deploy et 0-report-issue sont passés aux tools MCP `ship` et
+        // `issue_report` (2026-07-03) : SKILL.md seul, plus de script curl.
+        // WHY : le path MCP profite du journal d'actions + du plan-gate, et
+        // supprime les dépendances shell (jq). Les scripts résiduels des
+        // workspaces existants sont purgés ici (ils ne passent pas par
+        // OBSOLETE_RULE_FILES, qui ne couvre que rules/*.md).
         let app_deploy_dir = src_skills_dir.join("0-deploy");
         fs::create_dir_all(&app_deploy_dir)?;
         apply_rules_dir_perms(&app_deploy_dir);
         log_write(&app.slug, &app_deploy_dir.join("SKILL.md"), &render_app_deploy_skill(app))?;
-        log_write(&app.slug, &app_deploy_dir.join("deploy.sh"), &render_app_deploy_script(app))?;
+        remove_if_exists(&app_deploy_dir.join("deploy.sh"), &app.slug);
 
-        // Skill `0-report-issue` : paire SKILL.md + script (comme 0-build/0-deploy)
-        // car render_extra_skills n'émet que SKILL.md. Le script curle l'endpoint
-        // Atelier qui écrit CLAUDE_ISSUES.json (l'agent ne mute jamais le JSON).
         let app_report_dir = src_skills_dir.join("0-report-issue");
         fs::create_dir_all(&app_report_dir)?;
         apply_rules_dir_perms(&app_report_dir);
         log_write(&app.slug, &app_report_dir.join("SKILL.md"), &render_report_issue_skill(app))?;
-        log_write(&app.slug, &app_report_dir.join("report-issue.sh"), &render_report_issue_script(app))?;
+        remove_if_exists(&app_report_dir.join("report-issue.sh"), &app.slug);
 
         let produced: std::collections::HashSet<&'static str> = render_extra_skills(app)
             .iter()
@@ -255,18 +260,10 @@ impl ContextGenerator {
         Ok(())
     }
 
-    /// Refresh per-app context for every app + workspace-root context.
-    pub fn refresh_all(&self, all_apps: &[Application]) -> anyhow::Result<()> {
-        for app in all_apps {
-            if let Err(e) = self.generate_for_app(app, all_apps, None) {
-                warn!(slug = %app.slug, error = %e, "failed to generate app context");
-            }
-        }
-        if let Err(e) = self.generate_root(all_apps) {
-            warn!(error = %e, "failed to generate root context");
-        }
-        Ok(())
-    }
+    // NB : le refresh « toutes les apps + root » vit dans
+    // `AppsContext::regenerate_all_contexts` (atelier-api), qui sait résoudre
+    // les `db_tables` par app — un helper ici ne le pourrait pas (perte de la
+    // section DB d'app-info.md, bug de l'ancien `refresh_all` supprimé).
 
     // ── Renderers ──────────────────────────────────────────────────────
 
@@ -351,6 +348,13 @@ impl ContextGenerator {
              (`docs.update`, `docs.delete`, `docs.diagram_set`) require \
              confirmation.\n\
              \n\
+             ## Pattes plateforme (scope per-app)\n\
+             Dans un workspace d'app, l'agent dispose aussi de : `ship` (livraison \
+             prod), `env_list`/`env_set`/`env_delete` (variables d'env), \
+             `notify_user` (notifier l'utilisateur — les actions plateforme sont \
+             déjà journalisées automatiquement, ne pas notifier pour ça) et \
+             `issue_report` (remonter une friction plateforme).\n\
+             \n\
              ## Rules\n\
              - **Always read the app's docs (`docs.overview`) BEFORE exploring code or \
              making changes.**\n\
@@ -416,9 +420,10 @@ impl ContextGenerator {
              (vérifié end-to-end sur {url}), applique **systématiquement** et **dans \
              cet ordre** :\n\
              1. **Livre en prod, sans demander** : `0-build` (compile en place) puis, \
-             s'il passe, `0-deploy` (stop + restart). La livraison est **libre** — tu \
-             ne demandes PAS l'autorisation de déployer, comme un `make deploy-app`. \
-             Vérifie ensuite `app.status` (`running`) et {url}.\n\
+             s'il passe, le tool MCP `ship` (stop + restart — la skill `0-deploy` \
+             documente le détail). La livraison est **libre** — tu ne demandes PAS \
+             l'autorisation de déployer, comme un `make deploy-app`. Vérifie ensuite \
+             `app.status` (`running`) et {url}.\n\
              2. **PROPOSE ensuite le commit** : le commit reste **décidé par \
              l'utilisateur**. Ne commit/push jamais en silence ni du travail à moitié \
              fait. S'il accepte, dans `{src_dir}` via Bash : `git add -A && git commit \
@@ -454,9 +459,19 @@ impl ContextGenerator {
              quand `has_db` — la passerelle dataverse `HR_DV_BASE_URL` / `HR_DV_TOKEN` \
              / `HR_APP_UUID`, plus `ATELIER_INGEST_URL` / `ATELIER_LOGS_TOKEN` (logs). \
              **Pas de `DATABASE_URL`** : l'accès DB est gateway-only depuis 2026-05-30.\n\
-             - **Variables applicatives** : config + secrets gérés via l'onglet \
-             *Variables* du Studio (ou l'API `/api/apps/{slug}/env` / MCP `app.update`). \
-             Un `scope` `build` les expose aussi au build (`VITE_*` / `NEXT_PUBLIC_*`).\n\
+             - **Variables applicatives** : config + secrets gérés via les tools MCP \
+             `env_list` / `env_set` / `env_delete` (ou l'onglet *Variables* du Studio). \
+             Un `scope` `build` les expose aussi au build (`VITE_*` / `NEXT_PUBLIC_*`). \
+             Restart requis pour qu'une modif soit vue par le process.\n\
+             \n\
+             ## Notifications & journal\n\
+             - Toutes tes **actions plateforme** via MCP (restart, ship, env, schéma, \
+             scan) sont **journalisées automatiquement** côté Atelier — tu n'as RIEN à \
+             faire, l'utilisateur les voit dans sa cloche de notifications.\n\
+             - `notify_user(title, body?, level?)` est réservé à ce qui mérite \
+             **l'attention de Romain** : décision à prendre, anomalie détectée, \
+             résultat inattendu d'une tâche longue. JAMAIS pour dire « j'ai redémarré \
+             l'app » (le journal le dit déjà).\n\
              \n\
              ## Database\n\
              - Use the MCP `db.*` / `dv_*` tools or the REST gateway \
@@ -533,6 +548,18 @@ fn render_mcp_tools_md(app: &Application) -> String {
          \n\
          ## Build\n\
          Pour builder cette app, utilise la skill **0-build** (lazy-loaded). Elle compile **en local sur Medion** (toolchain locale) via Bash et notifie le badge de build du Studio.\n\
+         \n\
+         ## Plateforme (tes « pattes » vers Atelier et l'utilisateur)\n\
+         - `ship` — livraison prod : stop + restart pour reprendre les artefacts compilés par 0-build (aucune compilation). `BUILD_BUSY` = un build/ship est en cours, ne PAS retry.\n\
+         - `notify_user` — notifie Romain (cloche + appareils). Réservé à ce qui mérite VRAIMENT son attention (décision, anomalie, résultat inattendu). Tes actions plateforme (restart, ship, env, schéma) sont déjà **journalisées automatiquement** — ne notifie pas pour ça.\n\
+         - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier). Voir `.claude/rules/report-issues.md`.\n\
+         \n\
+         ## Environment (`env_*`)\n\
+         Le `.env` est un **artefact généré** — ne JAMAIS l'éditer à la main. Une variable modifiée n'est vue par le process qu'au prochain restart.\n\
+         - `env_list` — toutes les variables (tier plateforme calculé + tier user) ; les valeurs secrètes sont TOUJOURS masquées ici\n\
+         - `env_set(key, value, secret?, scope?)` — crée/remplace une variable user puis régénère le `.env`. `scope: runtime|build|both` (build = exposée à la commande de build, canal `VITE_*`/`NEXT_PUBLIC_*`). Clés plateforme (PORT, HR_DV_*, ATELIER_*) refusées.\n\
+         - `env_delete(key)` — supprime une variable user\n\
+         - `app.update env_vars` est **deprecated** (merge legacy) — utilise `env_set`.\n\
          \n\
 ",
         name = app.name,
@@ -778,7 +805,7 @@ __BUILD_COMMAND__
 ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
 emit "{\"status\":\"finished\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"message\":\"build OK (local)\"}"
 echo "=== Build OK ($ELAPSED_MS ms) ==="
-echo "En fin de feature validée, livre en prod : bash .claude/skills/0-deploy/deploy.sh"
+echo "En fin de feature validée, livre en prod via le tool MCP ship (cf. skill 0-deploy)"
 "#;
     template
         .replace("__SLUG__", &app.slug)
@@ -786,64 +813,37 @@ echo "En fin de feature validée, livre en prod : bash .claude/skills/0-deploy/d
 }
 
 /// Skill `0-deploy` : pousse les artefacts pre-buildés vers Medion + restart.
-fn render_app_deploy_script(app: &Application) -> String {
-    let template = r#"#!/usr/bin/env bash
-# Deploy de l'app `__SLUG__` : recharge le process supervisé (stop+restart) pour
-# reprendre l'artefact compilé en place par 0-build. Local sur Medion (pas de copie
-# distante sauf si ATELIER_BUILD_HOST est défini).
-# Pré-requis : avoir lancé `bash .claude/skills/0-build/build.sh` au préalable.
-# Géré par Atelier — ne pas éditer.
-set -euo pipefail
-API_BASE="${API_BASE:-http://127.0.0.1:4100}"
-TIMEOUT_SECS="${1:-900}"
-curl -sS --max-time "$TIMEOUT_SECS" -X POST \
-  "$API_BASE/api/apps/__SLUG__/ship" \
-  -H 'content-type: application/json' \
-  -d "{\"timeout_secs\":${TIMEOUT_SECS}}"
-"#;
-    template.replace("__SLUG__", &app.slug)
-}
-
 fn render_app_deploy_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: 0-deploy\n\
-         description: Livre en prod l'app `{slug}` (stop + restart pour reprendre l'artefact buildé). Utilise cette skill EN FIN DE FEATURE VALIDÉE (livraison systématique, sans demander l'autorisation), et aussi quand l'utilisateur demande de déployer/livrer/ship. Toujours APRÈS un `0-build` réussi.\n\
-         allowed-tools: Bash(bash .claude/skills/0-deploy/deploy.sh*)\n\
+         description: Livre en prod l'app `{slug}` via le tool MCP `ship` (stop + restart pour reprendre l'artefact buildé). Utilise cette skill EN FIN DE FEATURE VALIDÉE (livraison systématique, sans demander l'autorisation), et aussi quand l'utilisateur demande de déployer/livrer/ship. Toujours APRÈS un `0-build` réussi.\n\
          ---\n\
          \n\
          # Deploy de l'app `{slug}`\n\
          \n\
-         Cette skill **recharge** le process supervisé (stop → restart) pour qu'il reprenne les artefacts déjà compilés en place par `0-build`. **Pas de compile, pas de copie distante** : tout est local sur Medion (un rsync depuis un build host n'a lieu que si `ATELIER_BUILD_HOST` est défini, ce qui n'est pas le cas par défaut).\n\
+         Appelle le tool MCP **`ship`** (serveur `studio`). Il **recharge** le process supervisé (stop → restart) pour qu'il reprenne les artefacts déjà compilés en place par `0-build`. **Pas de compile, pas de copie distante** : tout est local sur Medion (un rsync depuis un build host n'a lieu que si `ATELIER_BUILD_HOST` est défini, ce qui n'est pas le cas par défaut). La livraison est journalisée automatiquement côté Atelier.\n\
          \n\
          ## Pré-requis\n\
          \n\
-         - L'agent DOIT avoir lancé `bash .claude/skills/0-build/build.sh` avec succès dans cette session ou une précédente.\n\
+         - Avoir lancé `bash .claude/skills/0-build/build.sh` avec succès dans cette session ou une précédente.\n\
          - Les artefacts (`build_artefact` de l'app) doivent exister sous `src/`.\n\
          \n\
-         ## Commande\n\
+         ## Appel\n\
          \n\
-         ```bash\n\
-         bash .claude/skills/0-deploy/deploy.sh\n\
-         ```\n\
-         \n\
-         Timeout optionnel en secondes (défaut 900) :\n\
-         \n\
-         ```bash\n\
-         bash .claude/skills/0-deploy/deploy.sh 1200\n\
-         ```\n\
+         Tool MCP `ship` — sans argument (timeout optionnel `timeout_secs`, défaut 900, clampé 60..=7200).\n\
          \n\
          ## Retour\n\
          \n\
-         JSON `{{ ok, stages, summary, duration_ms }}`. Étapes émises au badge Studio : `stop` → `restart` (un `rsync-back` ne s'intercale que si un build host distant est configuré).\n\
+         JSON `{{ ok, stages, summary, duration_ms }}`. Étapes émises au badge Studio : `stop` → `restart` (un `rsync-back` ne s'intercale que si un build host distant est configuré). Une erreur du pipeline est renvoyée comme erreur du tool (l'app peut être down → `app.status`/`app.logs`).\n\
          \n\
          ## Workflow type\n\
          \n\
          1. `bash .claude/skills/0-build/build.sh`  (build local sur Medion, voir output cargo)\n\
-         2. `bash .claude/skills/0-deploy/deploy.sh`  (stop + restart sur Medion)\n\
-         3. Vérifier dans le panel Studio que l'app est `running`.\n\
+         2. Tool MCP `ship`  (stop + restart sur Medion)\n\
+         3. Vérifier `app.status` = `running`.\n\
          \n\
-         ## Erreur HTTP 409 — BUILD_BUSY\n\
+         ## Erreur BUILD_BUSY\n\
          \n\
          Un autre build/ship pour `{slug}` est déjà en cours. NE PAS RETRY automatiquement — informer l'utilisateur et attendre.\n",
         slug = app.slug,
@@ -899,11 +899,7 @@ fn render_app_build_skill(app: &Application) -> String {
          Cette skill compile l'app **directement** sur Medion (où vivent sources et toolchain). \
          L'output (cargo, pnpm, etc.) est visible en live dans ton terminal. Le Studio est notifié en parallèle via `/api/apps/{slug}/build-event` pour afficher l'état dans le panel per-app.\n\
          \n\
-         **Important** : ce build compile **en place** mais ne RECHARGE PAS le process en cours (qui tourne encore sur l'ancien artefact). Pour reprendre le nouvel artefact en prod (stop + restart), enchaîne ensuite avec :\n\
-         \n\
-         ```bash\n\
-         bash .claude/skills/0-deploy/deploy.sh\n\
-         ```\n\
+         **Important** : ce build compile **en place** mais ne RECHARGE PAS le process en cours (qui tourne encore sur l'ancien artefact). Pour reprendre le nouvel artefact en prod (stop + restart), enchaîne ensuite avec le tool MCP **`ship`** (cf. skill `0-deploy`).\n\
          \n\
          ## Commande\n\
          \n\
@@ -925,7 +921,7 @@ fn render_app_build_skill(app: &Application) -> String {
          \n\
          1. `bash .claude/skills/0-build/build.sh`  (compile en place, voir l'output cargo/pnpm)\n\
          2. Itérer si besoin (fix erreurs, re-build)\n\
-         3. `bash .claude/skills/0-deploy/deploy.sh`  (stop + restart pour reprendre l'artefact)\n\
+         3. Tool MCP `ship`  (stop + restart pour reprendre l'artefact — cf. skill `0-deploy`)\n\
          \n\
          ## Interdits\n\
          \n\
@@ -1406,7 +1402,7 @@ fn render_report_issues_rule_md(app: &Application) -> String {
          \n\
          ## COMMENT remonter\n\
          \n\
-         1. Invoque la skill **`0-report-issue`** (elle appelle un endpoint Atelier qui enregistre la remontée côté plateforme).\n\
+         1. Appelle le tool MCP **`issue_report(title, area?, severity?, context?, tried?)`** (la skill `0-report-issue` documente les champs) : Atelier enregistre la remontée côté plateforme.\n\
          2. **Ne stocke rien toi-même** (pas de fichier dans ton dépôt) : Atelier est l'unique writer, il estampe id + horodatage + statut côté serveur, dans son control-plane centralisé.\n\
          3. **Dis-le à l'utilisateur** en une phrase (« j'ai remonté un souci plateforme : … ») — pas de remontée silencieuse.\n\
          \n\
@@ -1420,35 +1416,25 @@ fn render_report_issues_rule_md(app: &Application) -> String {
     )
 }
 
-/// Skill `0-report-issue` (SKILL.md). Le script associé est rendu par
-/// `render_report_issue_script`.
+/// Skill `0-report-issue` (SKILL.md seul — le tool MCP `issue_report` a
+/// remplacé l'ancien script curl+jq).
 fn render_report_issue_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: 0-report-issue\n\
          description: Remonte un souci PLATEFORME (Atelier) rencontré en travaillant sur l'app {slug} — tool MCP, doc, build/deploy, dataverse, agent. Utilise cette skill QUAND tu butes sur une friction qui ne relève PAS du code de {slug} mais de la plateforme. NE concerne PAS les bugs internes de l'app.\n\
-         allowed-tools: Bash(bash .claude/skills/0-report-issue/report-issue.sh*)\n\
          ---\n\
          \n\
          # Remonter un souci plateforme — `{slug}`\n\
          \n\
-         Envoie une remontée à Atelier : la skill appelle `POST /api/apps/{slug}/issues` et **Atelier** l'enregistre dans son control-plane (centralisé, **hors de ton dépôt**). Tu ne stockes rien toi-même. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
+         Appelle le tool MCP **`issue_report`** (serveur `studio`) : Atelier enregistre la remontée dans son control-plane (centralisé, **hors de ton dépôt**). Tu ne stockes rien toi-même. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
          \n\
-         ## Commande\n\
+         ## Champs\n\
          \n\
-         ```bash\n\
-         bash .claude/skills/0-report-issue/report-issue.sh \\\n\
-           --title \"docs_search renvoie 500 sur requête vide\" \\\n\
-           --area mcp \\\n\
-           --severity medium \\\n\
-           --context \"Appelé docs_search(query='') → HTTP 500.\" \\\n\
-           --tried \"query non-vide → OK ; contournement en place.\"\n\
-         ```\n\
-         \n\
-         - `--title` (**requis**) : court et actionnable.\n\
-         - `--area` : `mcp|docs|build|deploy|dataverse|agent|studio-ui|platform|other` (défaut `other`).\n\
-         - `--severity` : `low|medium|high` (défaut `medium`).\n\
-         - `--context` / `--tried` : optionnels mais utiles (symptôme exact + contournement).\n\
+         - `title` (**requis**) : court et actionnable. Ex. « docs_search renvoie 500 sur requête vide ».\n\
+         - `area` : `mcp|docs|build|deploy|dataverse|agent|studio-ui|platform|other` (défaut `other`).\n\
+         - `severity` : `low|medium|high` (défaut `medium`).\n\
+         - `context` / `tried` : optionnels mais utiles (symptôme exact + contournement en place).\n\
          \n\
          ## Retour\n\
          \n\
@@ -1460,52 +1446,6 @@ fn render_report_issue_skill(app: &Application) -> String {
          - Ne remonte pas un bug interne de l'app ici (corrige-le ou note-le dans `CLAUDE.md`).\n",
         slug = app.slug,
     )
-}
-
-/// Script `report-issue.sh` : parse des flags, construit le payload via `jq`
-/// (échappement sûr), curle l'endpoint Atelier. `jq` est disponible sur Medion.
-fn render_report_issue_script(app: &Application) -> String {
-    let template = r#"#!/usr/bin/env bash
-# Remonte un souci PLATEFORME de l'app `__SLUG__` vers Atelier.
-# Appelle POST /api/apps/__SLUG__/issues ; Atelier centralise la remontée (control-plane, hors dépôt).
-# Géré par Atelier — ne pas éditer (régénéré à chaque AppUpdate).
-set -euo pipefail
-API_BASE="${API_BASE:-http://127.0.0.1:4100}"
-SLUG="__SLUG__"
-
-TITLE="" AREA="other" SEVERITY="medium" CONTEXT="" TRIED=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --title)    TITLE="${2:-}";    shift ;;
-    --area)     AREA="${2:-}";     shift ;;
-    --severity) SEVERITY="${2:-}"; shift ;;
-    --context)  CONTEXT="${2:-}";  shift ;;
-    --tried)    TRIED="${2:-}";    shift ;;
-    *) echo "argument inconnu: $1" >&2; exit 2 ;;
-  esac
-  shift || true
-done
-
-if [ -z "$TITLE" ]; then
-  echo "Usage: report-issue.sh --title <t> [--area <a>] [--severity low|medium|high] [--context <c>] [--tried <t>]" >&2
-  exit 2
-fi
-if ! command -v jq >/dev/null 2>&1; then
-  echo "jq introuvable — requis pour construire le payload JSON en toute sécurité." >&2
-  exit 3
-fi
-
-BODY="$(jq -n \
-  --arg title "$TITLE" --arg area "$AREA" --arg severity "$SEVERITY" \
-  --arg context "$CONTEXT" --arg tried "$TRIED" \
-  '{title:$title, area:$area, severity:$severity, context:$context, tried:$tried}')"
-
-curl -sS --max-time 10 -X POST "$API_BASE/api/apps/$SLUG/issues" \
-  -H 'content-type: application/json' \
-  -d "$BODY"
-echo
-"#;
-    template.replace("__SLUG__", &app.slug)
 }
 
 fn log_write(slug: &str, path: &Path, content: &str) -> io::Result<()> {

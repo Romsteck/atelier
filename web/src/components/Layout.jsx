@@ -4,6 +4,8 @@ import { Menu } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
 import TaskBell from "./tasks/TaskBell";
 import TaskDropdown from "./tasks/TaskDropdown";
+import NotificationBell from "./notifications/NotificationBell";
+import NotificationDrawer from "./notifications/NotificationDrawer";
 import { PageHeaderSlotProvider, usePageHeaderSlotRegister } from "../context/PageHeaderSlot";
 
 // Layout de la HOMEPAGE (panneau de contrôle). Le Studio per-app n'est plus monté
@@ -45,6 +47,10 @@ function LayoutInner({ children }) {
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <ThemeToggle />
+            <div className="relative">
+              <NotificationBell />
+              <NotificationDrawer />
+            </div>
             <div className="relative">
               <TaskBell />
               <TaskDropdown />

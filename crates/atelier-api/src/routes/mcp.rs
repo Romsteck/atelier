@@ -82,6 +82,11 @@ pub struct McpState {
     pub docs_dir: PathBuf,
     /// Surveillance IA service — exposes findings_* / memory_* / runs_* tools.
     pub surveillance: atelier_watcher::SurveillanceService,
+    /// Notifications plateforme — tools `notify_user` (kind=notice) + journal
+    /// automatique des actions des agents (kind=action, cf. `journal_agent_action`).
+    pub notifications: atelier_common::notification_store::NotificationStore,
+    /// Remontées plateforme — tool `issue_report` (même store que POST /issues).
+    pub issues: atelier_common::issue_store::PlatformIssueStore,
 }
 
 impl McpState {
@@ -106,6 +111,8 @@ impl McpState {
             docs_index: state.docs_index.clone(),
             docs_dir: state.docs_dir.clone(),
             surveillance: state.surveillance.clone(),
+            notifications: state.notifications.clone(),
+            issues: state.issues.clone(),
         })
     }
 }
@@ -265,7 +272,12 @@ fn tool_definitions_surveillance() -> Value {
         { "name": "memory_get", "description": "Read an app's surveillance memory.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" } }, "required": ["slug"] } },
         { "name": "memory_remember", "description": "Store a surveillance memory entry for an app (upsert by kind+key).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "kind": { "type": "string" }, "key": { "type": "string" }, "value": {} }, "required": ["slug", "kind", "key", "value"] } },
         { "name": "runs_list", "description": "List recent surveillance runs for an app.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } } },
-        { "name": "pm_query", "description": "Read-only SELECT against an app's database for surveillance forensics (post-mortem). JOINs/aggregates/temporal windows allowed; the `_dv_audit` table holds row mutation history (before/after/diff) for corroborating data freezes and score changes. SELECT-only — any mutation is rejected. Rows returned as JSON.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "sql": { "type": "string", "description": "A single SELECT (or read-only WITH) statement." }, "limit": { "type": "integer", "minimum": 1, "maximum": 5000 } }, "required": ["slug", "sql"] } }
+        { "name": "pm_query", "description": "Read-only SELECT against an app's database for surveillance forensics (post-mortem). JOINs/aggregates/temporal windows allowed; the `_dv_audit` table holds row mutation history (before/after/diff) for corroborating data freezes and score changes. SELECT-only — any mutation is rejected. Rows returned as JSON.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "sql": { "type": "string", "description": "A single SELECT (or read-only WITH) statement." }, "limit": { "type": "integer", "minimum": 1, "maximum": 5000 } }, "required": ["slug", "sql"] } },
+        // Pattes « parler » du scan-agent (écritures méta-DB uniquement, comme
+        // findings_upsert — d'où leur présence dans la whitelist read-only).
+        // Pas d'injection de slug en scope surveillance → slug explicite.
+        { "name": "notify_user", "description": "Notify the user (Atelier bell + device notification). Reserve for what truly deserves his attention (e.g. a critical finding needing an immediate decision). Findings already surface in the Surveillance tab — do NOT notify for routine findings.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string", "description": "App slug the notification concerns (omit for platform-wide)" }, "title": { "type": "string" }, "body": { "type": "string" }, "level": { "type": "string", "enum": ["info", "warn", "error"], "default": "info" } }, "required": ["title"] } },
+        { "name": "issue_report", "description": "Report a PLATFORM friction encountered during the scan (MCP tool failing/missing, misleading platform doc/prompt, gateway misbehaving). NOT for app findings (use findings_upsert).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "title": { "type": "string" }, "area": { "type": "string", "enum": ["mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other"], "default": "other" }, "severity": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }, "context": { "type": "string" }, "tried": { "type": "string" } }, "required": ["slug", "title"] } }
     ])
 }
 
@@ -490,6 +502,8 @@ fn is_readonly_tool(name: &str) -> bool {
             | "surveillance_run" | "scan_progress" | "memory_get" | "memory_remember"
             | "runs_list" | "pm_query"
             | "scan_get"
+            // Pattes « parler » (écritures méta-DB uniquement, comme findings_upsert)
+            | "notify_user" | "issue_report"
             // Read-only schema/counts (no row data except via pm_query)
             | "db_tables" | "db_schema" | "db_overview" | "db_count_rows" | "db_get_schema"
             | "db.tables" | "db.list_tables" | "db.describe" | "db.describe_table"
@@ -559,6 +573,8 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
             | "git_log" | "git_branches"
+            | "notify_user" | "issue_report" | "ship"
+            | "env_list" | "env_set" | "env_delete"
             | "findings_list" | "findings_upsert" | "findings_dismiss"
             | "findings_resolve" | "findings_delete" | "surveillance_run"
             | "memory_get" | "memory_remember" | "runs_list" | "scan_get" | "scan_set"
@@ -587,6 +603,8 @@ fn is_dispatched_project_tool(name: &str) -> bool {
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
             | "git_log" | "git_branches"
+            | "notify_user" | "issue_report" | "ship"
+            | "env_list" | "env_set" | "env_delete"
             | "findings_list" | "findings_upsert" | "findings_dismiss"
             | "findings_resolve" | "findings_delete" | "surveillance_run"
             | "memory_get" | "memory_remember" | "runs_list" | "scan_get" | "scan_set"
@@ -640,6 +658,14 @@ fn tool_definitions_project() -> Value {
         // ── Git ──
         { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
         { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
+        // ── Plateforme (notification, remontées, livraison) ──
+        { "name": "notify_user", "description": "Notifie Romain (cloche Atelier + notification sur ses appareils). Réservé à ce qui mérite VRAIMENT son attention : décision à prendre, anomalie détectée, résultat inattendu d'une tâche longue. Tes actions plateforme (restart, ship, env, schéma…) sont déjà journalisées automatiquement — ne PAS notifier pour ça.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string", "description": "≤120 chars, actionnable" }, "body": { "type": "string", "description": "détail optionnel (markdown court)" }, "level": { "type": "string", "enum": ["info", "warn", "error"], "default": "info" } }, "required": ["title"] } },
+        { "name": "issue_report", "description": "Remonte un souci PLATEFORME (Atelier) : tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse/agent qui déraille côté plateforme. NE concerne PAS les bugs internes de ton app (corrige-les) ni les findings de surveillance (canal findings_*). Voir .claude/rules/report-issues.md.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string", "description": "court et actionnable" }, "area": { "type": "string", "enum": ["mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other"], "default": "other" }, "severity": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }, "context": { "type": "string", "description": "ce que tu faisais + symptôme exact" }, "tried": { "type": "string", "description": "ce que tu as tenté / contournement" } }, "required": ["title"] } },
+        { "name": "ship", "description": "Livre en prod : stop + restart du process supervisé pour reprendre les artefacts compilés par la skill 0-build (aucune compilation ici). Émet les étapes au badge build du Studio. Échoue avec BUILD_BUSY si un build/ship est déjà en cours — ne PAS retry automatiquement.", "inputSchema": { "type": "object", "properties": { "timeout_secs": { "type": "integer", "minimum": 60, "maximum": 7200, "default": 900 } } } },
+        // ── Environment (le .env est un artefact généré ; seul le tier user est éditable) ──
+        { "name": "env_list", "description": "Liste les variables d'env de l'app : tier plateforme calculé (PORT, HR_DV_*, ATELIER_*) + variables applicatives (user). Les valeurs secrètes sont TOUJOURS masquées ici (révélation = action UI humaine).", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "env_set", "description": "Crée/remplace UNE variable applicative puis régénère le .env. Le process ne la voit qu'au prochain restart. Clés plateforme (PORT, HR_DV_*, ATELIER_*) refusées. secret=true → masquée dans l'UI. scope: runtime|build|both (build = exposée à la commande de build, canal VITE_*/NEXT_PUBLIC_*). Remplace le merge legacy `app.update env_vars`.", "inputSchema": { "type": "object", "properties": { "key": { "type": "string", "description": "^[A-Za-z_][A-Za-z0-9_]*$" }, "value": { "type": "string" }, "secret": { "type": "boolean", "default": false }, "scope": { "type": "string", "enum": ["runtime", "build", "both"], "default": "runtime" } }, "required": ["key", "value"] } },
+        { "name": "env_delete", "description": "Supprime UNE variable applicative puis régénère le .env. Clés plateforme refusées.", "inputSchema": { "type": "object", "properties": { "key": { "type": "string" } }, "required": ["key"] } },
         // ── Surveillance IA (3 scans : security, code_review, business + mémoire) ──
         { "name": "findings_list", "description": "List the app's surveillance findings across its three scans (security, code_review, business). Filter by kind/category/severity/status. Read this at session start to triage open issues.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["security", "code_review", "business"] }, "category": { "type": "string" }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "status": { "type": "string", "enum": ["open", "dismissed", "resolved"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000 } } } },
         { "name": "findings_upsert", "description": "Create or update a finding (dedup by fingerprint). `kind` is the scan: security|code_review|business (default business). `category` MUST be one of that kind's allowed categories (anything else → 'autres'). `summary` = présentation courte (affichée dans la liste) ; `plan` = document de résolution complet (annexe : ## Contexte / ## Cause racine / ## Fichiers impactés / ## Étapes / ## Validation). Do NOT inflate severity.", "inputSchema": { "type": "object", "properties": { "kind": { "type": "string", "enum": ["security", "code_review", "business"] }, "category": { "type": "string", "description": "One of the kind's allowed categories; anything else is coerced to 'autres'." }, "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }, "title": { "type": "string", "description": "≤120 chars" }, "summary": { "type": "string", "description": "présentation courte de l'issue (markdown)" }, "plan": { "type": "string", "description": "document de résolution complet (markdown)" }, "fingerprint": { "type": "string", "description": "stable hash of the issue for dedup" }, "evidence": { "type": "object", "description": "{file_path?, diff?, ...}" } }, "required": ["category", "severity", "title", "summary", "plan", "fingerprint"] } },
@@ -700,7 +726,7 @@ async fn handle_tools_call(
 
     info!(tool = tool_name, project = ?project_slug, "MCP tools/call");
 
-    match tool_name {
+    let response = match tool_name {
         // ── Git ──
         "git.repos" => tool_git_repos(id, state).await,
         "git.log" => tool_git_log(id, &arguments, state).await,
@@ -801,6 +827,13 @@ async fn handle_tools_call(
         "docs_diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
         "git_log" => tool_git_log(id, &arguments, state).await,
         "git_branches" => tool_git_branches(id, &arguments, state).await,
+        // ── Plateforme (notification, remontées, livraison, env) ──
+        "notify_user" => tool_notify_user(id, &arguments, state).await,
+        "issue_report" => tool_issue_report(id, &arguments, state).await,
+        "ship" => tool_app_ship(id, &arguments, state).await,
+        "env_list" => tool_env_list(id, &arguments, state).await,
+        "env_set" => tool_env_set(id, &arguments, state).await,
+        "env_delete" => tool_env_delete(id, &arguments, state).await,
 
         // ── Surveillance IA ──
         "findings_list" => tool_findings_list(id, &arguments, state).await,
@@ -820,6 +853,85 @@ async fn handle_tools_call(
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
         }
+    };
+
+    // ── Journal d'actions : toute mutation plateforme RÉUSSIE d'un agent en
+    // scope projet est tracée dans platform_notifications (kind=action, né lu)
+    // + canal WS `notify`. L'utilisateur voit ainsi les actions des agents sans
+    // dépendre de leur bonne volonté. Best-effort : un échec d'insert ne casse
+    // jamais le tool. Hors scope : l'UI Studio (HTTP direct) et le scan-agent
+    // (readonly) ne journalisent pas.
+    if let Some(ref slug) = project_slug {
+        if !readonly && is_journaled_action(tool_name) && mcp_call_ok(&response) {
+            journal_agent_action(state, slug, tool_name, &arguments).await;
+        }
+    }
+    response
+}
+
+/// Succès JSON-RPC au sens tool : pas de clé `error` ET pas de
+/// `result.isError == true` (cf. `tool_error`, qui répond en success_response
+/// avec le flag isError — un simple `.get("error")` dirait toujours "succès").
+fn mcp_call_ok(response: &Value) -> bool {
+    response.get("error").is_none()
+        && response.pointer("/result/isError").and_then(|v| v.as_bool()) != Some(true)
+}
+
+/// Liste CURATED des tools mutants journalisés (scope projet). Volontairement
+/// SANS les écritures de données (`dv_*` : trail `_dv_audit`) ni docs/findings
+/// (visibles dans leurs onglets) — trop bruyants pour un journal utilisateur.
+fn is_journaled_action(name: &str) -> bool {
+    matches!(
+        name,
+        "start" | "stop" | "restart" | "app.control"          // lifecycle
+            | "ship" | "app.build"                            // livraison
+            | "env_set" | "env_delete"                        // env
+            | "db_create_table" | "db_drop_table" | "db_add_column"
+            | "db_remove_column" | "db_create_relation"
+            | "db_set_display_column" | "db_sync_schema"      // schema-ops
+            | "scan_set"                                      // scan business
+            | "app.update"                                    // config app
+    )
+}
+
+/// Insère l'entrée de journal « Agent {slug} : {label} ». Le label ne porte
+/// JAMAIS de valeur (env_set → nom de clé uniquement : la valeur peut être un
+/// secret), seulement l'action et sa cible.
+async fn journal_agent_action(state: &McpState, slug: &str, tool: &str, args: &Value) {
+    let label = match tool {
+        "start" | "stop" | "restart" => tool.to_string(),
+        "app.control" => args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("control")
+            .to_string(),
+        "ship" => "ship (livraison prod)".to_string(),
+        "app.build" => "build".to_string(),
+        "env_set" | "env_delete" => format!(
+            "{tool} {}",
+            args.get("key").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "db_create_table" | "db_drop_table" | "db_add_column" | "db_remove_column"
+        | "db_create_relation" | "db_set_display_column" | "db_sync_schema" => {
+            let target = args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.pointer("/definition/name").and_then(|v| v.as_str()))
+                .or_else(|| args.get("from_table").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            format!("{tool} {target}").trim_end().to_string()
+        }
+        "scan_set" => "scan business redéfini".to_string(),
+        "app.update" => "app.update (config)".to_string(),
+        _ => tool.to_string(),
+    };
+    let title = format!("Agent {slug} : {label}");
+    if let Err(e) = state
+        .notifications
+        .push(Some(slug), "agent", "action", "info", &title, None)
+        .await
+    {
+        warn!(slug, tool, error = %e, "action journal insert failed (non-fatal)");
     }
 }
 
@@ -1361,6 +1473,140 @@ fn tool_error(id: Value, message: &str) -> Value {
             "isError": true
         }),
     )
+}
+
+// ── Plateforme tools (notification, remontées, livraison, env) ──────────────
+
+/// `notify_user` — notification volontaire (kind=notice) vers Romain. Le slug
+/// est auto-injecté en scope projet ; explicite en scope surveillance (pas
+/// d'injection) ; None en global (notification plateforme).
+async fn tool_notify_user(id: Value, args: &Value, state: &McpState) -> Value {
+    let title = req_str!(args, "title", id);
+    if title.trim().is_empty() {
+        return tool_error(id, "title requis (non vide)");
+    }
+    let slug = args.get("slug").and_then(|v| v.as_str());
+    let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+    let body = args.get("body").and_then(|v| v.as_str());
+    match state
+        .notifications
+        .push(slug, "agent", "notice", level, title.trim(), body)
+        .await
+    {
+        Ok(entry) => tool_success(id, entry),
+        Err(e) => tool_error(id, &format!("notify_user failed: {e}")),
+    }
+}
+
+/// `issue_report` — remontée d'une friction PLATEFORME (même store que
+/// `POST /api/apps/{slug}/issues`, que la skill historique appelait en curl).
+async fn tool_issue_report(id: Value, args: &Value, state: &McpState) -> Value {
+    let slug = req_str!(args, "slug", id);
+    let title = req_str!(args, "title", id);
+    if title.trim().is_empty() {
+        return tool_error(id, "title requis (non vide)");
+    }
+    let area = args.get("area").and_then(|v| v.as_str()).unwrap_or("other");
+    let severity = args
+        .get("severity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium");
+    let context = args.get("context").and_then(|v| v.as_str()).unwrap_or("");
+    let tried = args.get("tried").and_then(|v| v.as_str()).unwrap_or("");
+    match state
+        .issues
+        .insert(slug, area, severity, title.trim(), context, tried)
+        .await
+    {
+        Ok(entry) => {
+            info!(slug, area, severity, "AppIssueReport (mcp)");
+            tool_success(id, entry)
+        }
+        Err(e) => tool_error(id, &format!("issue_report failed: {e}")),
+    }
+}
+
+/// `ship` — livraison prod (stop + restart, artefacts déjà buildés par
+/// `0-build`). Réutilise `AppsContext::ship` : même lock BUILD_BUSY et même
+/// canal d'events que la route HTTP et le badge build du Studio.
+async fn tool_app_ship(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+    let resp = ctx.ship(slug.to_string(), timeout_secs).await;
+    // ship() renvoie ok_data MÊME quand le pipeline échoue (l'échec est dans
+    // exit_code) — mirror de l'inspection du handler HTTP ship_app
+    // (routes/apps.rs). Sans ça le tool dirait "succès" avec une app down.
+    let exit_code = resp
+        .data
+        .as_ref()
+        .and_then(|d| d.get("exit_code"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if resp.ok && exit_code == 0 {
+        tool_success(id, resp.data.unwrap_or(json!({"ok": true})))
+    } else {
+        let msg = resp.error.unwrap_or_else(|| {
+            "ship pipeline failed — app may be down, check status/logs".to_string()
+        });
+        tool_error(id, &msg)
+    }
+}
+
+/// `env_list` — vue des variables d'env, secrets TOUJOURS masqués (pas de
+/// param reveal côté agent : la révélation reste une action UI humaine).
+async fn tool_env_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    match ctx.env_view(slug, false).await {
+        Ok(vars) => match serde_json::to_value(&vars) {
+            Ok(v) => tool_success(
+                id,
+                json!({
+                    "vars": v,
+                    "note": "le .env est un artefact généré — ne jamais l'éditer à la main"
+                }),
+            ),
+            Err(e) => tool_error(id, &format!("env_list serialize: {e}")),
+        },
+        Err(e) => tool_error(id, &format!("env_list: {e}")),
+    }
+}
+
+/// `env_set` — crée/remplace UNE variable user puis régénère le `.env`.
+async fn tool_env_set(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let key = req_str!(args, "key", id);
+    let value = req_str!(args, "value", id);
+    let secret = args.get("secret").and_then(|v| v.as_bool()).unwrap_or(false);
+    let scope = match args.get("scope").and_then(|v| v.as_str()) {
+        Some("build") => atelier_apps::types::EnvScope::Build,
+        Some("both") => atelier_apps::types::EnvScope::Both,
+        _ => atelier_apps::types::EnvScope::Runtime,
+    };
+    match ctx.env_set_var(slug, key, value, secret, scope).await {
+        Ok(()) => tool_success(
+            id,
+            json!({
+                "ok": true,
+                "key": key,
+                "note": "prise en compte runtime au prochain restart (le .env a été régénéré)"
+            }),
+        ),
+        Err(e) => tool_error(id, &format!("env_set: {e}")),
+    }
+}
+
+/// `env_delete` — supprime UNE variable user puis régénère le `.env`.
+async fn tool_env_delete(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    let key = req_str!(args, "key", id);
+    match ctx.env_delete_var(slug, key).await {
+        Ok(removed) => tool_success(id, json!({ "removed": removed })),
+        Err(e) => tool_error(id, &format!("env_delete: {e}")),
+    }
 }
 
 // ── App* / DB* tool definitions (V3 — atelier-apps) ──────────────────────
@@ -2267,13 +2513,8 @@ async fn tool_studio_refresh_context(id: Value, args: &Value, state: &McpState) 
 
 async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
     let ctx = apps_ctx!(id, state);
-    let apps = ctx.supervisor.registry.list().await;
-    let mut refreshed = 0u32;
-    for app in &apps {
-        let _ = ctx.regenerate_context(app.slug.clone()).await;
-        refreshed += 1;
-    }
-    tool_success(id, json!({ "refreshed": refreshed, "total": apps.len() }))
+    let (refreshed, total) = ctx.regenerate_all_contexts().await;
+    tool_success(id, json!({ "refreshed": refreshed, "total": total }))
 }
 
 // ── Surveillance IA tools ───────────────────────────────────────────
