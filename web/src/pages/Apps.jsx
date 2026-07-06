@@ -8,7 +8,7 @@ import PageHeader from '../components/PageHeader';
 import ScrollableTable from '../components/ScrollableTable';
 import { useApps } from '../context/AppsContext';
 import { openStudio } from '../lib/openStudio';
-import { STACKS, SLUG_RE, slugify, stackLabel, statusDot } from '../lib/appsUi';
+import { SLUG_RE, slugify, stackLabel, statusDot } from '../lib/appsUi';
 
 // ── Create Modal ──
 
@@ -16,7 +16,7 @@ function CreateAppModal({ onClose, onCreated }) {
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [slugManual, setSlugManual] = useState(false);
-  const [stack, setStack] = useState('axum-vite');
+  const [stack, setStack] = useState('');
   const visibility = 'private';
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -26,7 +26,7 @@ function CreateAppModal({ onClose, onCreated }) {
     if (!name.trim()) { setError('Nom requis'); return; }
     if (!SLUG_RE.test(slug)) { setError('Slug invalide'); return; }
     setSubmitting(true); setError(null);
-    try { await createApp({ name: name.trim(), slug, stack, visibility }); onCreated(); }
+    try { await createApp({ name: name.trim(), slug, stack: stack.trim(), visibility }); onCreated(); }
     catch (err) { setError(apiErr(err)); }
     finally { setSubmitting(false); }
   }
@@ -42,7 +42,7 @@ function CreateAppModal({ onClose, onCreated }) {
           {error && <div className="bg-red-500/10 border border-red-500/30 rounded-sm px-3 py-2 text-sm text-red-400">{error}</div>}
           <div><label className="block text-xs text-gray-400 mb-1">Nom</label><input type="text" value={name} onChange={e => { setName(e.target.value); if (!slugManual) setSlug(slugify(e.target.value)); }} autoFocus className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden" /></div>
           <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 font-mono rounded-sm outline-hidden" /></div>
-          <div><label className="block text-xs text-gray-400 mb-1">Stack</label><select value={stack} onChange={e => setStack(e.target.value)} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden">{STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></div>
+          <div><label className="block text-xs text-gray-400 mb-1">Stack <span className="text-gray-500">(label libre, optionnel)</span></label><input type="text" value={stack} onChange={e => setStack(e.target.value)} maxLength={64} placeholder="ex : Vite+Rust, Next.js, Python FastAPI…" className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden placeholder:text-gray-600" /><p className="mt-1 text-[11px] text-gray-500">L'app naît vide : c'est la première conversation Studio qui génère le projet (n'importe quelle stack) et configure build/run.</p></div>
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-700">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 bg-gray-700 rounded-sm">Annuler</button>
             <button type="submit" disabled={submitting} className="px-4 py-2 text-sm text-white bg-blue-500 rounded-sm disabled:opacity-50 flex items-center gap-2">{submitting && <Loader2 className="w-4 h-4 animate-spin" />}Creer</button>

@@ -183,6 +183,17 @@ impl AppSupervisor {
                 .await
                 .ok_or_else(|| anyhow!("app not found: {slug}"))?;
 
+            // App non configurée : sans garde, systemd-run spawnerait
+            // `bash -c ''` qui meurt instantanément (état crashed opaque).
+            // Les apps naissent vides depuis la généricisation des stacks —
+            // c'est l'agent Studio qui pose run_command via app.update.
+            if app.run_command.trim().is_empty() {
+                return Err(anyhow!(
+                    "app not configured: empty run_command — set it via app.update \
+                     (Studio) before starting"
+                ));
+            }
+
             if app.port == 0 {
                 let port = self
                     .port_registry

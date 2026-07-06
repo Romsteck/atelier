@@ -13,7 +13,7 @@ use super::dto::{
 };
 use super::scaffold;
 
-use atelier_apps::types::{AppStack, AppState, Application, DbBackend, Visibility, valid_slug};
+use atelier_apps::types::{AppState, Application, DbBackend, Visibility, valid_slug};
 use atelier_apps::{AppSupervisor, ContextGenerator, ProcessStatus};
 use atelier_common::events::AppBuildEvent;
 use atelier_dataverse::DataverseManager;
@@ -239,10 +239,12 @@ impl AppsContext {
             return IpcResponse::err(format!("app already exists: {slug}"));
         }
 
-        let stack_enum = match parse_stack(&stack) {
-            Some(s) => s,
-            None => return IpcResponse::err(format!("invalid stack: {stack}")),
-        };
+        // Stack = label libre, purement informatif (la plateforme est
+        // stack-agnostique). Borné pour l'affichage en liste.
+        let stack = stack.trim().to_string();
+        if stack.len() > 64 {
+            return IpcResponse::err("stack label too long (max 64 chars)");
+        }
         let visibility_enum = match parse_visibility(&visibility) {
             Some(v) => v,
             None => return IpcResponse::err(format!("invalid visibility: {visibility}")),
@@ -257,7 +259,7 @@ impl AppsContext {
             }
         };
 
-        let mut app = Application::new(slug.clone(), name, stack_enum);
+        let mut app = Application::new(slug.clone(), name, stack);
         app.has_db = has_db;
         app.visibility = visibility_enum;
         app.port = port;
@@ -281,30 +283,16 @@ impl AppsContext {
         if let Err(e) = tokio::fs::create_dir_all(&app.src_dir()).await {
             warn!(slug = %slug, error = %e, "AppCreate: create src_dir failed");
         }
-        if let Err(e) = scaffold::scaffold_stack_template(&app).await {
-            warn!(slug = %slug, error = %e, "AppCreate: scaffold template failed (non-fatal)");
-        }
-        // First perms pass right after scaffold: the git remote bind below runs
-        // as the build user and needs a writable `src/` (a second pass at the
-        // end of create covers the context files + `.env`).
+        // First perms pass right after the tree creation: the git remote bind
+        // below runs as the build user and needs a writable `src/` (a second
+        // pass at the end of create covers the context files + `.env`).
         scaffold::normalize_app_tree_perms(&app_dir).await;
 
-        // Default run_command si non fourni.
-        if app.run_command.trim().is_empty() {
-            app.run_command = scaffold::default_run_command(&app);
-            info!(slug = %slug, run_command = %app.run_command, "AppCreate: applied default run_command");
-        }
-        // Default build_command matérialisé lui aussi. WHY: `deploy-app.sh` et
-        // la skill générée `0-build` lisent le registre tel quel (aucun
-        // fallback stack, contrairement au MCP `app.build`) — un build_command
-        // NULL rend l'app fraîche in-buildable hors MCP et le premier
-        // deploy-app 502 (restart d'un binaire jamais compilé).
-        if app.build_command.is_none() {
-            if let Some((cmd, _)) = build_defaults_for_stack(&app) {
-                app.build_command = Some(cmd.to_string());
-                info!(slug = %slug, build_command = %cmd, "AppCreate: applied default build_command");
-            }
-        }
+        // Pas de scaffold ni de defaults run/build : l'app naît vide et non
+        // configurée. C'est la première conversation Studio qui génère le
+        // projet et pose run_command/build_command/health_path via app.update
+        // (la plateforme ne connaît aucune stack, elle publie un contrat :
+        // $PORT, /apps/{slug}/, .env, 0-build/ship).
 
         // Persist app.
         if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
@@ -426,10 +414,11 @@ impl AppsContext {
             app.name = n;
         }
         if let Some(s) = stack {
-            match parse_stack(&s) {
-                Some(st) => app.stack = st,
-                None => return IpcResponse::err(format!("invalid stack: {s}")),
+            let s = s.trim().to_string();
+            if s.len() > 64 {
+                return IpcResponse::err("stack label too long (max 64 chars)");
             }
+            app.stack = s;
         }
         if let Some(v) = visibility {
             match parse_visibility(&v) {
@@ -1113,22 +1102,24 @@ impl AppsContext {
             None => return IpcResponse::err(format!("app not found: {slug}")),
         };
 
-        let (build_command, default_artefacts) = match build_defaults_for_stack(&app) {
-            Some(d) => d,
+        let build_command = match app.build_command.clone().filter(|c| !c.trim().is_empty()) {
+            Some(c) => c,
             None => {
-                warn!(slug = %slug, stack = ?app.stack, "build: stack not supported");
+                warn!(slug = %slug, "build: no build_command configured");
                 return IpcResponse::err(
-                    "stack not supported by app.build; build manually".to_string(),
+                    "no build_command configured for this app — set it via app.update \
+                     (the platform is stack-agnostic; the app owns its build command)"
+                        .to_string(),
                 );
             }
         };
-        let build_command = app
-            .build_command
-            .clone()
-            .unwrap_or_else(|| build_command.to_string());
-        let artefacts = resolve_artefacts(&app, default_artefacts);
-        if artefacts.is_empty() {
-            return IpcResponse::err("no artefacts to rsync back (empty build_artefact)");
+        // Artefacts : uniquement requis pour le rsync-back depuis un build
+        // host distant. En build local (le défaut) ils sont déjà en place.
+        let artefacts = resolve_artefacts(&app);
+        if build_host_config().is_some() && artefacts.is_empty() {
+            return IpcResponse::err(
+                "no artefacts to rsync back from the build host (set build_artefact)",
+            );
         }
 
         // Build-scoped user vars (VITE_*/NEXT_PUBLIC_*…) exported before the
@@ -1595,17 +1586,13 @@ impl AppsContext {
             None => return IpcResponse::err(format!("app not found: {slug}")),
         };
 
-        let (_default_build_cmd, default_artefacts) = match build_defaults_for_stack(&app) {
-            Some(d) => d,
-            None => {
-                return IpcResponse::err(
-                    "stack not supported by app.ship; configure build_artefact manually".to_string(),
-                );
-            }
-        };
-        let artefacts = resolve_artefacts(&app, default_artefacts);
-        if artefacts.is_empty() {
-            return IpcResponse::err("no artefacts to ship (empty build_artefact)");
+        // Artefacts : uniquement consommés par le rsync-back distant. En
+        // local (le défaut) ship = stop + restart, aucun artefact requis.
+        let artefacts = resolve_artefacts(&app);
+        if build_host_config().is_some() && artefacts.is_empty() {
+            return IpcResponse::err(
+                "no artefacts to ship from the build host (set build_artefact)",
+            );
         }
 
         // Per-slug lock partagé avec build() — pour éviter qu'un ship se
@@ -1869,8 +1856,6 @@ impl AppsContext {
     }
 }
 
-/// Returns `(default_build_command, default_artefact_paths)` for stacks that
-/// support remote build, or `None` for unsupported stacks.
 /// Parse a single line of the `build_artefact` spec. Lines starting with
 /// `?` are treated as **optional** artefacts: the rsync skips silently if
 /// the source path is absent on the build host, instead of erroring out.
@@ -1886,48 +1871,17 @@ fn parse_artefact_spec(spec: &str) -> (&str, bool) {
 }
 
 /// Resolve the list of artefacts to rsync down for `build`/`ship`. Reads
-/// `app.build_artefact` if set (one path per line, `?` prefix = optional),
-/// else falls back to stack defaults.
-fn resolve_artefacts(app: &Application, defaults: Vec<String>) -> Vec<String> {
-    match app.build_artefact.as_deref() {
-        Some(custom) => custom
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        None => defaults,
-    }
-}
-
-fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<String>)> {
-    match app.stack {
-        AppStack::Axum => Some((
-            "cargo build --release",
-            vec![format!("target/release/{}", app.slug)],
-        )),
-        AppStack::AxumVite => Some((
-            "cargo build --release && (cd web && npm ci && npm run build)",
-            vec![format!("target/release/{}", app.slug), "web/dist".to_string()],
-        )),
-        AppStack::NextJs => Some((
-            "npm ci && npm run build",
-            vec![
-                ".next".to_string(),
-                "public".to_string(),
-                "package.json".to_string(),
-                "package-lock.json".to_string(),
-                "node_modules".to_string(),
-                // Custom-server apps (e.g. server.ts → server.js bundle for
-                // WebSocket integration) emit a server.js or server.mjs at
-                // the package root. Marked optional (`?` prefix) — apps
-                // using the standalone deployment pattern don't have a
-                // root-level server file and the rsync skips silently.
-                "?server.js".to_string(),
-                "?server.mjs".to_string(),
-            ],
-        )),
-        AppStack::Flutter => None,
-    }
+/// `app.build_artefact` if set (one path per line, `?` prefix = optional).
+/// No stack defaults: the platform is stack-agnostic, artefacts are declared
+/// per app (and only matter for the remote-build-host rsync path).
+fn resolve_artefacts(app: &Application) -> Vec<String> {
+    app.build_artefact
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 struct StageOutput {
@@ -2103,30 +2057,11 @@ async fn run_capture(program: &str, args: &[&str], cwd: Option<&std::path::Path>
 
 // ── Helpers ────────────────────────────────────────────────────
 
-fn parse_stack(s: &str) -> Option<AppStack> {
-    match s {
-        "next-js" | "nextjs" => Some(AppStack::NextJs),
-        "axum-vite" => Some(AppStack::AxumVite),
-        "axum" => Some(AppStack::Axum),
-        "flutter" => Some(AppStack::Flutter),
-        _ => None,
-    }
-}
-
 fn parse_visibility(s: &str) -> Option<Visibility> {
     match s {
         "public" => Some(Visibility::Public),
         "private" => Some(Visibility::Private),
         _ => None,
-    }
-}
-
-fn stack_to_str(stack: &AppStack) -> &'static str {
-    match stack {
-        AppStack::NextJs => "next-js",
-        AppStack::AxumVite => "axum-vite",
-        AppStack::Axum => "axum",
-        AppStack::Flutter => "flutter",
     }
 }
 
@@ -2153,7 +2088,7 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
         slug: app.slug.clone(),
         name: app.name.clone(),
         description: app.description.clone(),
-        stack: stack_to_str(&app.stack).to_string(),
+        stack: app.stack.clone(),
         has_db: app.has_db,
         visibility: visibility_to_str(&app.visibility).to_string(),
         domain: app.domain.clone(),

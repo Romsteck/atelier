@@ -335,7 +335,7 @@ async fn init_surveillance(
         .map(|a| atelier_watcher::AppMeta {
             slug: a.slug,
             name: a.name,
-            stack: a.stack.display_name().to_string(),
+            stack: a.stack,
         })
         .collect();
 

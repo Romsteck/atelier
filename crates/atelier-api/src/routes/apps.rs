@@ -282,6 +282,9 @@ async fn get_app_build_env(
 struct CreateAppBody {
     name: String,
     slug: String,
+    /// Label technologique libre, purement informatif (peut rester vide —
+    /// l'agent le posera via app.update quand il bootstrappe le projet).
+    #[serde(default)]
     stack: String,
     visibility: Option<String>,
     run_command: Option<String>,
@@ -291,8 +294,8 @@ struct CreateAppBody {
 }
 
 /// `POST /api/apps` — create an app. Delegates to the same `AppsContext::create`
-/// the MCP `app.create` tool uses (port assign, scaffold, registry, git repo,
-/// context regen, initial `.env`). WHY: the homepage "Nouvelle application"
+/// the MCP `app.create` tool uses (port assign, workspace init, registry, git
+/// repo, context regen, initial `.env`). WHY: the homepage "Nouvelle application"
 /// modal called this route, which did not exist — creation 405'd from the UI
 /// (only the MCP path worked). `has_db` mirrors the MCP handler's hardcoded
 /// `true`: every app gets its dataverse `app_{slug}` provisioned.

@@ -156,6 +156,11 @@ impl ContextGenerator {
                   &render_mcp_tools_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("workflow.md"),
                   &self.render_workflow_md(app))?;
+        // Conventions de code génériques : la plateforme étant stack-agnostique
+        // (aucun scaffold, stack = label libre), la cohérence inter-apps passe
+        // par ces règles-là, pas par des squelettes identiques.
+        log_write(&app.slug, &src_rules_dir.join("conventions.md"),
+                  &render_conventions_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("surveillance.md"),
                   &render_surveillance_rule_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
@@ -283,7 +288,7 @@ impl ContextGenerator {
                 "| {name} | `{slug}` | {stack} | https://{domain} | {visibility} | {db} |\n",
                 name = app.name,
                 slug = app.slug,
-                stack = app.stack.display_name(),
+                stack = app.stack,
                 domain = app.domain,
                 visibility = visibility,
                 db = db_cell,
@@ -492,7 +497,7 @@ impl ContextGenerator {
              unexpected branches.\n\
              - Inspect logs via `app.logs` and the Atelier logs page.\n",
             name = app.name,
-            stack = app.stack.display_name(),
+            stack = app.stack,
             run_command = app.run_command,
             build_cmd = build_cmd,
             health_path = app.health_path,
@@ -850,41 +855,99 @@ fn render_app_deploy_skill(app: &Application) -> String {
     )
 }
 
-fn render_app_build_skill(app: &Application) -> String {
-    use crate::types::AppStack;
+/// Conventions de code génériques, identiques pour toutes les apps quelle que
+/// soit la stack. Elles portent le contrat plateforme (ce que l'app DOIT
+/// respecter pour être servie/supervisée) + les invariants de cohérence
+/// inter-projets. La structure interne du projet reste libre.
+fn render_conventions_md(app: &Application) -> String {
+    format!(
+        "# Conventions — génériques, toutes stacks\n\
+         \n\
+         La plateforme est **stack-agnostique** : aucune structure de projet imposée, \
+         aucun scaffold. En échange, chaque app respecte le contrat plateforme et ces \
+         conventions de cohérence.\n\
+         \n\
+         ## Contrat plateforme (non négociable)\n\
+         \n\
+         - Le process écoute sur **`$PORT`** (livré par le `.env` rendu) — jamais de \
+         port hardcodé.\n\
+         - L'app est servie en même-origine sous **`/apps/{slug}/`** (path-proxy \
+         Atelier). Pour un frontend : base path / assets relatifs à cette base \
+         (`base` Vite, `basePath` Next, scope service-worker/PWA) — jamais de chemin \
+         absolu `/...` qui suppose la racine du domaine.\n\
+         - Un endpoint de santé répond 200 sur **`{health_path}`**.\n\
+         - Configuration **exclusivement** via variables d'environnement (le `.env` \
+         est rendu par Atelier — tools `env_set`/`env_list`, jamais d'édition à la \
+         main). Aucun secret committé ou en dur dans le code.\n\
+         - Logs sur **stdout/stderr** (captés par le superviseur).\n\
+         - Données : passerelle dataverse (`HR_DV_*`) uniquement — jamais de \
+         connexion Postgres directe, jamais de SQLite.\n\
+         \n\
+         ## Cohérence inter-projets\n\
+         \n\
+         - `README.md` à la racine de `src/` : ce que fait l'app, comment elle se \
+         build, comment elle tourne.\n\
+         - **Lockfile committé** (Cargo.lock, package-lock.json, uv.lock, …) : build \
+         reproductible.\n\
+         - Le build tient en **une commande** = le `build_command` du registre \
+         (exécuté par la skill `0-build`). Production only, pas de mode dev.\n\
+         - `run_command` / `build_command` / `health_path` / label `stack` **à jour \
+         dans le registre** (tool MCP `app.update`) dès qu'ils changent — c'est le \
+         registre qui pilote supervision et build, pas la doc.\n\
+         - Structure de projet **idiomatique de l'écosystème choisi** : lisible pour \
+         un dev de cette stack, sans chercher l'uniformité entre apps.\n",
+        slug = app.slug,
+        health_path = app.health_path,
+    )
+}
 
-    let stack_label = app.stack.display_name();
+fn render_app_build_skill(app: &Application) -> String {
+    let stack_label = if app.stack.trim().is_empty() {
+        "stack non renseignée"
+    } else {
+        app.stack.as_str()
+    };
     let build_cmd = app
         .build_command
         .as_deref()
-        .unwrap_or("(no build command configured)");
+        .filter(|c| !c.trim().is_empty());
 
-    let stack_section = match app.stack {
-        AppStack::Axum => format!(
-            "## Stack: Rust (Axum)\n\n\
-             - Artefact attendu sous `src/` après build : `target/release/{slug}` (ou `build_artefact` si défini).\n\
-             - Commande de build : `{cmd}`.\n",
-            slug = app.slug,
-            cmd = build_cmd,
-        ),
-        AppStack::AxumVite => format!(
-            "## Stack: Rust (Axum) + Vite\n\n\
-             - Artefacts attendus : `target/release/{slug}` + `web/dist/` (ou `build_artefact` si défini).\n\
-             - Commande de build : `{cmd}`.\n",
-            slug = app.slug,
-            cmd = build_cmd,
-        ),
-        AppStack::NextJs => format!(
-            "## Stack: Next.js\n\n\
-             - Artefacts attendus : `.next/`, `public/`, `node_modules/` (ou `build_artefact` si défini).\n\
-             - Commande de build : `{cmd}`.\n",
-            cmd = build_cmd,
-        ),
-        AppStack::Flutter => format!(
-            "## Stack: Flutter (mobile Android)\n\n\
-             - Commande de build : `{cmd}`.\n",
-            cmd = build_cmd,
-        ),
+    // Section rendue depuis les champs RÉELS de l'app (la plateforme est
+    // stack-agnostique : aucun texte par-stack, le registre fait autorité).
+    let stack_section = match build_cmd {
+        Some(cmd) => {
+            let artefacts = app
+                .build_artefact
+                .as_deref()
+                .map(|a| {
+                    a.lines()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|s| !s.is_empty());
+            let artefact_line = match artefacts {
+                Some(list) => format!("- Artefacts déclarés (`build_artefact`) : {list}.\n"),
+                None => "- Aucun artefact déclaré (`build_artefact` vide) : build en place, \
+                         le restart reprend directement le résultat.\n"
+                    .to_string(),
+            };
+            format!(
+                "## Configuration de build de cette app\n\n\
+                 - Commande de build (`build_command` du registre) : `{cmd}`.\n\
+                 {artefact_line}\
+                 - Pour changer commande/artefacts : tool MCP `app.update` \
+                 (cette skill est régénérée automatiquement).\n",
+            )
+        }
+        None => "## Configuration de build de cette app\n\n\
+                 ⚠️ **Aucun `build_command` configuré** : `build.sh` échouera volontairement. \
+                 Configure d'abord le build via le tool MCP `app.update` \
+                 (`build_command`, et `run_command`/`health_path` si pas encore posés) — \
+                 c'est toi qui possèdes la définition du build de cette app.\n"
+            .to_string(),
     };
 
     format!(
@@ -985,7 +1048,7 @@ fn render_app_info_md(
             "- **{name}** (`{slug}`) — {stack}, https://{domain}\n",
             name = other.name,
             slug = other.slug,
-            stack = other.stack.display_name(),
+            stack = other.stack,
             domain = other.domain,
         ));
     }
@@ -1022,7 +1085,7 @@ fn render_app_info_md(
          {others}",
         name = app.name,
         slug = app.slug,
-        stack = app.stack.display_name(),
+        stack = app.stack,
         url = url,
         visibility = visibility_label,
         port = app.port,
@@ -1755,11 +1818,12 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AppStack, Application};
+    use crate::types::Application;
     use std::collections::BTreeMap;
 
     fn make_app(slug: &str, name: &str, has_db: bool) -> Application {
-        let mut app = Application::new(slug.to_string(), name.to_string(), AppStack::AxumVite);
+        let mut app =
+            Application::new(slug.to_string(), name.to_string(), "axum-vite".to_string());
         app.has_db = has_db;
         app.port = 3001;
         app.run_command = format!("./bin/{}", slug);
@@ -1862,7 +1926,7 @@ mod tests {
         // app-info.md contient l'identité + autres apps + DB tables.
         let app_info = render_app_info_md(&trader, &all, &Some(vec!["users".into(), "trades".into()]));
         assert!(app_info.contains("`trader`"));
-        assert!(app_info.contains("Vite+Rust"));
+        assert!(app_info.contains("axum-vite"));
         assert!(app_info.contains("`users`"));
         assert!(app_info.contains("`trades`"));
         assert!(app_info.contains("Wallet"));
@@ -1871,7 +1935,7 @@ mod tests {
         // Skeleton CLAUDE.md minimal, n'inclut PAS les infos dynamiques.
         let initial_md = render_initial_claude_md(&trader);
         assert!(initial_md.contains("# Trader — Carnet de bord"));
-        assert!(!initial_md.contains("Vite+Rust"),
+        assert!(!initial_md.contains("axum-vite"),
                 "skeleton CLAUDE.md ne doit pas dupliquer app-info.md");
 
         // Skill 0-build + script.

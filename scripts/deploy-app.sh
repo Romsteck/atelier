@@ -45,17 +45,19 @@ if ! flock -n 9; then
   exit 1
 fi
 
-# Fetch the registry for build_command + health_path + stack. A failure aborts —
-# a silent fallback would mis-detect the stack or skip the build.
+# Fetch the registry for build_command + health_path. A failure aborts —
+# a silent fallback would skip the build. Existence is checked on the slug
+# (stack is now a free-form informative label, possibly empty).
 APPS_JSON="$(curl -fsS --max-time 10 "$ATELIER_API/api/apps")" || {
   echo "error: cannot reach Atelier API at $ATELIER_API/api/apps — aborting" >&2
   exit 1
 }
-STACK="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .stack' <<<"$APPS_JSON")"
-if [[ -z "$STACK" || "$STACK" == "null" ]]; then
+FOUND="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .slug' <<<"$APPS_JSON")"
+if [[ -z "$FOUND" || "$FOUND" == "null" ]]; then
   echo "error: app '$SLUG' not found in the Atelier registry — aborting" >&2
   exit 1
 fi
+STACK="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .stack // empty' <<<"$APPS_JSON")"
 BUILD_CMD="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .build_command // empty' <<<"$APPS_JSON")"
 HEALTH_PATH="$(jq -r --arg s "$SLUG" '.data.apps[] | select(.slug==$s) | .health_path // "/"' <<<"$APPS_JSON")"
 

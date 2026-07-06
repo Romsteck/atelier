@@ -53,6 +53,15 @@ Aucun `DATABASE_URL` n'est injecté ; le process applicatif n'a **plus aucun moy
 
 > **Bug réglé (ca7c94e, 2026-06-05)** : empoisonnement du cache de prepared-statements (`08P01`). Fix : le littéral NULL est inliné typé pour **tous** les types de colonne nullable (pas seulement jsonb/date/uuid/timestamptz) + contrôle du nombre de paramètres sur les builders CRUD.
 
+## Stacks génériques (généricisation 2026-07-06)
+
+> Avant : enum fermé `AppStack` (next-js/axum-vite/axum/flutter) + scaffold templates embarqués + defaults build/run par stack + liste dupliquée dans le front. Tout est supprimé : **la plateforme ne connaît aucune stack** (une app Python/Go/etc. est désormais possible sans toucher au code Atelier).
+
+- **`Application.stack` = label texte libre** (≤ 64 chars, purement informatif, affiché dans la liste + posable par l'agent via `app.update`). Les anciennes valeurs kebab-case se désérialisent telles quelles (JSONB `data` du registre, zéro migration).
+- **Le contrat remplace les stacks** : process qui écoute `$PORT`, servi sous `/apps/{slug}/`, répond sur `health_path`, env via le `.env` rendu, build = `build_command` exécuté par la skill `0-build` (script de cohérence : events badge, build-env, PATH), livraison = tool `ship`. Rule générée `.claude/rules/conventions.md` (contrat + cohérence inter-projets : lockfile, README, une commande de build, registre à jour).
+- **Une app naît vide et arrêtée** (pas de scaffold, pas de defaults `run_command`/`build_command`) : la première conversation Studio génère le projet et configure le registre via `app.update`. `app.build` sans `build_command` → erreur explicite ; `build.sh` sans commande échoue volontairement ; les artefacts (`build_artefact`) ne sont requis que si un build host distant est configuré (`ATELIER_BUILD_HOST`, non défini par défaut).
+- **UI** : champ Stack libre à la création (optionnel), label affiché tel quel. La skill `0-build` générée rend la config réelle de l'app (commande + artefacts), plus aucune prose par-stack.
+
 ---
 
 ## Quoi est Atelier

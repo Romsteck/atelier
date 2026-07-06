@@ -1636,7 +1636,7 @@ fn tool_definitions_apps() -> Value {
                 "properties": {
                     "slug": { "type": "string" },
                     "name": { "type": "string" },
-                    "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum"] },
+                    "stack": { "type": "string", "description": "Free-form technology label (informative only, max 64 chars) — e.g. 'axum-vite', 'python-fastapi'. The platform is stack-agnostic; build/run are driven by run_command/build_command." },
                     "visibility": { "type": "string", "enum": ["public", "private"], "default": "private" },
                     "run_command": { "type": "string" },
                     "build_command": { "type": "string" },
@@ -1654,7 +1654,7 @@ fn tool_definitions_apps() -> Value {
                 "properties": {
                     "slug": { "type": "string" },
                     "name": { "type": "string" },
-                    "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum"] },
+                    "stack": { "type": "string", "description": "Free-form technology label (informative only, max 64 chars)." },
                     "visibility": { "type": "string", "enum": ["public", "private"] },
                     "run_command": { "type": "string" },
                     "build_command": { "type": "string" },
@@ -1702,7 +1702,7 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "app.build",
-            "description": "Build an app remotely on the configured build host (ATELIER_BUILD_HOST; rsync src up, build, rsync artefacts down). Synchronous; bounded by `timeout_secs` (default 1800 = 30 min). Stacks: axum, axum-vite, next-js. Returns AppExecResult (stdout/stderr/exit_code/duration_ms).",
+            "description": "Build an app using its registry `build_command` (local by default; remote via ATELIER_BUILD_HOST with rsync up/down of `build_artefact`). Synchronous; bounded by `timeout_secs` (default 1800 = 30 min). Fails if the app has no build_command configured. Returns AppExecResult (stdout/stderr/exit_code/duration_ms).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

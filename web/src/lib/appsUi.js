@@ -1,13 +1,9 @@
 // Helpers UI partagés autour des apps — extraits de l'ancien `pages/Studio.jsx`
 // pour être consommés à la fois par la homepage (Apps, Sidebar) et l'app Studio.
 
-export const STACKS = [
-  { value: 'next-js', label: 'Next.js' },
-  { value: 'axum-vite', label: 'Vite+Rust' },
-  { value: 'axum', label: 'Rust Only' },
-];
-
-export const stackLabel = (s) => STACKS.find((st) => st.value === s)?.label || s;
+// Stack = label libre côté plateforme (généricisation 2026-07-06) : plus de
+// liste fermée ni d'enum, on affiche le label du registre tel quel.
+export const stackLabel = (s) => s || '—';
 
 export const SLUG_RE = /^[a-z][a-z0-9-]*$/;
 

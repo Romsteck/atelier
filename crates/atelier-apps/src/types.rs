@@ -3,30 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Technology stack for an application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AppStack {
-    NextJs,
-    AxumVite,
-    Axum,
-    Flutter,
-}
-
-impl AppStack {
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::NextJs => "Next.js",
-            Self::AxumVite => "Vite+Rust",
-            Self::Axum => "Rust Only",
-            Self::Flutter => "Flutter",
-        }
-    }
-
-    pub fn default_health_path(&self) -> &'static str {
-        "/health"
-    }
-}
+/// Default health path applied at app creation when none is provided.
+pub const DEFAULT_HEALTH_PATH: &str = "/health";
 
 /// Whether an app is reachable without authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -181,7 +159,13 @@ pub struct Application {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub stack: AppStack,
+    /// Free-form technology label, purely informative (shown in the UI,
+    /// settable by the app's agent via `app.update`). The platform is
+    /// stack-agnostic: build/run behaviour is driven exclusively by
+    /// `run_command` / `build_command` / `build_artefact` / `health_path`.
+    /// Legacy enum values (`next-js`, `axum-vite`, `axum`, `flutter`)
+    /// deserialise as-is from existing rows.
+    pub stack: String,
     #[serde(default)]
     pub has_db: bool,
     #[serde(default)]
@@ -228,11 +212,12 @@ pub struct Application {
 }
 
 impl Application {
-    /// Create a new application with sensible defaults for the given stack.
-    pub fn new(slug: String, name: String, stack: AppStack) -> Self {
+    /// Create a new application with platform defaults. `stack` is an
+    /// informative label only.
+    pub fn new(slug: String, name: String, stack: String) -> Self {
         let now = Utc::now();
         let domain = format!("{}.mynetwk.biz", slug);
-        let health_path = stack.default_health_path().to_string();
+        let health_path = DEFAULT_HEALTH_PATH.to_string();
         Self {
             slug,
             name,
