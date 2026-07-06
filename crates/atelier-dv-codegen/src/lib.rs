@@ -35,12 +35,23 @@ pub struct GeneratedCrate {
 }
 
 /// Canonical fingerprint of a schema. Owned by the library so the CLI and the
-/// in-process tool agree byte-for-byte: both hash `serde_json::to_string(&schema)`
-/// (declaration order), rather than whatever JSON text a given transport
-/// happened to produce. A one-time `schema.lock` churn on first regen is
-/// accepted — the whole point is that the lock had drifted.
+/// in-process tool agree byte-for-byte: both hash `serde_json::to_string` of the
+/// schema in declaration order, rather than whatever JSON text a given transport
+/// happened to produce.
+///
+/// The top-level `updated_at` is normalised out first: `engine.get_schema()`
+/// stamps it with `Utc::now()` on EVERY read, so hashing it would make the
+/// fingerprint — and thus the committed `schema.lock` — change on every
+/// `dv_regen_client` call even for an identical schema, breaking idempotency
+/// (`write_crate` would always report `schema.lock` as changed, triggering a
+/// needless chown + a misleading "schema moved" signal) and dirtying git.
+/// Table-level timestamps are persisted and move only on real DDL, so they stay
+/// in the hash and still signal genuine drift. A one-time `schema.lock` churn on
+/// the first regen after this change is expected (the lock had drifted anyway).
 pub fn schema_sha256(schema: &DatabaseSchema) -> Result<String> {
-    let json = serde_json::to_string(schema).context("serialise schema for hashing")?;
+    let mut canonical = schema.clone();
+    canonical.updated_at = None;
+    let json = serde_json::to_string(&canonical).context("serialise schema for hashing")?;
     let mut hasher = sha2::Sha256::new();
     hasher.update(json.as_bytes());
     Ok(hex::encode(hasher.finalize()))
@@ -95,4 +106,37 @@ pub fn write_if_different(path: &Path, content: &str) -> std::io::Result<bool> {
     }
     std::fs::write(path, content)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atelier_dataverse::DatabaseSchema;
+    use chrono::{TimeZone, Utc};
+
+    /// The schema fingerprint MUST ignore the volatile top-level `updated_at`
+    /// (re-stamped `Utc::now()` on every `engine.get_schema()`), else
+    /// `dv_regen_client` rewrites the committed `schema.lock` on every call
+    /// even when nothing changed. A real change (version bump) still moves it.
+    #[test]
+    fn schema_hash_ignores_volatile_updated_at() {
+        let base = DatabaseSchema { tables: vec![], relations: vec![], version: 7, updated_at: None };
+        let mut a = base.clone();
+        a.updated_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
+        let mut b = base.clone();
+        b.updated_at = Some(Utc.with_ymd_and_hms(2026, 7, 6, 15, 0, 0).unwrap());
+        assert_eq!(
+            schema_sha256(&a).unwrap(),
+            schema_sha256(&b).unwrap(),
+            "differing only in the volatile updated_at must not change the hash"
+        );
+
+        let mut c = a.clone();
+        c.version = 8;
+        assert_ne!(
+            schema_sha256(&a).unwrap(),
+            schema_sha256(&c).unwrap(),
+            "a real schema change (version bump) must change the hash"
+        );
+    }
 }
