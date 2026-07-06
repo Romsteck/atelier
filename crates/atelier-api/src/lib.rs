@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 
 pub mod clients;
+pub mod host_gate;
 pub mod mcp;
 pub mod routes;
 pub mod state;
@@ -17,6 +18,8 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
+    // The host-gate needs the state but `state` is consumed by `.with_state`.
+    let gate_state = state.clone();
     let mut app = Router::new()
         .nest("/api", api_router())
         .nest("/apps", routes::apps_proxy::router())
@@ -68,6 +71,14 @@ pub fn router(state: ApiState, web_dist: Option<PathBuf>) -> Router {
         }
     }
 
+    // Host-gate : les hostnames publics assignés (Homeroute) ciblent CE port ;
+    // sur ces hosts on ne sert QUE /apps/{slug}/ (307 sinon, 404 autres apps).
+    // `Router::layer` (et pas route_layer) pour couvrir aussi fallback_service
+    // SPA, /studio, /mcp et /_next. CatchPanic reste le plus externe (filet).
+    app = app.layer(axum::middleware::from_fn_with_state(
+        gate_state,
+        host_gate::host_gate,
+    ));
     // Filet global : sans lui, un panic de handler avorte la tâche hyper et le
     // client reçoit une connexion coupée (pas de statut) au lieu d'un 500 JSON.
     app.layer(CatchPanicLayer::custom(handle_panic))

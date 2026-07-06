@@ -270,6 +270,18 @@ async fn http_forward(slug: String, upstream_path: String, port: u16, req: Reque
             resp_headers.append(n, v);
         }
     }
+    // Safe-by-default caching: without an explicit Cache-Control, intermediate
+    // caches apply their own heuristics — Cloudflare stamps its ~4h default TTL
+    // on cacheable extensions and poisoned .js URLs with SPA-fallback HTML
+    // during the 2026-06/07 routing incident. `no-cache` forbids serving
+    // without revalidation at every layer; apps opt into real caching by
+    // sending their own headers (immutable hashed assets, etc.).
+    if !resp_headers.contains_key(axum::http::header::CACHE_CONTROL) {
+        resp_headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
+    }
 
     // Stream the response body: bytes reach the browser as the app emits them
     // (SSE/chunked work, no full-buffer in RAM). A mid-stream upstream error
@@ -285,7 +297,10 @@ fn inject_forwarded_headers_reqwest(
     slug: &str,
     src: &HeaderMap,
 ) {
-    if let Some(host) = src.get("host") {
+    // Prefer an inbound X-Forwarded-Host (hr-proxy sets it to the PUBLIC host
+    // the client used — our own Host is then the upstream target 127.0.0.1);
+    // only fall back to Host for direct LAN access.
+    if let Some(host) = src.get("x-forwarded-host").or_else(|| src.get("host")) {
         if let Ok(v) = reqwest::header::HeaderValue::from_bytes(host.as_bytes()) {
             fwd.insert(
                 reqwest::header::HeaderName::from_static("x-forwarded-host"),
@@ -388,7 +403,11 @@ async fn run_ws_bridge(
         copy_header(h, &src_headers, "user-agent");
         copy_header(h, &src_headers, "sec-websocket-protocol");
         copy_header(h, &src_headers, "sec-websocket-extensions");
-        if let Some(host) = src_headers.get("host") {
+        // Same precedence as the HTTP path: keep the public host from hr-proxy.
+        if let Some(host) = src_headers
+            .get("x-forwarded-host")
+            .or_else(|| src_headers.get("host"))
+        {
             if let Ok(v) = HeaderValue::from_bytes(host.as_bytes()) {
                 h.insert("x-forwarded-host", v);
             }

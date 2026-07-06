@@ -5,8 +5,8 @@
 //! truth; the stored uuid is a cache that is always re-resolved by `subdomain`
 //! before a mutation. Held on `ApiState` (mirrors `BackupService`).
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -29,8 +29,6 @@ pub enum HrServiceError {
     Disabled,
     /// App slug unknown.
     NotFound(String),
-    /// App cannot get a subdomain route in v1 (no-strip Next.js basePath).
-    Ineligible(String),
     /// Bad input.
     BadRequest(String),
     /// Homeroute returned an error / was unreachable.
@@ -46,7 +44,7 @@ impl HrServiceError {
             Self::Unavailable => 503,
             Self::Disabled => 409,
             Self::NotFound(_) => 404,
-            Self::Ineligible(_) | Self::BadRequest(_) => 400,
+            Self::BadRequest(_) => 400,
             Self::Upstream(_) => 502,
             Self::Internal(_) => 500,
         }
@@ -61,8 +59,9 @@ impl std::fmt::Display for HrServiceError {
                 f,
                 "liaison Homeroute non configurée — renseignez le token dans les Paramètres"
             ),
-            Self::NotFound(m) | Self::Ineligible(m) | Self::BadRequest(m) | Self::Upstream(m)
-            | Self::Internal(m) => write!(f, "{m}"),
+            Self::NotFound(m) | Self::BadRequest(m) | Self::Upstream(m) | Self::Internal(m) => {
+                write!(f, "{m}")
+            }
         }
     }
 }
@@ -109,7 +108,8 @@ pub struct AppRouteView {
     pub name: String,
     pub port: u16,
     pub visibility: String,
-    /// False for no-strip apps (Next.js basePath) — can't get a subdomain in v1.
+    /// Always true since the host-gate: strip AND no-strip apps are served via
+    /// Atelier's path-proxy on their hostname. Kept for API compat with the UI.
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ineligible_reason: Option<String>,
@@ -149,9 +149,11 @@ pub struct AssignBody {
     /// Subdomain to use (defaults to the app slug).
     #[serde(default)]
     pub subdomain: Option<String>,
-    /// Whether Homeroute should enforce its forward-auth (default false in v1).
+    /// Whether Homeroute should enforce its forward-auth. `None` (field absent,
+    /// e.g. a UI re-sync) keeps the live host's current flag instead of
+    /// clobbering it — new hosts default to false (apps carry their own auth).
     #[serde(default)]
-    pub require_auth: bool,
+    pub require_auth: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -160,8 +162,13 @@ pub struct HomerouteService {
     http: reqwest::Client,
     registry: AppRegistry,
     events: Arc<EventBus>,
-    /// No-strip app slugs (Next.js basePath) — ineligible for subdomain routing.
-    preserve_prefix_slugs: HashSet<String>,
+    /// Atelier's own HTTP port: assigned hostnames target IT (not the app port)
+    /// so the host-gate + path-proxy serve the app under its build base
+    /// `/apps/{slug}/` — the only path a PWA built with an absolute base works at.
+    atelier_http_port: u16,
+    /// hostname (lowercase, no port) → slug, read per-request by the host-gate
+    /// middleware. `std::sync::RwLock`: never held across an await.
+    host_map: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl HomerouteService {
@@ -169,7 +176,7 @@ impl HomerouteService {
         store: HomerouteStore,
         registry: AppRegistry,
         events: Arc<EventBus>,
-        preserve_prefix_slugs: HashSet<String>,
+        atelier_http_port: u16,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
@@ -180,8 +187,34 @@ impl HomerouteService {
             http,
             registry,
             events,
-            preserve_prefix_slugs,
+            atelier_http_port,
+            host_map: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Rebuild the hostname→slug map from `atelier_meta.homeroute_routes`.
+    /// Best-effort (empty map when Postgres is down — hostnames then fall
+    /// through to the normal Atelier UI, same as an unassigned host). Called at
+    /// boot, after every mapping mutation, and from the heartbeat loop.
+    pub async fn reload_host_map(&self) {
+        let routes = self.store.list_routes().await.unwrap_or_default();
+        let mut map = HashMap::with_capacity(routes.len());
+        for r in routes {
+            let host = r.hostname.to_ascii_lowercase();
+            if let Some(prev) = map.insert(host, r.slug.clone()) {
+                warn!(
+                    hostname = %r.hostname, kept = %r.slug, dropped = %prev,
+                    "homeroute: duplicate hostname in routes cache — last slug wins"
+                );
+            }
+        }
+        *self.host_map.write().unwrap() = map;
+    }
+
+    /// Slug assigned to `host` (already lowercased, port stripped), if any.
+    /// Sync + lock-only: called on the hot path by the host-gate middleware.
+    pub fn slug_for_host(&self, host: &str) -> Option<String> {
+        self.host_map.read().unwrap().get(host).cloned()
     }
 
     /// Whether the control-plane pool is available (gates the endpoints → 503).
@@ -261,6 +294,9 @@ impl HomerouteService {
     pub async fn heartbeat_loop(&self) {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         loop {
+            // Self-healing refresh of the host-gate map (covers manual edits of
+            // the homeroute_routes table / a missed direct reload). 1 SELECT/5min.
+            self.reload_host_map().await;
             match self.register().await {
                 Ok(s) => debug!(env = %s.environment_name, "homeroute heartbeat ok"),
                 Err(HrServiceError::Disabled)
@@ -329,13 +365,6 @@ impl HomerouteService {
 
         let mut views = Vec::with_capacity(apps.len());
         for app in &apps {
-            let eligible = !self.preserve_prefix_slugs.contains(&app.slug);
-            let ineligible_reason = (!eligible).then(|| {
-                format!(
-                    "servie en path (Next.js basePath, no-strip) — accès via /apps/{}/",
-                    app.slug
-                )
-            });
             let local_row = local.get(&app.slug);
             let subdomain = local_row
                 .map(|r| r.subdomain.clone())
@@ -346,8 +375,8 @@ impl HomerouteService {
                 name: app.name.clone(),
                 port: app.port,
                 visibility: visibility_str(app.visibility),
-                eligible,
-                ineligible_reason,
+                eligible: true,
+                ineligible_reason: None,
                 assigned: local_row.is_some(),
                 subdomain: Some(subdomain.clone()),
                 hostname: local_row.map(|r| r.hostname.clone()),
@@ -365,7 +394,13 @@ impl HomerouteService {
                         view.hostname = Some(format!("{}.{}", subdomain, cfg.base_domain));
                         view.enabled = Some(host.enabled);
                         view.require_auth = Some(host.require_auth);
-                        let port_drift = host.target_port.map(|p| p != app.port).unwrap_or(false);
+                        // Hosts must target Atelier itself (host-gate), not the
+                        // app port — a legacy/manual host pointing at the app
+                        // port is drift the UI resolves via re-sync.
+                        let port_drift = host
+                            .target_port
+                            .map(|p| p != self.atelier_http_port)
+                            .unwrap_or(false);
                         let id_drift = local_row.map(|r| r.host_id != host.id).unwrap_or(false);
                         view.drift = port_drift || id_drift;
                     }
@@ -409,34 +444,38 @@ impl HomerouteService {
             .get(slug)
             .await
             .ok_or_else(|| HrServiceError::NotFound(format!("app not found: {slug}")))?;
-        if self.preserve_prefix_slugs.contains(slug) {
-            return Err(HrServiceError::Ineligible(format!(
-                "app '{slug}' est servie en path (Next.js basePath, no-strip) ; \
-                 le routage par sous-domaine n'est pas supporté en v1"
-            )));
-        }
+        // Lowercased: DNS and the host-gate map are case-insensitive, and
+        // validate_subdomain accepts uppercase ASCII.
         let subdomain = body
             .subdomain
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(slug)
-            .to_string();
+            .to_ascii_lowercase();
         validate_subdomain(&subdomain)?;
-        let require_auth = body.require_auth;
         // Label stamped on the host so Homeroute shows it as Atelier-managed.
         let env_name = effective_env_name(settings.environment_name.as_deref());
 
         let client = self.client(&settings);
         let cfg = client.get_config().await.map_err(upstream)?;
 
-        let host_id = if let Some(existing) = cfg.find_by_subdomain(&subdomain) {
+        // The host targets Atelier itself: the host-gate + path-proxy serve the
+        // app under /apps/{slug}/ (its build base) and redirect everything else.
+        // Targeting the app port directly is broken by design (absolute-base
+        // assets 404 into the app's SPA fallback → JS served as text/html).
+        let existing = cfg.find_by_subdomain(&subdomain);
+        // Body absent (re-sync) ⇒ keep the live host's flag; new host ⇒ false.
+        let require_auth = body
+            .require_auth
+            .unwrap_or_else(|| existing.map(|h| h.require_auth).unwrap_or(false));
+        let host_id = if let Some(existing) = existing {
             client
                 .update_host(
                     &existing.id,
                     &serde_json::json!({
                         "targetHost": "127.0.0.1",
-                        "targetPort": app.port,
+                        "targetPort": self.atelier_http_port,
                         "requireAuth": require_auth,
                         "enabled": true,
                         "managedBy": "atelier",
@@ -451,7 +490,7 @@ impl HomerouteService {
                 .create_host(&CreateHost {
                     subdomain: subdomain.clone(),
                     target_host: "127.0.0.1".to_string(),
-                    target_port: app.port,
+                    target_port: self.atelier_http_port,
                     require_auth,
                     enabled: true,
                     managed_by: "atelier".to_string(),
@@ -463,9 +502,18 @@ impl HomerouteService {
 
         let hostname = format!("{}.{}", subdomain, cfg.base_domain);
         self.store
-            .upsert_route(slug, &host_id, &subdomain, &hostname, app.port, require_auth)
+            .upsert_route(
+                slug,
+                &host_id,
+                &subdomain,
+                &hostname,
+                self.atelier_http_port,
+                require_auth,
+            )
             .await
             .map_err(internal)?;
+        // Deterministic: the gate knows the hostname before the response leaves.
+        self.reload_host_map().await;
         self.broadcast(slug, "assigned");
 
         Ok(AppRouteView {
@@ -498,6 +546,7 @@ impl HomerouteService {
             client.delete_host(&host.id).await.map_err(upstream)?;
         }
         self.store.delete_route(slug).await.map_err(internal)?;
+        self.reload_host_map().await;
         self.broadcast(slug, "removed");
         Ok(())
     }
@@ -543,6 +592,7 @@ impl HomerouteService {
             }
         }
         let _ = self.store.delete_route(slug).await;
+        self.reload_host_map().await;
         self.broadcast(slug, "removed");
     }
 
@@ -571,6 +621,13 @@ fn validate_subdomain(s: &str) -> Result<(), HrServiceError> {
         return Err(HrServiceError::BadRequest(
             "subdomain doit faire 1..63 caractères".into(),
         ));
+    }
+    // `atelier` would shadow Atelier's own UI host (the gate would hijack it);
+    // `auth`/`proxy` are hr-edge builtin management domains.
+    if matches!(s, "atelier" | "auth" | "proxy") {
+        return Err(HrServiceError::BadRequest(format!(
+            "subdomain réservé: {s}"
+        )));
     }
     let ok = s
         .chars()

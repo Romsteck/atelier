@@ -39,7 +39,8 @@ export default function Settings() {
   const flash = (type, text) => showToast(text, type);
   const [busy, setBusy] = useState({});            // per-slug action in flight
   const [subdomains, setSubdomains] = useState({}); // per-slug editable subdomain
-  const dirty = useRef(false);                       // user touched the subdomain inputs
+  const [requireAuth, setRequireAuth] = useState({}); // per-slug edge forward-auth
+  const dirty = useRef(false);                       // user touched the per-row inputs
 
   const reload = useCallback(async () => {
     try {
@@ -70,12 +71,17 @@ export default function Settings() {
   // Live: any route/settings/registration change rebroadcasts → reload.
   useWebSocket({ 'homeroute:routes': () => reload() });
 
-  // Seed per-row subdomain inputs from the server once (don't clobber edits).
+  // Seed per-row inputs (subdomain + auth edge) from the server once (don't clobber edits).
   useEffect(() => {
     if (!routes?.apps || dirty.current) return;
     const seed = {};
-    for (const a of routes.apps) seed[a.slug] = a.subdomain || a.slug;
+    const auth = {};
+    for (const a of routes.apps) {
+      seed[a.slug] = a.subdomain || a.slug;
+      auth[a.slug] = !!a.require_auth;
+    }
     setSubdomains(seed);
+    setRequireAuth(auth);
   }, [routes]);
 
   const setField = (k) => (e) => {
@@ -143,8 +149,10 @@ export default function Settings() {
   }
 
   const assign = (a) =>
-    withBusy(a.slug, () => assignHomerouteRoute(a.slug, { subdomain: subdomains[a.slug] || a.slug }),
-      `Hostname attribué à ${a.name}`);
+    withBusy(a.slug, () => assignHomerouteRoute(a.slug, {
+      subdomain: subdomains[a.slug] || a.slug,
+      require_auth: requireAuth[a.slug] ?? a.require_auth ?? false,
+    }), `Hostname attribué à ${a.name}`);
   const remove = (a) => withBusy(a.slug, () => removeHomerouteRoute(a.slug), `Hostname retiré de ${a.name}`);
   const toggle = (a) => withBusy(a.slug, () => toggleHomerouteRoute(a.slug));
 
@@ -156,8 +164,7 @@ export default function Settings() {
 
   const sortedApps = useMemo(() => {
     if (!routes?.apps) return [];
-    return [...routes.apps].sort((x, y) =>
-      (Number(y.eligible) - Number(x.eligible)) || x.name.localeCompare(y.name));
+    return [...routes.apps].sort((x, y) => x.name.localeCompare(y.name));
   }, [routes]);
 
   if (loading) {
@@ -296,8 +303,10 @@ export default function Settings() {
           <Globe className="h-4 w-4 text-blue-400" /> Hostnames des applications
         </h2>
         <p className="mb-4 text-xs text-gray-500">
-          Publie chaque app sur <code>{'{sous-domaine}'}.{baseDomain || 'mynetwk.biz'}</code> →
-          <code> 127.0.0.1:{'{port}'}</code> via Homeroute (route gérée par cet environnement).
+          Publie chaque app sur <code>{'{sous-domaine}'}.{baseDomain || 'mynetwk.biz'}</code> via
+          Homeroute. Le hostname pointe vers Atelier, qui sert l&apos;app sous son chemin de build
+          <code> /apps/{'{slug}'}/</code> (la racine y redirige automatiquement) — le reste
+          d&apos;Atelier n&apos;est pas exposé sur ce hostname.
         </p>
 
         {!configured && (
@@ -324,9 +333,9 @@ export default function Settings() {
             <tbody className="divide-y divide-gray-800">
               {sortedApps.map((a) => {
                 const rowBusy = !!busy[a.slug];
-                const canAct = configured && reachable && a.eligible;
+                const canAct = configured && reachable;
                 return (
-                  <tr key={a.slug} className={a.eligible ? '' : 'opacity-60'}>
+                  <tr key={a.slug}>
                     <td className="py-3 pr-3 align-top">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-gray-100">{a.name}</span>
@@ -334,27 +343,30 @@ export default function Settings() {
                       </div>
                       <div className="mt-0.5 text-xs text-gray-500">
                         <code>{a.slug}</code> · {a.visibility}
-                        {!a.eligible && a.ineligible_reason && (
-                          <span className="ml-1 text-amber-700 dark:text-amber-400/80" title={a.ineligible_reason}> · non éligible</span>
-                        )}
                       </div>
                     </td>
 
                     <td className="py-3 pr-3 align-top">
-                      {a.eligible ? (
-                        <div className="flex items-center gap-1">
-                          <input
-                            className={`${FIELD} w-32 px-2 py-1`}
-                            value={subdomains[a.slug] ?? a.slug}
-                            onChange={(e) => { dirty.current = true; setSubdomains((s) => ({ ...s, [a.slug]: e.target.value })); }}
-                            disabled={!canAct || rowBusy}
-                            spellCheck={false}
-                          />
-                          <span className="text-xs text-gray-500">.{baseDomain || 'mynetwk.biz'}</span>
-                        </div>
-                      ) : (
-                        <span className="text-xs italic text-gray-600">accès par path /apps/{a.slug}/</span>
-                      )}
+                      <div className="flex items-center gap-1">
+                        <input
+                          className={`${FIELD} w-32 px-2 py-1`}
+                          value={subdomains[a.slug] ?? a.slug}
+                          onChange={(e) => { dirty.current = true; setSubdomains((s) => ({ ...s, [a.slug]: e.target.value })); }}
+                          disabled={!canAct || rowBusy}
+                          spellCheck={false}
+                        />
+                        <span className="text-xs text-gray-500">.{baseDomain || 'mynetwk.biz'}</span>
+                      </div>
+                      <label className="mt-1.5 flex w-fit cursor-pointer items-center gap-1.5 text-xs text-gray-400">
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 accent-blue-500"
+                          checked={requireAuth[a.slug] ?? !!a.require_auth}
+                          onChange={(e) => { dirty.current = true; setRequireAuth((s) => ({ ...s, [a.slug]: e.target.checked })); }}
+                          disabled={!canAct || rowBusy}
+                        />
+                        Auth edge (SSO Homeroute)
+                      </label>
                       {a.assigned && a.hostname && (
                         <a
                           href={`https://${a.hostname}`}
@@ -377,8 +389,13 @@ export default function Settings() {
                             <Power className="h-3 w-3" /> {a.enabled === false ? 'désactivée' : 'active'}
                           </span>
                           {a.drift && (
-                            <span className="inline-flex w-fit items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400" title="Le port ou l'identifiant Homeroute ne correspond plus — re-synchronisez.">
+                            <span className="inline-flex w-fit items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400" title="La cible ou l'identifiant Homeroute ne correspond plus (ex. route legacy vers le port de l'app) — re-synchronisez.">
                               <AlertTriangle className="h-3 w-3" /> désynchronisé
+                            </span>
+                          )}
+                          {a.require_auth === false && (
+                            <span className="inline-flex w-fit items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400" title="Accessible publiquement sans l'auth du reverse proxy — seule l'auth interne de l'app protège.">
+                              <AlertTriangle className="h-3 w-3" /> sans auth edge
                             </span>
                           )}
                         </div>

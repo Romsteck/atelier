@@ -173,13 +173,24 @@ async fn main() -> Result<()> {
     // (:4000) pour créer/retirer des routes hostname pour les apps. Réutilise le
     // pool control-plane (settings + mapping slug→host) et le bus d'événements ;
     // dégradé en 503 si Postgres absent. La liaison est désactivée par défaut
-    // (toggle dans la page Paramètres).
+    // (toggle dans la page Paramètres). Les hostnames ciblent le port d'Atelier
+    // lui-même : le middleware host-gate sert l'app sous /apps/{slug}/ (sa base
+    // de build) et redirige le reste — cibler le port de l'app est cassé par
+    // construction (assets en base absolue → fallback SPA → JS en text/html).
+    let atelier_http_port: u16 = http_addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4100);
     let homeroute = atelier_api::clients::homeroute_service::HomerouteService::new(
         atelier_common::homeroute::HomerouteStore::new(meta_pool.clone()),
         app_registry.clone(),
         events.clone(),
-        atelier_api::state::parse_preserve_prefix_slugs(),
+        atelier_http_port,
     );
+    // Seed de la map hostname→slug du host-gate (rechargée ensuite à chaque
+    // mutation d'assignation + par le heartbeat).
+    homeroute.reload_host_map().await;
 
     let state = ApiState::new(
         docs_dir.clone(),
