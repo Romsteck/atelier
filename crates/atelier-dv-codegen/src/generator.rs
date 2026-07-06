@@ -319,6 +319,19 @@ const METHODS_TEMPLATE: &str = r#"impl<'a> __BUILDER__<'a> {
 
     /// `GET /{table}` with OData query params (`$filter`, `$select`, …).
     pub async fn list_with(&self, params: ListParams) -> DvResult<Vec<__ROW__>> {
+        Ok(self.list_env(params).await?.value)
+    }
+
+    /// Like `list_with`, but also returns the total matching count the gateway
+    /// reports via `@count`. Forces `$count=true` regardless of
+    /// `ListParams::count`. Use this for paginated views that need a grand
+    /// total in one request instead of draining every page.
+    pub async fn list_with_count(&self, params: ListParams) -> DvResult<(Vec<__ROW__>, Option<i64>)> {
+        let env = self.list_env(params.count(true)).await?;
+        Ok((env.value, env.count))
+    }
+
+    async fn list_env(&self, params: ListParams) -> DvResult<ListEnvelope<__ROW__>> {
         let mut url = self.client.endpoint(Self::PATH);
         let mut q: Vec<(String, String)> = Vec::new();
         if let Some(f) = params.filter { q.push(("$filter".into(), f)); }
@@ -327,10 +340,10 @@ const METHODS_TEMPLATE: &str = r#"impl<'a> __BUILDER__<'a> {
         if let Some(t) = params.top { q.push(("$top".into(), t.to_string())); }
         if let Some(s) = params.skip { q.push(("$skip".into(), s.to_string())); }
         if params.include_deleted { q.push(("$includeDeleted".into(), "true".into())); }
+        if params.count { q.push(("$count".into(), "true".into())); }
         if !q.is_empty() { url.push('?'); url.push_str(&serde_urlencoded_lite(&q)); }
         let resp = self.client.auth(self.client.http.get(&url)).send().await?;
-        let env: ListEnvelope<__ROW__> = DvClient::handle(resp).await?;
-        Ok(env.value)
+        DvClient::handle(resp).await
     }
 
     /// `GET /{table}/{id}`. Returns `Ok(None)` on 404.
@@ -530,6 +543,10 @@ pub struct ListParams {
     pub top: Option<u32>,
     pub skip: Option<u32>,
     pub include_deleted: bool,
+    /// Ask the gateway for the total matching count (`$count=true` → `@count`
+    /// in the envelope). `list_with` still returns only the rows; use
+    /// `list_with_count` to read the total.
+    pub count: bool,
 }
 
 impl ListParams {
@@ -543,6 +560,7 @@ impl ListParams {
     pub fn top(mut self, n: u32) -> Self { self.top = Some(n); self }
     pub fn skip(mut self, n: u32) -> Self { self.skip = Some(n); self }
     pub fn include_deleted(mut self, v: bool) -> Self { self.include_deleted = v; self }
+    pub fn count(mut self, v: bool) -> Self { self.count = v; self }
 }
 
 /// Tiny URL-encoder so the generated crate doesn't need a `serde_urlencoded`
@@ -674,6 +692,12 @@ mod tests {
         assert!(out.contains("pub fn transactions(&self) -> Transactions<'_>"));
         assert!(out.contains("pub async fn insert(&self, payload: TransactionInsert)"));
         assert!(out.contains("If-Match"));
+        // $count surface: opt-in flag on ListParams + the (rows, total) accessor
+        // + the query-param push. See the `home` app issue (drain-to-count).
+        assert!(out.contains("pub count: bool"));
+        assert!(out.contains("pub fn count(mut self, v: bool) -> Self"));
+        assert!(out.contains("pub async fn list_with_count(&self, params: ListParams) -> DvResult<(Vec<Transaction>, Option<i64>)>"));
+        assert!(out.contains("(\"$count\".into(), \"true\".into())"));
     }
 
     #[test]

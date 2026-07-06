@@ -116,6 +116,7 @@ dependencies = [
  "atelier-common",
  "atelier-dataverse",
  "atelier-docs",
+ "atelier-dv-codegen",
  "atelier-git",
  "atelier-ipc",
  "atelier-logging",
@@ -239,7 +240,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tokio",
- "uuid",
 ]
 
 [[package]]

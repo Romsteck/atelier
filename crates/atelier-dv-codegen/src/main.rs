@@ -4,10 +4,13 @@
 //! Usage:
 //! ```sh
 //! atelier-dv-codegen --slug wallet \
-//!     --base-url http://127.0.0.1:4000/api/dv/wallet \
+//!     --base-url http://127.0.0.1:4100/api/dv/wallet \
 //!     --token "$HR_DV_TOKEN" \
 //!     --output /var/lib/atelier/apps/wallet/src/server/dv-client
 //! ```
+//!
+//! In-process, Atelier regenerates the same crate via the `dv_regen_client`
+//! MCP tool (no HTTP/token) — both paths share `atelier_dv_codegen::generate_crate`.
 //!
 //! Output:
 //! - `Cargo.toml`           (committed, stable)
@@ -15,11 +18,9 @@
 //! - `schema.lock`          (committed: schema_version + sha256)
 //! - `src/lib.rs`           (generated, gitignored)
 
-mod generator;
-
 use anyhow::{Context, Result};
+use atelier_dv_codegen::{generate_crate, write_crate};
 use clap::Parser;
-use sha2::Digest;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -30,7 +31,7 @@ struct Args {
     slug: String,
 
     /// Gateway base URL (`https://dv.mynetwk.biz/{slug}` or
-    /// `http://127.0.0.1:4000/api/dv/{slug}`). Mutually exclusive with
+    /// `http://127.0.0.1:4100/api/dv/{slug}`). Mutually exclusive with
     /// `--schema-file`.
     #[arg(long)]
     base_url: Option<String>,
@@ -84,49 +85,18 @@ async fn main() -> Result<()> {
 
     let schema: atelier_dataverse::DatabaseSchema = serde_json::from_str(&schema_json)
         .with_context(|| "deserialise schema JSON into DatabaseSchema")?;
-    let hash = sha256_hex(&schema_json);
 
-    let lib_rs = generator::generate_lib(&args.slug, &schema)?;
-    let cargo_toml = generator::generate_cargo_toml(&args.slug);
-    let gitignore = "src/\n";
-    let lock = format!(
-        "schema_version={}\nschema_sha256={}\nslug={}\n",
-        schema.version, hash, args.slug
-    );
-
-    std::fs::create_dir_all(&args.output)
-        .with_context(|| format!("mkdir {}", args.output.display()))?;
-    std::fs::create_dir_all(args.output.join("src"))?;
-
-    write_if_different(&args.output.join("Cargo.toml"), &cargo_toml)?;
-    write_if_different(&args.output.join(".gitignore"), gitignore)?;
-    write_if_different(&args.output.join("schema.lock"), &lock)?;
-    write_if_different(&args.output.join("src/lib.rs"), &lib_rs)?;
+    let gc = generate_crate(&args.slug, &schema)?;
+    let changed = write_crate(&args.output, &gc)
+        .with_context(|| format!("write crate into {}", args.output.display()))?;
 
     println!(
-        "✓ dv-{} regenerated (schema_version={}, sha256={}, tables={})",
+        "✓ dv-{} regenerated (schema_version={}, sha256={}, tables={}, changed={})",
         args.slug,
-        schema.version,
-        &hash[..16],
-        schema.tables.len()
+        gc.schema_version,
+        &gc.schema_sha256[..16],
+        schema.tables.len(),
+        if changed.is_empty() { "none".to_string() } else { changed.join(",") },
     );
     Ok(())
-}
-
-fn sha256_hex(s: &str) -> String {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(s.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Atomic-ish file write: only touch the file if its contents change.
-/// Avoids spurious `mtime` bumps that would re-trigger downstream
-/// `cargo build` invocations.
-fn write_if_different(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        if existing == content {
-            return Ok(());
-        }
-    }
-    std::fs::write(path, content)
 }

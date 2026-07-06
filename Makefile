@@ -1,4 +1,4 @@
-.PHONY: all atelier web web-deps runner runner-deps deploy deploy-local deploy-remote deploy-app logs clean test help
+.PHONY: all atelier web web-deps runner runner-deps deploy deploy-local deploy-remote deploy-app fix-app-perms logs clean test help
 
 # Atelier et ses sources vivent sur Medion (/home/romain/atelier), édité via
 # code-server@romain (127.0.0.1:8081). `make deploy` build EN PLACE sur Medion
@@ -11,6 +11,10 @@ MEDION      ?= romain@10.0.0.254
 ATELIER_API ?= http://127.0.0.1:4100
 
 ATELIER_BIN_LOCAL   := target/release/atelier
+# dv-{slug} typed-client generator. Shipped to /opt/atelier/bin so it's on the
+# host PATH for humans (+ legacy `hr-dv-codegen` symlink); the primary regen
+# path is the in-process `dv_regen_client` MCP tool, which needs no binary.
+CODEGEN_BIN_LOCAL   := target/release/atelier-dv-codegen
 WEB_DIST_LOCAL      := web/dist
 # App-side logging SDK. Standalone crate (not a workspace member) consumed by
 # the apps via an ABSOLUTE path-dep `/opt/atelier/crates/atelier-logging-shipper`
@@ -24,6 +28,7 @@ RUNNER_SDK_NATIVE   := runner/node_modules/@anthropic-ai/claude-agent-sdk-linux-
 
 PREFIX       ?= /opt/atelier
 BIN_DST      := $(PREFIX)/bin/atelier
+CODEGEN_BIN_DST := $(PREFIX)/bin/atelier-dv-codegen
 WEB_DIST_DST := $(PREFIX)/web/dist
 SHIPPER_DST  := $(PREFIX)/crates/atelier-logging-shipper
 RUNNER_DST   := $(PREFIX)/runner
@@ -37,6 +42,7 @@ help:
 	@echo "  deploy             build + install dans /opt/atelier + restart atelier.service"
 	@echo "                     (en place sur Medion, sinon fallback rsync/SSH)"
 	@echo "  deploy-app SLUG=x  build app x + restart via API (cf. scripts/deploy-app.sh)"
+	@echo "  fix-app-perms      one-time: re-normalise l'ownership des arbres apps (hr-studio)"
 	@echo "  logs               tail journalctl atelier (local sur Medion, sinon SSH)"
 	@echo "  test               cargo test --workspace"
 	@echo "  clean              cargo clean"
@@ -50,7 +56,7 @@ help:
 all: atelier web runner
 
 atelier:
-	cargo build --release -p atelier
+	cargo build --release -p atelier -p atelier-dv-codegen
 
 # node_modules est gitignoré (non versionné) → install des deps avant le build.
 # `npm ci` est reproductible (piloté par package-lock.json) ; web/.npmrc porte
@@ -86,6 +92,7 @@ endif
 # artefact absent effacerait la prod correspondante (web, /studio, runner).
 define PREFLIGHT
 	@test -x $(ATELIER_BIN_LOCAL) || { echo "error: $(ATELIER_BIN_LOCAL) missing — build failed?" >&2; exit 1; }
+	@test -x $(CODEGEN_BIN_LOCAL) || { echo "error: $(CODEGEN_BIN_LOCAL) missing — build failed? (cargo build -p atelier-dv-codegen)" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/index.html || { echo "error: $(WEB_DIST_LOCAL)/index.html missing/empty — aborting (a --delete rsync would wipe prod web)" >&2; exit 1; }
 	@test -s $(WEB_DIST_LOCAL)/studio/studio.html || { echo "error: $(WEB_DIST_LOCAL)/studio/studio.html missing/empty — studio build absent (a --delete rsync would wipe prod /studio)" >&2; exit 1; }
 	@test -f $(SHIPPER_CRATE_LOCAL)/Cargo.toml || { echo "error: $(SHIPPER_CRATE_LOCAL)/Cargo.toml missing — aborting" >&2; exit 1; }
@@ -113,6 +120,10 @@ deploy-local: atelier web runner
 	@echo "→ install atelier binary (atomic: .new + rename)"
 	sudo install -o root -g root -m 0755 $(ATELIER_BIN_LOCAL) $(BIN_DST).new
 	sudo mv -f $(BIN_DST).new $(BIN_DST)
+	@echo "→ install atelier-dv-codegen (+ legacy hr-dv-codegen symlink)"
+	sudo install -o root -g root -m 0755 $(CODEGEN_BIN_LOCAL) $(CODEGEN_BIN_DST).new
+	sudo mv -f $(CODEGEN_BIN_DST).new $(CODEGEN_BIN_DST)
+	sudo ln -sfn atelier-dv-codegen $(PREFIX)/bin/hr-dv-codegen
 	@echo "→ sync web/dist → $(WEB_DIST_DST)"
 	sudo rsync -a --delete $(WEB_DIST_LOCAL)/ $(WEB_DIST_DST)/
 	@echo "→ sync shipper crate → $(SHIPPER_DST) (path-dep absolu de 4 apps)"
@@ -131,8 +142,9 @@ deploy-local: atelier web runner
 # Fallback legacy : build local puis rsync/SSH vers Medion (lancement hors Medion).
 deploy-remote: atelier web runner
 	$(PREFLIGHT)
-	@echo "→ rsync atelier binary + web/dist to $(MEDION)"
+	@echo "→ rsync atelier + atelier-dv-codegen binaries + web/dist to $(MEDION)"
 	rsync -a --rsync-path='sudo rsync' $(ATELIER_BIN_LOCAL) $(MEDION):$(BIN_DST).new
+	rsync -a --rsync-path='sudo rsync' $(CODEGEN_BIN_LOCAL) $(MEDION):$(CODEGEN_BIN_DST).new
 	rsync -a --rsync-path='sudo rsync' --delete $(WEB_DIST_LOCAL)/ $(MEDION):$(WEB_DIST_DST)/
 	ssh $(MEDION) 'sudo mkdir -p $(SHIPPER_DST)'
 	rsync -a --rsync-path='sudo rsync' --delete --exclude=target --exclude=Cargo.lock \
@@ -143,12 +155,23 @@ deploy-remote: atelier web runner
 	rsync -a --rsync-path='sudo rsync' --delete $(RUNNER_LOCAL)/node_modules/ $(MEDION):$(RUNNER_DST)/node_modules/
 	rsync -a --rsync-path='sudo rsync' $(RUNNER_LOCAL)/package.json $(RUNNER_LOCAL)/package-lock.json $(RUNNER_LOCAL)/.npmrc $(MEDION):$(RUNNER_DST)/
 	@echo "→ atomic swap + restart atelier.service on $(MEDION)"
-	ssh $(MEDION) 'sudo install -o root -g root -m 0755 $(BIN_DST).new $(BIN_DST) && sudo rm -f $(BIN_DST).new && sudo systemctl restart atelier.service'
+	ssh $(MEDION) 'sudo install -o root -g root -m 0755 $(BIN_DST).new $(BIN_DST) && sudo rm -f $(BIN_DST).new && sudo install -o root -g root -m 0755 $(CODEGEN_BIN_DST).new $(CODEGEN_BIN_DST) && sudo rm -f $(CODEGEN_BIN_DST).new && sudo ln -sfn atelier-dv-codegen $(PREFIX)/bin/hr-dv-codegen && sudo systemctl restart atelier.service'
 	$(call HEALTHCHECK,http://10.0.0.254:4100,ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager')
 
 deploy-app:
 	@if [ -z "$(SLUG)" ]; then echo "error: SLUG=<x> required (e.g. make deploy-app SLUG=files)" >&2; exit 1; fi
 	bash scripts/deploy-app.sh $(SLUG)
+
+# One-time rattrapage : re-normalise l'ownership des arbres apps sur le user de
+# build unifié (hr-studio), groupe-writable + setgid. À lancer une fois après
+# être passé à ATELIER_BUILD_AS_USER=hr-studio, hors build en cours (BUILD_BUSY
+# ne protège pas contre le chown). IO potentiellement lourde (node_modules/target).
+fix-app-perms:
+	@echo "→ chown -R hr-studio:hr-studio + chmod g+rwX + setgid on /var/lib/atelier/apps"
+	sudo chown -R hr-studio:hr-studio /var/lib/atelier/apps
+	sudo chmod -R g+rwX /var/lib/atelier/apps
+	sudo find /var/lib/atelier/apps -type d -exec chmod g+s {} +
+	@echo "  done — app trees are now hr-studio-owned, group-writable, setgid"
 
 logs:
 ifeq ($(IS_MEDION),yes)

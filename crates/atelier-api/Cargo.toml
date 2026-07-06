@@ -24,6 +24,7 @@ atelier-docs      = { workspace = true }
 atelier-git       = { workspace = true }
 atelier-ipc       = { workspace = true }
 atelier-dataverse = { workspace = true }
+atelier-dv-codegen = { workspace = true }
 atelier-apps      = { workspace = true }
 atelier-logging = { workspace = true }
 atelier-watcher = { workspace = true }

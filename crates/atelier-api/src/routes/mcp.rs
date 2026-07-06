@@ -567,6 +567,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "db_create_table" | "db_drop_table"
             | "db_add_column" | "db_remove_column" | "db_create_relation"
             | "db_set_display_column"
+            | "dv_regen_client"
             | "dv_schema" | "dv_list" | "dv_get" | "dv_insert" | "dv_update"
             | "dv_soft_delete" | "dv_restore" | "dv_audit_list"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
@@ -597,6 +598,7 @@ fn is_dispatched_project_tool(name: &str) -> bool {
             | "db_create_table" | "db_drop_table"
             | "db_add_column" | "db_remove_column" | "db_create_relation"
             | "db_set_display_column"
+            | "dv_regen_client"
             | "dv_schema" | "dv_list" | "dv_get" | "dv_insert" | "dv_update"
             | "dv_soft_delete" | "dv_restore" | "dv_audit_list"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
@@ -629,6 +631,7 @@ fn tool_definitions_project() -> Value {
         { "name": "db_count_rows", "description": "Count rows in a single table.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_get_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON. Read-only.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_sync_schema", "description": "Rebuild the dataverse `_dv_tables`/`_dv_columns`/`_dv_relations` metadata by introspecting the live PG schema. Use after manual ALTER TABLE.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "dv_regen_client", "description": "Régénère le crate client Rust typé `dv-{slug}` (répertoire `dv-client`) depuis le schéma dataverse LIVE. À lancer après TOUT changement de schéma (db_create_table/db_drop_table/db_add_column/db_remove_column/db_create_relation) : sinon `src/lib.rs` + `schema.lock` dérivent et le code ne voit pas les nouvelles tables/colonnes. Écrit les fichiers (idempotent : ne touche que ce qui change) puis corrige les permissions. Le client expose `list_with_count(params) -> (rows, Option<i64>)` et `ListParams::count(true)` pour un total sans drainer. Après régénération : rebuild (skill 0-build) + restart. Renvoie {changed, schema_version, crate_dir}.", "inputSchema": { "type": "object", "properties": {} } },
         // Schema-ops (mutations — confirmation required, NOT in auto-approve).
         { "name": "db_create_table", "description": "Create a dataverse-managed table. Emits the right PG type per `field_type` (NUMERIC for decimal, TIMESTAMPTZ for date_time, JSONB for json, UUID for uuid, etc.) and registers it in `_dv_tables`/`_dv_columns`. Audit columns (id, created_at, updated_at, version, is_deleted, created_by, updated_by, *_kind) are added implicitly — do NOT declare them. If this table will be referenced by a Lookup, give it a PRIMARY DISPLAY COLUMN: a readable text column (`name` recommended when natural, else `title`/`label`) shown in place of the raw id in lookups. A heuristic auto-detects one; pin it explicitly with `db_set_display_column` if needed.", "inputSchema": { "type": "object", "properties": { "definition": { "type": "object", "description": "TableDefinition — { name, slug, columns: [{name, field_type, required?, unique?, default_value?, ...}], id_strategy?: \"bigserial\"|\"uuid\", display_column?: string }" } }, "required": ["definition"] } },
         { "name": "db_drop_table", "description": "Drop a dataverse-managed table (DROP TABLE + remove from `_dv_*` metadata).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
@@ -808,6 +811,7 @@ async fn handle_tools_call(
         "db_set_display_column" => tool_db_set_display_column(id, &arguments, state).await,
         "db_overview" => tool_db_overview(id, &arguments, state).await,
         "db_count_rows" => tool_db_count_rows(id, &arguments, state).await,
+        "dv_regen_client" => tool_dv_regen_client(id, &arguments, state).await,
         "dv_schema" => tool_dv_schema(id, &arguments, state).await,
         "dv_list" => tool_dv_list(id, &arguments, state).await,
         "dv_get" => tool_dv_get(id, &arguments, state).await,
@@ -889,6 +893,7 @@ fn is_journaled_action(name: &str) -> bool {
             | "db_create_table" | "db_drop_table" | "db_add_column"
             | "db_remove_column" | "db_create_relation"
             | "db_set_display_column" | "db_sync_schema"      // schema-ops
+            | "dv_regen_client"                               // client typé régénéré
             | "scan_set"                                      // scan business
             | "app.update"                                    // config app
     )
@@ -922,6 +927,7 @@ async fn journal_agent_action(state: &McpState, slug: &str, tool: &str, args: &V
             format!("{tool} {target}").trim_end().to_string()
         }
         "scan_set" => "scan business redéfini".to_string(),
+        "dv_regen_client" => "dv_regen_client (client Rust dataverse régénéré)".to_string(),
         "app.update" => "app.update (config)".to_string(),
         _ => tool.to_string(),
     };
@@ -2407,6 +2413,17 @@ async fn tool_db_sync_schema(id: Value, args: &Value, state: &McpState) -> Value
     let ctx = apps_ctx!(id, state);
     let slug = req_str!(args, "slug", id);
     ipc_resp_to_mcp(id, ctx.db_sync_schema(slug.to_string()).await)
+}
+
+/// `dv_regen_client` — regenerate the app's typed `dv-{slug}` client crate from
+/// the live schema (writes files + fixes perms). See `mcp::dv_client_ops`.
+async fn tool_dv_regen_client(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    ipc_resp_to_mcp(
+        id,
+        crate::mcp::dv_client_ops::dv_regen_client(ctx, slug.to_string()).await,
+    )
 }
 
 // ── db.create_table / db.drop_table ──────────────────────────────────

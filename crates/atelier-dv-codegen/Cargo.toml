@@ -3,20 +3,33 @@ name = "atelier-dv-codegen"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "atelier-dv-codegen"
 path = "src/main.rs"
+# The CLI (arg parsing + HTTPS schema fetch) is feature-gated so library
+# consumers (atelier-api's `dv_regen_client` tool) don't drag in clap.
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
 atelier-dataverse = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true }
-reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-clap = { version = "4", features = ["derive", "env"] }
+
+# CLI-only deps (feature `cli`, on by default for the standalone binary).
+clap = { version = "4", features = ["derive", "env"], optional = true }
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

@@ -24,16 +24,36 @@ BUILD="${2:---build}"
 MEDION="${ATELIER_MEDION:-romain@10.0.0.254}"
 ATELIER_API="${ATELIER_API:-http://10.0.0.254:4100}"
 APP_SRC="/var/lib/atelier/apps/$SLUG/src"
+# Build as the SAME user as the Studio agent's 0-build skill (hr-studio), so
+# node_modules/target/dist stay owned by that user with group-write. Building
+# as romain (this script's default caller) left root/romain-owned artefacts the
+# hr-studio agent could not overwrite → EACCES on the next agent build.
+BUILD_AS_USER="${ATELIER_BUILD_AS_USER:-hr-studio}"
 
 is_local_medion() { [[ "$(uname -n)" == "medion" ]]; }
 
 # bash -lc charges the login profile so cargo / corepack / pnpm are on PATH.
+# Read-only / control commands run as the invoking user (romain).
 run_on_medion() {
   local cmd="$1"
   if is_local_medion; then
     bash -lc "$cmd"
   else
     ssh "$MEDION" "bash -lc $(printf '%q' "$cmd")"
+  fi
+}
+
+# Build commands run as $BUILD_AS_USER (hr-studio) via `sudo -n`. Requires the
+# caller (romain on Medion) to hold NOPASSWD sudo to that user — the same right
+# the root Atelier process uses to spawn the Studio runner. `-H` sets
+# HOME=/var/lib/hr-studio so `$HOME/.cargo/bin` resolves to hr-studio's cargo
+# (mirrors runner.js + the 0-build template PATH prep).
+run_build_on_medion() {
+  local cmd="$1"
+  if is_local_medion; then
+    sudo -n -H -u "$BUILD_AS_USER" bash -lc "$cmd"
+  else
+    ssh "$MEDION" "sudo -n -H -u $BUILD_AS_USER bash -lc $(printf '%q' "$cmd")"
   fi
 }
 
@@ -84,11 +104,16 @@ if [[ "$BUILD" == "--build" ]]; then
       echo "error: cannot fetch build-env for $SLUG from $ATELIER_API — aborting (build vars would be silently empty)" >&2
       exit 1
     }
-    echo "→ build: cd $APP_SRC && $BUILD_CMD"
-    # Multi-line command: set -e first (an aborted cd or export must not let the
-    # build run in the wrong cwd/env), then cd, exports, build — all in one shell
-    # so cwd + exports persist. run_on_medion %q-quotes for SSH.
-    if ! run_on_medion "set -e
+    echo "→ build (as $BUILD_AS_USER): cd $APP_SRC && $BUILD_CMD"
+    # Multi-line command run as $BUILD_AS_USER: set -e first (an aborted cd or
+    # export must not let the build run in the wrong cwd/env), umask 002 +
+    # cargo/local bin on PATH (matches the 0-build skill), then cd, exports,
+    # build — all in one shell so cwd + exports persist. \$HOME/\$PATH are
+    # escaped so they resolve in the hr-studio shell, not romain's.
+    # run_build_on_medion %q-quotes for SSH.
+    if ! run_build_on_medion "set -e
+umask 002
+export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH\"
 cd '$APP_SRC'
 ${BUILD_ENV}
 ${BUILD_CMD}"; then

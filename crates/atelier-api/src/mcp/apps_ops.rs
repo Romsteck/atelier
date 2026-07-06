@@ -55,20 +55,22 @@ pub fn build_host_config() -> Option<(String, String)> {
     Some((host, key))
 }
 
-/// Wrap a shell command for local execution. When `ATELIER_BUILD_AS_USER` is
-/// set (e.g. `romain` on Medion), the command is spawned via
-/// `sudo -H -u <user> -- bash -lc …` so the build inherits that user's PATH
-/// (cargo lives under `~/.cargo/bin/` for `romain`, not in root's PATH) and
-/// produces artefacts owned by `<user>` instead of root. `umask 002` is forced
-/// so artefacts get group-write, which lets the `hr-studio` Studio agent
-/// (member of `romain`'s group on Medion) edit/clean them.
+/// Wrap a shell command for local execution. The build user is resolved by
+/// [`scaffold::build_as_user`]: `ATELIER_BUILD_AS_USER` if set, else `hr-studio`
+/// when Atelier runs as root, else `None` (dev). When a user is resolved the
+/// command is spawned via `sudo -H -u <user> -- bash -lc …` so the build
+/// inherits that user's PATH (cargo lives under `~/.cargo/bin/`, absent from
+/// root's PATH) and produces artefacts owned by `<user>` — never root. `umask
+/// 002` is forced so artefacts get group-write, which keeps the `hr-studio`
+/// Studio agent (a co-member of the build group) able to edit/clean them.
 ///
-/// When the env var is empty/unset, returns a plain `bash -lc` invocation —
-/// the right default for dev environments where atelier already runs as a
-/// regular user.
+/// WHY the root→hr-studio default (not a plain root `bash -lc`): a build that
+/// falls back to root leaves root-owned `node_modules`/`target`/`dist` that the
+/// hr-studio agent can neither overwrite nor delete → EACCES on the next build.
+/// Only a genuinely non-root dev environment gets the plain `bash -lc`.
 fn wrap_local_cmd(cmd: &str) -> (&'static str, Vec<String>) {
     let wrapped = format!("umask 002 && {cmd}");
-    match std::env::var("ATELIER_BUILD_AS_USER").ok().filter(|s| !s.is_empty()) {
+    match scaffold::build_as_user() {
         Some(user) => (
             "sudo",
             vec![

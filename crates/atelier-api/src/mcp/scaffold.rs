@@ -23,6 +23,32 @@ use std::path::Path;
 
 use tracing::{info, warn};
 
+/// Resolve the user that should OWN app-tree artefacts and RUN builds.
+/// Precedence:
+/// 1. `ATELIER_BUILD_AS_USER` when set and non-empty (explicit config);
+/// 2. `hr-studio` when Atelier runs as **root** — a root-owned tree is
+///    unbuildable/uneditable by the `hr-studio` Studio agent, so the platform
+///    must never fall back to root even with the env var unset;
+/// 3. `None` in a non-root dev environment — Atelier already runs as a regular
+///    user, so artefacts are naturally that user's and no sudo/chown-owner is
+///    required.
+///
+/// Shared by [`normalize_app_tree_perms`] (chown owner) and
+/// `apps_ops::wrap_local_cmd` (build sudo target) so the two never drift.
+pub fn build_as_user() -> Option<String> {
+    if let Some(user) = std::env::var("ATELIER_BUILD_AS_USER")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(user);
+    }
+    // SAFETY: geteuid() is always safe — no args, no global state mutation.
+    if unsafe { libc::geteuid() } == 0 {
+        return Some("hr-studio".to_string());
+    }
+    None
+}
+
 /// Normalize ownership/perms of a freshly-created app tree so the build user
 /// (`ATELIER_BUILD_AS_USER`) and the agent group (`ATELIER_RULES_GROUP`,
 /// default `hr-studio`) can both work in it: owner build-user, group
@@ -35,10 +61,7 @@ use tracing::{info, warn};
 /// perms tweak.
 pub async fn normalize_app_tree_perms(dir: &Path) {
     let group = std::env::var("ATELIER_RULES_GROUP").unwrap_or_else(|_| "hr-studio".to_string());
-    let owner = std::env::var("ATELIER_BUILD_AS_USER")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let chown_spec = match owner {
+    let chown_spec = match build_as_user() {
         Some(user) => format!("{user}:{group}"),
         None => format!(":{group}"),
     };

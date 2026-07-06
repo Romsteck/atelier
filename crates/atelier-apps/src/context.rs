@@ -549,6 +549,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `dv.insert`, `dv.update`, `dv.soft_delete`, `dv.restore` — writes (not auto-approved, audit logged)\n\
          - `dv.audit_list` — who changed what/when\n\
          - Schema mutations (`db.create_table`, `db.add_column`, `db.create_relation`, `db.drop_table`, `db.remove_column`) — not auto-approved\n\
+         - `dv_regen_client` — **après TOUT changement de schéma**, régénère le crate client Rust typé `dv-{slug}` depuis le schéma live, puis rebuild (0-build) + restart (mutation, journalisée). Sans ça `src/lib.rs`/`schema.lock` dérivent.\n\
          - **No GraphQL, no raw SQL.** See `.claude/rules/db.md`.\n\
          \n\
          ## Build\n\
@@ -806,8 +807,26 @@ cd "$SRC_DIR"
 export CI=true NPM_CONFIG_FUND=false
 # Variables build-scoped (VITE_*/NEXT_PUBLIC_*) injectées par Atelier (vide sinon).
 eval "$(curl -sS --max-time 5 "$API_BASE/api/apps/$SLUG/build-env" 2>/dev/null || true)"
+# WHY un bash ENFANT (-euo pipefail) et non `__BUILD_COMMAND__` inline : le
+# build_command est souvent une liste `a && b && c`. Sous le `set -e` du script
+# PARENT, l'échec d'un membre NON-FINAL d'une liste `&&` est exempté d'errexit
+# ET du trap ERR (règle POSIX) — le script continuait donc jusqu'à imprimer
+# « Build OK » avec exit 0 alors que la compilation avait échoué au milieu.
+# Un `( … ) || EC=$?` ne corrige PAS ça (errexit reste supprimé dans un
+# sous-shell testé, non ré-armable → cassé pour un build_command multi-lignes).
+# Le bash enfant a son propre errexit, non soumis à la suppression du parent :
+# son exit code global est fiable et capturé ci-dessous. Le heredoc quoté passe
+# le build_command verbatim (expansion faite par l'enfant, pas ici).
+BUILD_EC=0
+bash -euo pipefail -s <<'ATELIER_BUILD_CMD' || BUILD_EC=$?
 __BUILD_COMMAND__
+ATELIER_BUILD_CMD
 ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
+if [ "$BUILD_EC" -ne 0 ]; then
+  emit "{\"status\":\"error\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"error\":\"build exited $BUILD_EC\"}"
+  echo "=== Build FAILED (exit $BUILD_EC après ${ELAPSED_MS} ms) ===" >&2
+  exit "$BUILD_EC"
+fi
 emit "{\"status\":\"finished\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"message\":\"build OK (local)\"}"
 echo "=== Build OK ($ELAPSED_MS ms) ==="
 echo "En fin de feature validée, livre en prod via le tool MCP ship (cf. skill 0-deploy)"
@@ -1766,6 +1785,20 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
            MCP pour faire évoluer le schéma. Créent tables avec trigger\n\
            `updated_at`, FK natives, types Dataverse riches.\n\
          \n\
+         ## 🦀 Client Rust typé (`dv-{slug}`)\n\
+         \n\
+         Si ton app est en Rust, elle a un crate client typé **`dv-{slug}`**\n\
+         (répertoire `dv-client`) : `src/lib.rs` est **GÉNÉRÉ** depuis le schéma\n\
+         (ne l'édite JAMAIS à la main), `schema.lock` trace la version générée.\n\
+         \n\
+         - **Après TOUT changement de schéma** (`db_create_table`, `db_add_column`,\n\
+           `db_create_relation`, `db_drop_table`, `db_remove_column`), lance\n\
+           **`dv_regen_client`** pour régénérer le client, PUIS rebuild (0-build)\n\
+           + restart. Sans ça, le code Rust ne voit pas les nouvelles tables/\n\
+           colonnes et `schema.lock` dérive du schéma live.\n\
+         - Pour un **total paginé** sans drainer la table : `list_with_count(params)`\n\
+           → `(rows, Option<i64>)`, ou `ListParams::count(true)` (mappe `$count`).\n\
+         \n\
          ## 🔤 Colonne d'affichage primaire (lookups)\n\
          \n\
          Quand une table est **référencée par un Lookup**, l'UI (explorateur,\n\
@@ -1946,6 +1979,54 @@ mod tests {
         let script = render_app_build_script(&trader);
         assert!(script.contains("/api/apps/trader/build"));
         assert!(script.starts_with("#!/usr/bin/env bash"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Régression : un `build_command` de la forme `a && b && c` dont un membre
+    /// NON-FINAL échoue doit faire échouer le script (exit ≠ 0, pas de « Build
+    /// OK »). Avant le fix, l'exemption errexit des listes `&&` faisait imprimer
+    /// « Build OK » avec exit 0 sur un build cassé. Le fix exécute le
+    /// build_command dans un bash enfant dont l'exit code est capturé.
+    #[test]
+    fn build_script_propagates_midchain_failure() {
+        let tmp = std::env::temp_dir().join("atelier-apps-buildsh-test");
+        let _ = fs::remove_dir_all(&tmp);
+        // Layout réel : {src}/.claude/skills/0-build/build.sh (SRC_DIR = ../../..).
+        let skill_dir = tmp.join("src/.claude/skills/0-build");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let script_path = skill_dir.join("build.sh");
+
+        let render = |cmd: &str| {
+            let mut app = make_app("trader", "Trader", true);
+            app.build_command = Some(cmd.to_string());
+            render_app_build_script(&app)
+        };
+
+        // Le rendu utilise le bash enfant + heredoc quoté (pas d'inline).
+        let failing = render("false && echo NEVER_SHOULD_PRINT");
+        assert!(failing.contains("bash -euo pipefail -s <<'ATELIER_BUILD_CMD'"));
+        assert!(failing.contains("false && echo NEVER_SHOULD_PRINT"));
+
+        // API_BASE injoignable → les curl emit/build-env échouent vite (|| true).
+        let run = |body: &str| {
+            fs::write(&script_path, body).unwrap();
+            std::process::Command::new("bash")
+                .arg(&script_path)
+                .env("API_BASE", "http://127.0.0.1:1")
+                .output()
+                .expect("run build.sh")
+        };
+
+        let out = run(&failing);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "un échec mid-&& doit propager exit != 0");
+        assert!(!stdout.contains("Build OK"), "ne doit PAS imprimer Build OK sur échec");
+        assert!(!stdout.contains("NEVER_SHOULD_PRINT"), "la commande post-&& ne doit pas tourner");
+
+        let out = run(&render("true && echo built_marker"));
+        assert!(out.status.success(), "un build qui réussit doit exit 0");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Build OK"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

@@ -78,7 +78,10 @@ atelier-ipc               = { path = "crates/atelier-ipc" }
 atelier-apps              = { path = "crates/atelier-apps" }
 atelier-dataverse         = { path = "crates/atelier-dataverse" }
 atelier-docs              = { path = "crates/atelier-docs" }
-atelier-dv-codegen        = { path = "crates/atelier-dv-codegen" }
+# default-features=false so library consumers (atelier-api) don't pull the CLI
+# deps (clap/reqwest/tokio); `cargo build -p atelier-dv-codegen` still enables
+# the crate's own default `cli` feature, so the standalone binary builds.
+atelier-dv-codegen        = { path = "crates/atelier-dv-codegen", default-features = false }
 atelier-dvexpr            = { path = "crates/atelier-dvexpr" }
 atelier-git               = { path = "crates/atelier-git" }
 
