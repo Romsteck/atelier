@@ -81,6 +81,30 @@ pub fn validate_identifier(name: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Validate a platform app slug for provisioning (`^[a-z][a-z0-9-]*$`).
+/// Distinct from [`validate_user_identifier`]: slugs may contain dashes
+/// (www, home… mais aussi `my-app`) — everything downstream quotes the
+/// derived `app_{slug}` via `quote_ident` and url-encodes it in DSNs, so
+/// dashes are safe. Length is capped so `app_` + slug fits Postgres's
+/// 63-byte identifier limit.
+pub fn validate_app_slug(slug: &str) -> Result<(), ValidationError> {
+    // 63 (NAMEDATALEN-1) - "app_".len()
+    if slug.is_empty() || slug.len() > 59 {
+        return Err(ValidationError::InvalidName(slug.to_string()));
+    }
+    if !slug.starts_with(|c: char| c.is_ascii_lowercase()) {
+        return Err(ValidationError::InvalidName(slug.to_string()));
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || slug.ends_with('-')
+    {
+        return Err(ValidationError::InvalidName(slug.to_string()));
+    }
+    Ok(())
+}
+
 /// Validate a name that *must not* collide with the `_dv_` system
 /// prefix or the implicit base-model columns. Used for user-defined
 /// tables and columns; system metadata tables bypass this.

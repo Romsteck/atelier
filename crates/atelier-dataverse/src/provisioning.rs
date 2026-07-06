@@ -78,7 +78,7 @@ pub async fn provision_app(
     _admin_dsn: &str,
     slug: &str,
 ) -> Result<ProvisioningResult> {
-    crate::validation::validate_user_identifier(slug).map_err(|e| {
+    crate::validation::validate_app_slug(slug).map_err(|e| {
         DataverseError::provisioning(slug, format!("invalid slug: {}", e))
     })?;
 
@@ -229,7 +229,7 @@ pub async fn adopt_app(
     config: &ProvisioningConfig,
     slug: &str,
 ) -> Result<ProvisioningResult> {
-    crate::validation::validate_user_identifier(slug).map_err(|e| {
+    crate::validation::validate_app_slug(slug).map_err(|e| {
         DataverseError::provisioning(slug, format!("invalid slug: {}", e))
     })?;
 

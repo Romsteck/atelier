@@ -284,11 +284,26 @@ impl AppsContext {
         if let Err(e) = scaffold::scaffold_stack_template(&app).await {
             warn!(slug = %slug, error = %e, "AppCreate: scaffold template failed (non-fatal)");
         }
+        // First perms pass right after scaffold: the git remote bind below runs
+        // as the build user and needs a writable `src/` (a second pass at the
+        // end of create covers the context files + `.env`).
+        scaffold::normalize_app_tree_perms(&app_dir).await;
 
         // Default run_command si non fourni.
         if app.run_command.trim().is_empty() {
             app.run_command = scaffold::default_run_command(&app);
             info!(slug = %slug, run_command = %app.run_command, "AppCreate: applied default run_command");
+        }
+        // Default build_command matérialisé lui aussi. WHY: `deploy-app.sh` et
+        // la skill générée `0-build` lisent le registre tel quel (aucun
+        // fallback stack, contrairement au MCP `app.build`) — un build_command
+        // NULL rend l'app fraîche in-buildable hors MCP et le premier
+        // deploy-app 502 (restart d'un binaire jamais compilé).
+        if app.build_command.is_none() {
+            if let Some((cmd, _)) = build_defaults_for_stack(&app) {
+                app.build_command = Some(cmd.to_string());
+                info!(slug = %slug, build_command = %cmd, "AppCreate: applied default build_command");
+            }
         }
 
         // Persist app.
@@ -296,6 +311,26 @@ impl AppsContext {
             self.supervisor.port_registry.release(&slug).await.ok();
             error!(slug = %slug, error = %e, "AppCreate: registry upsert failed");
             return IpcResponse::err(format!("registry upsert failed: {e}"));
+        }
+
+        // Provision the dataverse database (base app_{slug} + rôle + entrée
+        // secrets) BEFORE the initial env render so `HR_DV_*` lands in the very
+        // first `.env`. WHY: create never provisioned — has_db apps were born
+        // without gateway credentials (reconcile warned "HR_DV_* omitted")
+        // until a manual provision; `delete()` already mirrors this via
+        // `drop_app()`. Best-effort like the other create steps.
+        if app.has_db {
+            match &self.dataverse_manager {
+                Some(mgr) => match mgr.provision(&slug).await {
+                    Ok(_) => info!(slug = %slug, "AppCreate: dataverse database provisioned"),
+                    Err(e) => {
+                        warn!(slug = %slug, error = %e, "AppCreate: dataverse provision failed — HR_DV_* will be absent")
+                    }
+                },
+                None => {
+                    warn!(slug = %slug, "AppCreate: dataverse manager unavailable — db not provisioned")
+                }
+            }
         }
 
         // atelier-git bare repo (best-effort).
@@ -349,6 +384,14 @@ impl AppsContext {
         if let Err(e) = self.reconcile_app_env(&slug, false).await {
             warn!(slug = %slug, error = %e, "AppCreate: env reconcile failed (non-fatal)");
         }
+
+        // Normalize ownership/perms of the whole freshly-created tree LAST so
+        // it also covers the context files and `.env` written above. WHY: the
+        // service runs as root — without this the scaffolded tree is
+        // root-owned 0755 and the app is stillborn: the Studio agent's
+        // workspace is read-only, and the git remote bind + first build die
+        // on Permission denied.
+        scaffold::normalize_app_tree_perms(&app_dir).await;
 
         info!(slug = %slug, port, duration_ms = start.elapsed().as_millis() as u64, "AppCreate ok");
         IpcResponse::ok_data(app_to_dto(&app))

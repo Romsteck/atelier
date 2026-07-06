@@ -6,14 +6,13 @@
 //!
 //! Endpoints exposés :
 //! - GET    /api/apps            (list)
+//! - POST   /api/apps            (create — même mutator que MCP `app.create`)
 //! - GET    /api/apps/{slug}     (single)
+//! - PATCH  /api/apps/{slug}     (update) · DELETE /api/apps/{slug}
 //! - GET    /api/apps/{slug}/env
 //! - POST   /api/apps/{slug}/control  body {action: start|stop|restart}
 //! - GET    /api/apps/{slug}/status   process state (pid, uptime, port)
 //! - POST   /api/apps/{slug}/ship     body {timeout_secs?: u64} (wrapper MCP `app.ship`)
-//!
-//! TODO Phase 9.2 suite : create / update / delete / build / deploy / exec /
-//! env update / regenerate-context / logs.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -33,7 +32,7 @@ use atelier_apps::types::EnvScope;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
-        .route("/", get(list_apps))
+        .route("/", get(list_apps).post(create_app))
         .route("/{slug}", get(get_app).patch(update_app).delete(delete_app))
         // Env management (structured view + per-variable user CRUD). The `.env`
         // file is a generated projection — these routes mutate the model and
@@ -279,6 +278,49 @@ async fn get_app_build_env(
     }
 }
 
+#[derive(Deserialize)]
+struct CreateAppBody {
+    name: String,
+    slug: String,
+    stack: String,
+    visibility: Option<String>,
+    run_command: Option<String>,
+    build_command: Option<String>,
+    health_path: Option<String>,
+    build_artefact: Option<String>,
+}
+
+/// `POST /api/apps` — create an app. Delegates to the same `AppsContext::create`
+/// the MCP `app.create` tool uses (port assign, scaffold, registry, git repo,
+/// context regen, initial `.env`). WHY: the homepage "Nouvelle application"
+/// modal called this route, which did not exist — creation 405'd from the UI
+/// (only the MCP path worked). `has_db` mirrors the MCP handler's hardcoded
+/// `true`: every app gets its dataverse `app_{slug}` provisioned.
+async fn create_app(
+    State(state): State<ApiState>,
+    Json(b): Json<CreateAppBody>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&b.slug) {
+        return r;
+    }
+    info!(slug = %b.slug, stack = %b.stack, "AppCreate (HTTP)");
+    let ctx = AppsContext::from_api_state(&state);
+    let resp = ctx
+        .create(
+            b.slug.clone(),
+            b.name,
+            b.stack,
+            true,
+            b.visibility.unwrap_or_else(|| "private".to_string()),
+            b.run_command,
+            b.build_command,
+            b.health_path,
+            b.build_artefact,
+        )
+        .await;
+    ipc_to_http(resp)
+}
+
 #[derive(Deserialize, Default)]
 struct UpdateAppBody {
     name: Option<String>,
@@ -363,6 +405,8 @@ fn ipc_to_http(resp: atelier_ipc::types::IpcResponse) -> axum::response::Respons
         let err = resp.error.unwrap_or_else(|| "operation failed".to_string());
         let status = if err.contains("not found") {
             StatusCode::NOT_FOUND
+        } else if err.contains("already exists") {
+            StatusCode::CONFLICT
         } else if err.starts_with("invalid") {
             StatusCode::BAD_REQUEST
         } else {

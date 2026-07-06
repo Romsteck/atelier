@@ -83,6 +83,44 @@ pub fn default_run_command(app: &Application) -> String {
     }
 }
 
+/// Normalize ownership/perms of a freshly-created app tree so the build user
+/// (`ATELIER_BUILD_AS_USER`) and the agent group (`ATELIER_RULES_GROUP`,
+/// default `hr-studio`) can both work in it: owner build-user, group
+/// rules-group, dirs setgid + group-rwx, files group-rw. Matches the layout
+/// of the historical apps (`romain:hr-studio`, dirs 2775, files 664). WHY:
+/// Atelier runs as root, so everything scaffolded here is root-owned 0755 by
+/// default — the Studio agent's workspace would be read-only and the first
+/// build/`git init` (run as the build user) would die on Permission denied.
+/// Best-effort: failures degrade to a warn, creation must not abort on a
+/// perms tweak.
+pub async fn normalize_app_tree_perms(dir: &Path) {
+    let group = std::env::var("ATELIER_RULES_GROUP").unwrap_or_else(|_| "hr-studio".to_string());
+    let owner = std::env::var("ATELIER_BUILD_AS_USER")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let chown_spec = match owner {
+        Some(user) => format!("{user}:{group}"),
+        None => format!(":{group}"),
+    };
+    let script = format!(
+        "chown -R '{chown_spec}' '{d}' && chmod -R g+rwX '{d}' && find '{d}' -type d -exec chmod g+s {{}} +",
+        d = dir.display()
+    );
+    match tokio::process::Command::new("sh").arg("-c").arg(&script).output().await {
+        Ok(o) if !o.status.success() => {
+            warn!(
+                dir = %dir.display(),
+                stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                "normalize_app_tree_perms failed (non-fatal)"
+            );
+        }
+        Err(e) => {
+            warn!(dir = %dir.display(), err = %e, "normalize_app_tree_perms spawn failed (non-fatal)");
+        }
+        _ => info!(dir = %dir.display(), owner_group = %chown_spec, "app tree perms normalized"),
+    }
+}
+
 fn subst(template: &str, slug: &str) -> String {
     template.replace("{SLUG}", slug)
 }
