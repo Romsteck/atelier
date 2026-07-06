@@ -5,6 +5,7 @@ import { AuthProvider } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
 import { AppsProvider } from './context/AppsContext';
 import { NotificationsProvider } from './context/NotificationsContext';
+import { IssuesProvider } from './context/IssuesContext';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import Tasks from './pages/Tasks';
@@ -16,6 +17,7 @@ import SchemaPage from './pages/SchemaPage';
 import Surveillance from './pages/Surveillance';
 import Backup from './pages/Backup';
 import Settings from './pages/Settings';
+import Issues from './pages/Issues';
 
 // Le Studio est désormais une app Vite SÉPARÉE servie sous `/studio/<slug>` (cf.
 // crates/atelier-api/src/lib.rs). La homepage (cette SPA) ne contient plus le
@@ -40,6 +42,7 @@ function App() {
       <TaskProvider>
         <AppsProvider>
           <NotificationsProvider>
+          <IssuesProvider>
           <ErrorBoundary>
           <Layout>
           <Routes>
@@ -51,6 +54,7 @@ function App() {
             <Route path="/schema" element={<SchemaPage />} />
             <Route path="/git" element={<Git />} />
             <Route path="/surveillance" element={<Surveillance />} />
+            <Route path="/issues" element={<Issues />} />
             <Route path="/backup" element={<Backup />} />
             <Route path="/settings" element={<Settings />} />
 
@@ -70,6 +74,7 @@ function App() {
           </Routes>
           </Layout>
           </ErrorBoundary>
+          </IssuesProvider>
           </NotificationsProvider>
         </AppsProvider>
       </TaskProvider>

@@ -7,9 +7,14 @@
 //! source de chaque app. L'ancien `CLAUDE_ISSUES.json` per-app a été rapatrié une
 //! fois puis supprimé ([`PlatformIssueStore::backfill_from_files`]).
 //!
-//! La forme JSON renvoyée est **identique** à l'historique (`id, ts, app, area,
-//! severity, title, context, tried, status, note?, updated_at?`) pour ne rien
-//! casser côté consommateur (skill `/collect-issues`).
+//! La forme JSON renvoyée étend l'historique (`id, ts, app, kind, area,
+//! severity, title, context, tried, status, note?, updated_at?`) — `kind`
+//! (error | limitation | suggestion) est l'axe de nature ajouté en 2026-07.
+//!
+//! Le store est l'unique autorité des enums (`coerce`, mirror de
+//! [`crate::notification_store`]) et porte le sender du canal EventBus `issue` :
+//! chaque mutation réussie publie un [`IssueEvent`] (jamais d'event fantôme),
+//! relayé en WS `issue:event` pour la page /issues + la pastille sidebar.
 //!
 //! Dégrade en no-op / vide quand le pool est absent (Postgres down au boot) —
 //! mirror de [`crate::task_store::TaskStore`].
@@ -18,18 +23,28 @@ use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::control_db::sqlx::{PgPool, PgRow, Pool, Postgres, Row, query};
+use crate::events::IssueEvent;
+
+pub const ISSUE_KINDS: &[&str] = &["error", "limitation", "suggestion"];
+pub const ISSUE_SEVERITIES: &[&str] = &["low", "medium", "high"];
+pub const ISSUE_STATUSES: &[&str] = &["open", "resolved", "dismissed"];
+pub const ISSUE_AREAS: &[&str] = &[
+    "mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other",
+];
 
 #[derive(Clone)]
 pub struct PlatformIssueStore {
     pool: Option<Pool<Postgres>>,
+    tx: broadcast::Sender<IssueEvent>,
 }
 
 impl PlatformIssueStore {
-    pub fn new(pool: Option<PgPool>) -> Self {
-        Self { pool }
+    pub fn new(pool: Option<PgPool>, tx: broadcast::Sender<IssueEvent>) -> Self {
+        Self { pool, tx }
     }
 
     fn pool(&self) -> Option<&Pool<Postgres>> {
@@ -40,11 +55,18 @@ impl PlatformIssueStore {
         anyhow::anyhow!("control-plane Postgres (atelier_meta) indisponible")
     }
 
-    /// Ajoute une remontée. Le serveur estampe `id`/`created_at`/`status:open`.
-    /// Renvoie l'entrée stockée (forme historique).
+    fn publish(&self, ev: IssueEvent) {
+        // Err = aucun abonné WS pour l'instant : normal, pas une erreur.
+        let _ = self.tx.send(ev);
+    }
+
+    /// Ajoute une remontée. Le serveur estampe `id`/`created_at`/`status:open` ;
+    /// `kind`/`area`/`severity` inconnus sont coercés vers leur défaut. Renvoie
+    /// l'entrée stockée et publie `action:"created"`.
     pub async fn insert(
         &self,
         slug: &str,
+        kind: &str,
         area: &str,
         severity: &str,
         title: &str,
@@ -52,15 +74,19 @@ impl PlatformIssueStore {
         tried: &str,
     ) -> anyhow::Result<Value> {
         let pool = self.pool().ok_or_else(Self::no_pool)?;
+        let kind = coerce(kind, ISSUE_KINDS, "error");
+        let area = coerce(area, ISSUE_AREAS, "other");
+        let severity = coerce(severity, ISSUE_SEVERITIES, "medium");
         let id = format!("iss-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let now = Utc::now();
         query(
             "INSERT INTO platform_issues \
-                (id, slug, area, severity, title, context, tried, status, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)",
+                (id, slug, kind, area, severity, title, context, tried, status, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9)",
         )
         .bind(&id)
         .bind(slug)
+        .bind(kind)
         .bind(area)
         .bind(severity)
         .bind(title)
@@ -69,17 +95,24 @@ impl PlatformIssueStore {
         .bind(now)
         .execute(pool)
         .await?;
-        Ok(json!({
+        let entry = json!({
             "id": id,
             "ts": rfc3339(now),
             "app": slug,
+            "kind": kind,
             "area": area,
             "severity": severity,
             "title": title,
             "context": context,
             "tried": tried,
             "status": "open",
-        }))
+        });
+        self.publish(IssueEvent {
+            action: "created".into(),
+            id,
+            item: Some(entry.clone()),
+        });
+        Ok(entry)
     }
 
     /// Liste agrégée, filtres optionnels `status` / `slug`. Tri serveur : rang de
@@ -89,7 +122,7 @@ impl PlatformIssueStore {
             return Vec::new();
         };
         let rows = query(
-            "SELECT id, slug, area, severity, title, context, tried, status, note, created_at, updated_at \
+            "SELECT id, slug, kind, area, severity, title, context, tried, status, note, created_at, updated_at \
                FROM platform_issues \
               WHERE ($1::text IS NULL OR status = $1) \
                 AND ($2::text IS NULL OR slug = $2) \
@@ -111,7 +144,9 @@ impl PlatformIssueStore {
     }
 
     /// Met à jour `status` et/ou `note` (COALESCE : champ absent = inchangé),
-    /// estampe `updated_at`. `Ok(None)` si l'`id` est introuvable.
+    /// estampe `updated_at`, publie `action:"updated"`. Un `status` hors enum
+    /// est ignoré (= inchangé) plutôt que coercé — un typo ne doit pas rouvrir
+    /// une issue. `Ok(None)` si l'`id` est introuvable.
     pub async fn update(
         &self,
         id: &str,
@@ -119,42 +154,71 @@ impl PlatformIssueStore {
         note: Option<&str>,
     ) -> anyhow::Result<Option<Value>> {
         let pool = self.pool().ok_or_else(Self::no_pool)?;
+        let status = status.filter(|s| ISSUE_STATUSES.contains(s));
         let row = query(
             "UPDATE platform_issues \
                 SET status = COALESCE($2, status), \
                     note = COALESCE($3, note), \
                     updated_at = now() \
               WHERE id = $1 \
-          RETURNING id, slug, area, severity, title, context, tried, status, note, created_at, updated_at",
+          RETURNING id, slug, kind, area, severity, title, context, tried, status, note, created_at, updated_at",
         )
         .bind(id)
         .bind(status)
         .bind(note)
         .fetch_optional(pool)
         .await?;
-        Ok(row.map(|r| row_to_json(&r)))
+        let entry = row.map(|r| row_to_json(&r));
+        if let Some(entry) = &entry {
+            self.publish(IssueEvent {
+                action: "updated".into(),
+                id: id.to_string(),
+                item: Some(entry.clone()),
+            });
+        }
+        Ok(entry)
     }
 
-    /// Supprime une remontée. `Ok(true)` si supprimée, `Ok(false)` si id absent.
+    /// Supprime une remontée et publie `action:"deleted"`. `Ok(true)` si
+    /// supprimée, `Ok(false)` si id absent.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let pool = self.pool().ok_or_else(Self::no_pool)?;
         let res = query("DELETE FROM platform_issues WHERE id = $1")
             .bind(id)
             .execute(pool)
             .await?;
-        Ok(res.rows_affected() > 0)
+        let deleted = res.rows_affected() > 0;
+        if deleted {
+            self.publish(IssueEvent {
+                action: "deleted".into(),
+                id: id.to_string(),
+                item: None,
+            });
+        }
+        Ok(deleted)
     }
 
     /// Purge toutes les issues d'une app (hook AppDelete). Best-effort : un échec
     /// est loggué, jamais propagé (le delete d'app ne doit pas échouer pour ça).
+    /// Publie un `deleted` par ligne purgée (volumes minuscules) pour que les
+    /// clients WS retirent les entrées sans refetch.
     pub async fn delete_by_slug(&self, slug: &str) {
         let Some(pool) = self.pool() else { return };
-        if let Err(e) = query("DELETE FROM platform_issues WHERE slug = $1")
+        match query("DELETE FROM platform_issues WHERE slug = $1 RETURNING id")
             .bind(slug)
-            .execute(pool)
+            .fetch_all(pool)
             .await
         {
-            error!(slug, error = %e, "platform_issues delete_by_slug failed");
+            Ok(rows) => {
+                for r in rows {
+                    self.publish(IssueEvent {
+                        action: "deleted".into(),
+                        id: r.get::<String, _>("id"),
+                        item: None,
+                    });
+                }
+            }
+            Err(e) => error!(slug, error = %e, "platform_issues delete_by_slug failed"),
         }
     }
 
@@ -260,6 +324,10 @@ impl PlatformIssueStore {
     }
 }
 
+fn coerce<'a>(v: &'a str, allowed: &[&'a str], default: &'a str) -> &'a str {
+    if allowed.contains(&v) { v } else { default }
+}
+
 fn rfc3339(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -278,6 +346,7 @@ fn row_to_json(row: &PgRow) -> Value {
         "id": row.get::<String, _>("id"),
         "ts": rfc3339(created),
         "app": row.get::<String, _>("slug"),
+        "kind": row.get::<String, _>("kind"),
         "area": row.get::<String, _>("area"),
         "severity": row.get::<String, _>("severity"),
         "title": row.get::<String, _>("title"),

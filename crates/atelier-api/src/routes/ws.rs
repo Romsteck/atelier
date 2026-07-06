@@ -43,6 +43,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut studio_tab_rx = state.events.studio_tab.subscribe();
     let mut homeroute_routes_rx = state.events.homeroute_routes.subscribe();
     let mut notify_rx = state.events.notify.subscribe();
+    let mut issue_rx = state.events.issue.subscribe();
 
     loop {
         tokio::select! {
@@ -75,6 +76,24 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "notify:event", dropped = n, "ws subscriber lagged");
                         if send_resync(&mut socket, "notify:event", n).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = issue_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "issue:event", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "issue:event", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "issue:event", n).await.is_err() {
                             break;
                         }
                     }

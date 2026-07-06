@@ -15,7 +15,7 @@
 //!
 //! Endpoints (non authentifiés, confiance LAN comme les siblings
 //! `build-event`/`ship`) :
-//!   POST   /api/apps/{slug}/issues   {title, area?, severity?, context?, tried?}  — report (slug dans l'URL)
+//!   POST   /api/apps/{slug}/issues   {title, kind?, area?, severity?, context?, tried?}  — report (slug dans l'URL)
 //!   GET    /api/issues               ?status=open|resolved|dismissed&app=<slug>   — liste agrégée (dev)
 //!   PATCH  /api/issues/{id}          {status?, note?}                             — triage (id global)
 //!   DELETE /api/issues/{id}                                                       — purge
@@ -57,6 +57,8 @@ fn fail(status: StatusCode, msg: impl Into<String>) -> axum::response::Response 
 struct PostIssueBody {
     title: Option<String>,
     #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
     area: Option<String>,
     #[serde(default)]
     severity: Option<String>,
@@ -83,6 +85,9 @@ async fn post_issue(
     if title.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "title requis");
     }
+    // Défauts appliqués ici pour le log ; le store reste l'autorité des enums
+    // (coerce kind/area/severity vers leur défaut si valeur inconnue).
+    let kind = b.kind.unwrap_or_else(|| "error".to_string());
     let area = b.area.unwrap_or_else(|| "other".to_string());
     let severity = b.severity.unwrap_or_else(|| "medium".to_string());
     let context = b.context.unwrap_or_default();
@@ -90,12 +95,12 @@ async fn post_issue(
 
     match state
         .issues
-        .insert(&slug, &area, &severity, &title, &context, &tried)
+        .insert(&slug, &kind, &area, &severity, &title, &context, &tried)
         .await
     {
         Ok(entry) => {
             let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            info!(slug = %slug, id = %id, area = %area, severity = %severity, "AppIssueReport");
+            info!(slug = %slug, id = %id, kind = %kind, area = %area, severity = %severity, "AppIssueReport");
             ok(entry)
         }
         Err(e) => {

@@ -277,7 +277,7 @@ fn tool_definitions_surveillance() -> Value {
         // findings_upsert — d'où leur présence dans la whitelist read-only).
         // Pas d'injection de slug en scope surveillance → slug explicite.
         { "name": "notify_user", "description": "Notify the user (Atelier bell + device notification). Reserve for what truly deserves his attention (e.g. a critical finding needing an immediate decision). Findings already surface in the Surveillance tab — do NOT notify for routine findings.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string", "description": "App slug the notification concerns (omit for platform-wide)" }, "title": { "type": "string" }, "body": { "type": "string" }, "level": { "type": "string", "enum": ["info", "warn", "error"], "default": "info" } }, "required": ["title"] } },
-        { "name": "issue_report", "description": "Report a PLATFORM friction encountered during the scan (MCP tool failing/missing, misleading platform doc/prompt, gateway misbehaving). NOT for app findings (use findings_upsert).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "title": { "type": "string" }, "area": { "type": "string", "enum": ["mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other"], "default": "other" }, "severity": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }, "context": { "type": "string" }, "tried": { "type": "string" } }, "required": ["slug", "title"] } }
+        { "name": "issue_report", "description": "Report a PLATFORM friction encountered during the scan (MCP tool failing/missing, misleading platform doc/prompt, gateway misbehaving). NOT for app findings (use findings_upsert).", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "title": { "type": "string" }, "kind": { "type": "string", "enum": ["error", "limitation", "suggestion"], "default": "error", "description": "error = broken platform behaviour; limitation = works but constrains; suggestion = platform improvement idea" }, "area": { "type": "string", "enum": ["mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other"], "default": "other" }, "severity": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }, "context": { "type": "string" }, "tried": { "type": "string" } }, "required": ["slug", "title"] } }
     ])
 }
 
@@ -660,7 +660,7 @@ fn tool_definitions_project() -> Value {
         { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
         // ── Plateforme (notification, remontées, livraison) ──
         { "name": "notify_user", "description": "Notifie Romain (cloche Atelier + notification sur ses appareils). Réservé à ce qui mérite VRAIMENT son attention : décision à prendre, anomalie détectée, résultat inattendu d'une tâche longue. Tes actions plateforme (restart, ship, env, schéma…) sont déjà journalisées automatiquement — ne PAS notifier pour ça.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string", "description": "≤120 chars, actionnable" }, "body": { "type": "string", "description": "détail optionnel (markdown court)" }, "level": { "type": "string", "enum": ["info", "warn", "error"], "default": "info" } }, "required": ["title"] } },
-        { "name": "issue_report", "description": "Remonte un souci PLATEFORME (Atelier) : tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse/agent qui déraille côté plateforme. NE concerne PAS les bugs internes de ton app (corrige-les) ni les findings de surveillance (canal findings_*). Voir .claude/rules/report-issues.md.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string", "description": "court et actionnable" }, "area": { "type": "string", "enum": ["mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other"], "default": "other" }, "severity": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }, "context": { "type": "string", "description": "ce que tu faisais + symptôme exact" }, "tried": { "type": "string", "description": "ce que tu as tenté / contournement" } }, "required": ["title"] } },
+        { "name": "issue_report", "description": "Remonte un souci PLATEFORME (Atelier) : tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse/agent qui déraille côté plateforme — ou une SUGGESTION d'amélioration plateforme (kind=suggestion). NE concerne PAS les bugs internes de ton app (corrige-les) ni les findings de surveillance (canal findings_*). Voir .claude/rules/report-issues.md.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string", "description": "court et actionnable" }, "kind": { "type": "string", "enum": ["error", "limitation", "suggestion"], "default": "error", "description": "error = un truc plateforme est cassé ; limitation = ça marche mais ça bride ; suggestion = idée d'amélioration plateforme" }, "area": { "type": "string", "enum": ["mcp", "docs", "build", "deploy", "dataverse", "agent", "studio-ui", "platform", "other"], "default": "other" }, "severity": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" }, "context": { "type": "string", "description": "ce que tu faisais + symptôme exact" }, "tried": { "type": "string", "description": "ce que tu as tenté / contournement" } }, "required": ["title"] } },
         { "name": "ship", "description": "Livre en prod : stop + restart du process supervisé pour reprendre les artefacts compilés par la skill 0-build (aucune compilation ici). Émet les étapes au badge build du Studio. Échoue avec BUILD_BUSY si un build/ship est déjà en cours — ne PAS retry automatiquement.", "inputSchema": { "type": "object", "properties": { "timeout_secs": { "type": "integer", "minimum": 60, "maximum": 7200, "default": 900 } } } },
         // ── Environment (le .env est un artefact généré ; seul le tier user est éditable) ──
         { "name": "env_list", "description": "Liste les variables d'env de l'app : tier plateforme calculé (PORT, HR_DV_*, ATELIER_*) + variables applicatives (user). Les valeurs secrètes sont TOUJOURS masquées ici (révélation = action UI humaine).", "inputSchema": { "type": "object", "properties": {} } },
@@ -1506,6 +1506,7 @@ async fn tool_issue_report(id: Value, args: &Value, state: &McpState) -> Value {
     if title.trim().is_empty() {
         return tool_error(id, "title requis (non vide)");
     }
+    let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("error");
     let area = args.get("area").and_then(|v| v.as_str()).unwrap_or("other");
     let severity = args
         .get("severity")
@@ -1515,11 +1516,11 @@ async fn tool_issue_report(id: Value, args: &Value, state: &McpState) -> Value {
     let tried = args.get("tried").and_then(|v| v.as_str()).unwrap_or("");
     match state
         .issues
-        .insert(slug, area, severity, title.trim(), context, tried)
+        .insert(slug, kind, area, severity, title.trim(), context, tried)
         .await
     {
         Ok(entry) => {
-            info!(slug, area, severity, "AppIssueReport (mcp)");
+            info!(slug, kind, area, severity, "AppIssueReport (mcp)");
             tool_success(id, entry)
         }
         Err(e) => tool_error(id, &format!("issue_report failed: {e}")),

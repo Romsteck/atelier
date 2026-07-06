@@ -273,3 +273,14 @@ export const markAllNotificationsRead = () =>
   api.post('/notifications/read-all');
 export const deleteNotification = (id) =>
   api.delete(`/notifications/${id}`);
+
+// ========== Remontées plateforme (page /issues + pastille sidebar) ==========
+// Store central `atelier_meta.platform_issues`, alimenté par les agents des
+// apps (tool MCP `issue_report` / POST /apps/{slug}/issues). Live via WS
+// `issue:event` (created/updated/deleted).
+export const getIssues = (params = {}) =>
+  api.get('/issues', { params });
+export const patchIssue = (id, body) =>
+  api.patch(`/issues/${id}`, body);
+export const deleteIssue = (id) =>
+  api.delete(`/issues/${id}`);

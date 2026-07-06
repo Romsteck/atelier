@@ -52,6 +52,10 @@ pub struct EventBus {
     /// NotificationStore UNIQUEMENT après persistance ; le front décide du
     /// rendu (drawer, badge, notif système PWA pour kind=notice).
     pub notify: broadcast::Sender<NotifyEvent>,
+    /// Remontées plateforme (issue store → websocket). Publié par le
+    /// PlatformIssueStore UNIQUEMENT après persistance ; alimente la page
+    /// /issues et la pastille sidebar en live.
+    pub issue: broadcast::Sender<IssueEvent>,
 }
 
 impl EventBus {
@@ -78,6 +82,7 @@ impl EventBus {
             studio_tab: broadcast::channel(64).0,
             homeroute_routes: broadcast::channel(16).0,
             notify: broadcast::channel(128).0,
+            issue: broadcast::channel(128).0,
         }
     }
 }
@@ -442,6 +447,20 @@ impl NotifyEvent {
             read_at: None,
         }
     }
+}
+
+/// Une remontée plateforme (persistée dans `platform_issues`, publiée APRÈS
+/// mutation réussie — jamais d'event fantôme). `created`/`updated` transportent
+/// l'entrée complète (`item`, forme historique du store) pour que le front
+/// (page /issues + pastille sidebar) applique le payload sans refetch ;
+/// `deleted` ne porte que l'`id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueEvent {
+    /// "created" | "updated" | "deleted"
+    pub action: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<serde_json::Value>,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

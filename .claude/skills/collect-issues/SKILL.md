@@ -15,11 +15,13 @@ bash .claude/skills/collect-issues/collect.sh        # tout
 bash .claude/skills/collect-issues/collect.sh open   # uniquement status=open
 ```
 
-Sous le capot : `GET /api/issues` (tri serveur par sévérité `high` → `medium` → `low` puis par app). Sortie : un tableau JSON, chaque entrée projetée sur `app`, `severity`, `area`, `status`, `id`, `title`, `context`, `tried`.
+Sous le capot : `GET /api/issues` (tri serveur par sévérité `high` → `medium` → `low` puis par app). Sortie : un tableau JSON, chaque entrée projetée sur `app`, `kind`, `severity`, `area`, `status`, `id`, `title`, `context`, `tried`.
+
+`kind` distingue la nature : `error` (cassé) · `limitation` (bride) · `suggestion` (idée d'amélioration — à évaluer, pas forcément à « corriger »).
 
 ## Traiter
 
-1. Lis la synthèse, priorise par `severity`.
+1. Lis la synthèse, priorise par `severity` (les `suggestion` se traitent en dernier : décision produit, pas bug).
 2. Pour chaque souci pertinent : reproduis / comprends la cause, corrige **à la racine** dans le code d'Atelier (`crates/…`, `web/…`, `runner/…`), `make deploy`, vérifie.
 3. Marque la remontée comme traitée via l'API Atelier. Les endpoints de triage sont **platform-level** (l'`id` est globalement unique, **plus besoin du slug**) :
 

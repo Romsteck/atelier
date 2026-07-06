@@ -552,7 +552,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          ## Plateforme (tes « pattes » vers Atelier et l'utilisateur)\n\
          - `ship` — livraison prod : stop + restart pour reprendre les artefacts compilés par 0-build (aucune compilation). `BUILD_BUSY` = un build/ship est en cours, ne PAS retry.\n\
          - `notify_user` — notifie Romain (cloche + appareils). Réservé à ce qui mérite VRAIMENT son attention (décision, anomalie, résultat inattendu). Tes actions plateforme (restart, ship, env, schéma) sont déjà **journalisées automatiquement** — ne notifie pas pour ça.\n\
-         - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier). Voir `.claude/rules/report-issues.md`.\n\
+         - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier) ou une suggestion d'amélioration (`kind: error|limitation|suggestion`). Voir `.claude/rules/report-issues.md`.\n\
          \n\
          ## Environment (`env_*`)\n\
          Le `.env` est un **artefact généré** — ne JAMAIS l'éditer à la main. Une variable modifiée n'est vue par le process qu'au prochain restart.\n\
@@ -1394,6 +1394,8 @@ fn render_report_issues_rule_md(app: &Application) -> String {
          - la **passerelle dataverse** (`dv_*` / `db_*` / REST `/api/dv`) qui se comporte mal ;\n\
          - l'**agent / le Studio** lui-même (comportement inattendu, capacité absente).\n\
          \n\
+         Une **suggestion d'amélioration plateforme** est aussi bienvenue (`kind: suggestion`) : un tool/une capacité qui te manquerait, une doc à enrichir, un workflow qui pourrait être plus fluide — même sans blocage.\n\
+         \n\
          ## QUAND NE PAS remonter\n\
          \n\
          - Les **bugs internes de ton app** `{slug}` → corrige-les, ou note-les dans `CLAUDE.md`.\n\
@@ -1402,13 +1404,14 @@ fn render_report_issues_rule_md(app: &Application) -> String {
          \n\
          ## COMMENT remonter\n\
          \n\
-         1. Appelle le tool MCP **`issue_report(title, area?, severity?, context?, tried?)`** (la skill `0-report-issue` documente les champs) : Atelier enregistre la remontée côté plateforme.\n\
+         1. Appelle le tool MCP **`issue_report(title, kind?, area?, severity?, context?, tried?)`** (la skill `0-report-issue` documente les champs) : Atelier enregistre la remontée côté plateforme.\n\
          2. **Ne stocke rien toi-même** (pas de fichier dans ton dépôt) : Atelier est l'unique writer, il estampe id + horodatage + statut côté serveur, dans son control-plane centralisé.\n\
          3. **Dis-le à l'utilisateur** en une phrase (« j'ai remonté un souci plateforme : … ») — pas de remontée silencieuse.\n\
          \n\
          ## Barème\n\
          \n\
-         - `severity` : `low` (gênant mais contournable) · `medium` (ralentit nettement) · `high` (bloque le travail).\n\
+         - `kind` : `error` (un truc plateforme est cassé) · `limitation` (ça marche mais ça te bride) · `suggestion` (idée d'amélioration, rien de cassé). Défaut `error`.\n\
+         - `severity` : `low` (gênant mais contournable) · `medium` (ralentit nettement) · `high` (bloque le travail). Pour une `suggestion` : l'impact qu'aurait l'amélioration.\n\
          - `area` : `mcp` · `docs` · `build` · `deploy` · `dataverse` · `agent` · `studio-ui` · `platform` · `other`.\n\
          \n\
          Donne un `title` court et actionnable, un `context` (ce que tu faisais + le symptôme exact) et `tried` (ce que tu as tenté / le contournement en place).\n",
@@ -1422,7 +1425,7 @@ fn render_report_issue_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: 0-report-issue\n\
-         description: Remonte un souci PLATEFORME (Atelier) rencontré en travaillant sur l'app {slug} — tool MCP, doc, build/deploy, dataverse, agent. Utilise cette skill QUAND tu butes sur une friction qui ne relève PAS du code de {slug} mais de la plateforme. NE concerne PAS les bugs internes de l'app.\n\
+         description: Remonte un souci PLATEFORME (Atelier) rencontré en travaillant sur l'app {slug} — erreur, limitation ou suggestion d'amélioration : tool MCP, doc, build/deploy, dataverse, agent. Utilise cette skill QUAND tu butes sur une friction qui ne relève PAS du code de {slug} mais de la plateforme, OU quand tu as une idée d'amélioration plateforme. NE concerne PAS les bugs internes de l'app.\n\
          ---\n\
          \n\
          # Remonter un souci plateforme — `{slug}`\n\
@@ -1432,6 +1435,7 @@ fn render_report_issue_skill(app: &Application) -> String {
          ## Champs\n\
          \n\
          - `title` (**requis**) : court et actionnable. Ex. « docs_search renvoie 500 sur requête vide ».\n\
+         - `kind` : `error|limitation|suggestion` (défaut `error`) — `error` = cassé, `limitation` = ça bride, `suggestion` = idée d'amélioration.\n\
          - `area` : `mcp|docs|build|deploy|dataverse|agent|studio-ui|platform|other` (défaut `other`).\n\
          - `severity` : `low|medium|high` (défaut `medium`).\n\
          - `context` / `tried` : optionnels mais utiles (symptôme exact + contournement en place).\n\

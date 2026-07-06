@@ -24,5 +24,5 @@ resp="$(curl -sS --max-time 10 "$url")" || {
 
 echo "$resp" | jq '
   (.data // [])
-  | map({app, severity, area, status, id, title, context, tried})
+  | map({app, kind, severity, area, status, id, title, context, tried})
 '

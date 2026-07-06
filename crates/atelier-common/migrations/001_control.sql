@@ -93,11 +93,14 @@ CREATE INDEX IF NOT EXISTS doc_entries_type_idx ON doc_entries (app_id, doc_type
 --   slug     = app émettrice (pas de FK : même raison que homeroute_routes —
 --              le hook AppDelete purge explicitement, évite une dépendance
 --              d'ordre au boot/backfill).
+--   kind     = error | limitation | suggestion (axe de nature — les lignes
+--              antérieures à l'axe sont des frictions → DEFAULT 'error')
 --   status   = open | resolved | dismissed
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS platform_issues (
     id          TEXT         PRIMARY KEY,
     slug        TEXT         NOT NULL,
+    kind        TEXT         NOT NULL DEFAULT 'error',
     area        TEXT         NOT NULL DEFAULT 'other',
     severity    TEXT         NOT NULL DEFAULT 'medium',
     title       TEXT         NOT NULL,
@@ -108,6 +111,8 @@ CREATE TABLE IF NOT EXISTS platform_issues (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ
 );
+
+ALTER TABLE platform_issues ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'error';
 
 CREATE INDEX IF NOT EXISTS platform_issues_status_idx ON platform_issues (status);
 CREATE INDEX IF NOT EXISTS platform_issues_slug_idx   ON platform_issues (slug);
