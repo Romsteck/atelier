@@ -223,6 +223,11 @@ export const getConversation = (slug, sid) =>
   api.get(`/apps/${slug}/agent/conversations/${sid}`);
 export const renameConversation = (slug, sid, title) =>
   api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
+// Persiste l'effort choisi pour la conversation (agent_conversation_meta). L'effort
+// SDK étant figé au démarrage, le vrai changement passe par un recycle de session
+// (cancel → resume) — cet appel fixe l'INTENTION pour les snapshots/autres PCs.
+export const setConversationEffort = (slug, sid, effort) =>
+  api.patch(`/apps/${slug}/agent/conversations/${sid}/settings`, { effort });
 export const deleteConversation = (slug, sid) =>
   api.delete(`/apps/${slug}/agent/conversations/${sid}`);
 // État d'UI des onglets ouverts (sync cross-PC) : { tabs, active }. Autoritaire

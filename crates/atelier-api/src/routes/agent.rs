@@ -30,6 +30,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, instrument, warn};
 
+use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::{AgentEvent, AgentOpenTabsEvent, StudioTabEvent};
 
 use crate::state::ApiState;
@@ -51,6 +52,11 @@ struct RunState {
     /// Mode courant côté UI ('plan' | 'bypass'). Mis à jour par les events `permission_mode`
     /// (approbation de plan, /set_mode) → exposé dans le snapshot pour survivre au reload.
     mode: String,
+    /// Modèle DEMANDÉ au spawn (None = défaut abonnement), suivi par les events `model`
+    /// (/set_model live). Exposé dans le snapshot + persisté dans `agent_conversation_meta`.
+    model: Option<String>,
+    /// Effort demandé au spawn — figé côté SDK pour toute la session (pas d'API live).
+    effort: Option<String>,
     /// Un tour est-il en vol ? `true` du dépôt d'un tour (init/`message`/`answer`/
     /// `plan_decision`) jusqu'au `turn_done`/`done`. Exposé dans le snapshot (`running`,
     /// pour restaurer l'indicateur de réflexion après un refresh) et utilisé par le drain.
@@ -64,9 +70,16 @@ static SID_RUN: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mute
 /// concurrentes corrompraient le snapshot/rollback. Posé/levé par [`sdk_update`] (garde RAII).
 static SDK_UPDATING: AtomicBool = AtomicBool::new(false);
 
-/// Écrit une ligne NDJSON sur le stdin du runner d'un run. `false` si inconnu/terminé.
+/// Écrit une ligne NDJSON sur le stdin du runner d'un run. `false` si inconnu/terminé
+/// OU en cours d'arrêt (`cancel_tx` pris = drain demandé : la boucle ne lira plus
+/// `input_rx`, la ligne partirait dans le vide alors que le handler répondrait 200 —
+/// le 404 fait basculer le frontend sur son fallback resume).
 fn send_input(run_id: &str, line: String) -> bool {
-    RUNS.lock().get(run_id).map(|r| r.input_tx.send(line).is_ok()).unwrap_or(false)
+    RUNS.lock()
+        .get(run_id)
+        .filter(|r| r.cancel_tx.is_some())
+        .map(|r| r.input_tx.send(line).is_ok())
+        .unwrap_or(false)
 }
 
 fn user_item(text: &str) -> Value {
@@ -151,6 +164,11 @@ fn fold_into_run(run_id: &str, kind: &str, data: &Value) {
                 r.mode = m.to_string();
             }
         }
+        // `model` (set_model live) : maj du modèle demandé — null = retour au défaut
+        // abonnement (état explicite, distinct de « pas de changement »).
+        if kind == "model" {
+            r.model = data.get("model").and_then(|x| x.as_str()).map(String::from);
+        }
         // Fin de tour → le tour n'est plus en vol (snapshot `running` repasse à false).
         if kind == "turn_done" || kind == "done" {
             r.turn_active = false;
@@ -181,6 +199,12 @@ pub fn app_router() -> Router<ApiState> {
             "/{slug}/agent/conversations/{sid}",
             get(get_conversation).patch(rename_conversation).delete(delete_conversation),
         )
+        // Réglages persistés de la conversation (agent_conversation_meta). Seul
+        // l'effort est mutable ici : il n'a PAS d'API SDK live (figé au démarrage),
+        // le changer recycle la session côté client (cancel → resume au prochain
+        // message) — cet endpoint persiste l'INTENTION pour que les snapshots et
+        // les autres PCs ne revertent pas le sélecteur avant ce resume.
+        .route("/{slug}/agent/conversations/{sid}/settings", axum::routing::patch(patch_conversation_settings))
         // État d'UI des onglets ouverts (sync cross-PC) : autoritaire côté serveur,
         // poussé live via le canal WS `agent:open-tabs`.
         .route(
@@ -487,6 +511,25 @@ async fn query(
     // transcript déjà persisté sur disque pour ne rien perdre au reload.
     let mut items: Vec<Value> = Vec::new();
     if let Some(sid) = &body.resume {
+        // La session est peut-être encore en train de se fermer (ex. changement d'effort →
+        // cancel → flush SDK) : reprendre PENDANT le flush lirait un transcript tronqué et
+        // ouvrirait un double-writer sur le même fichier de session. On attend la fin du
+        // drain (borné) ; une session vivante NON en arrêt → 409 immédiat (le tour suivant
+        // doit passer par /message, pas par un resume qui forkerait le runner).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let rid = SID_RUN.lock().get(sid).cloned();
+            let Some(rid) = rid else { break };
+            // Entrée RUNS absente (cleanup en cours) = arrêt en cours → on continue d'attendre.
+            let ending = RUNS.lock().get(&rid).map(|r| r.cancel_tx.is_none()).unwrap_or(true);
+            if !ending {
+                return err(StatusCode::CONFLICT, "conversation encore vivante — envoie le message sur la session en cours");
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return err(StatusCode::CONFLICT, "session en cours de fermeture — réessaie dans un instant");
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
         // Précharge le buffer d'AFFICHAGE depuis le transcript persisté (le modèle, lui, a
         // tout le contexte via le resume SDK). Un échec (timeout 30s sous charge) tronquerait
         // l'affichage du tour relancé TANT QU'IL EST LIVE → on réessaie une fois et on logge
@@ -543,16 +586,19 @@ async fn query(
             input_tx,
             items,
             mode: ui_mode.to_string(),
+            model: body.model.clone(),
+            effort: body.effort.clone(),
             turn_active: true, // le prompt d'init est le tour #1
         },
     );
 
     info!(run_id = %run_id, "agent run started");
     let events = state.events.clone();
+    let meta = state.conversation_meta.clone();
     let run_id_task = run_id.clone();
     let slug_task = slug.clone();
     tokio::spawn(async move {
-        run_agent(events, slug_task, run_id_task, cwd, init.to_string(), cancel_rx, input_rx).await;
+        run_agent(events, slug_task, run_id_task, cwd, init.to_string(), cancel_rx, input_rx, meta).await;
         // run_agent nettoie RUNS / SID_RUN en fin de run (graceful → session persistée).
     });
 
@@ -924,31 +970,80 @@ async fn get_conversation(
     // Session vivante → fil servi depuis le buffer mémoire (pas encore sur disque).
     let rid = SID_RUN.lock().get(&sid).cloned();
     if let Some(rid) = rid {
-        let snap = RUNS.lock().get(&rid).map(|r| (r.items.clone(), r.mode.clone(), r.turn_active));
-        if let Some((items, mode, turn_active)) = snap {
+        let snap = RUNS
+            .lock()
+            .get(&rid)
+            .map(|r| (r.items.clone(), r.mode.clone(), r.turn_active, r.model.clone(), r.effort.clone()));
+        if let Some((items, mode, turn_active, model, effort)) = snap {
             // `running` (tour en vol) + `pending` (dialogue non résolu) permettent au
             // frontend de restaurer l'indicateur de réflexion / la carte d'attente après
             // un refresh (le WS broadcast ne rejoue pas `started`/`question`).
             let pending = pending_dialog(&items);
             // Le buffer ne porte déjà que des réflexions allégées (compteur `chars`, pas de
-            // texte — cf. fold_item) → servi tel quel.
-            return Json(json!({ "items": items, "live": true, "run_id": rid, "mode": mode, "running": turn_active, "pending": pending })).into_response();
+            // texte — cf. fold_item) → servi tel quel. `settings` = réglages demandés de la
+            // session (le frontend y resynchronise ses sélecteurs, cross-PC).
+            return Json(json!({
+                "items": items,
+                "live": true,
+                "run_id": rid,
+                "mode": mode.clone(),
+                "running": turn_active,
+                "pending": pending,
+                "settings": { "model": model, "effort": effort, "mode": mode },
+            }))
+            .into_response();
         }
     }
     // Sinon → transcript persisté sur disque.
     let init = json!({ "op": "messages", "sessionId": sid, "cwd": cwd.to_string_lossy() }).to_string();
     match run_runner_op(&cwd, init).await {
         Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("transcript") => {
+            // Réglages de la dernière exécution depuis le store. `settings: null` =
+            // conversation legacy sans meta → le frontend garde ses défauts locaux.
+            // `mode` top-level : même clé que le chemin vivant (le reducer front lit
+            // `a.mode` → activeMode, y compris pour une conversation morte désormais).
+            let settings = state.conversation_meta.get(&slug, &sid).await;
+            let mode = settings.as_ref().and_then(|s| s.get("mode")).cloned().unwrap_or(Value::Null);
             Json(json!({
                 "items": v.get("items").cloned().unwrap_or_else(|| json!([])),
                 "live": false,
                 "run_id": Value::Null,
+                "mode": mode,
+                "settings": settings.unwrap_or(Value::Null),
             }))
             .into_response()
         }
         Ok(v) => runner_bad_gateway(&v, "runner: réponse inattendue"),
         Err(e) => err(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+#[derive(Deserialize)]
+struct SettingsBody {
+    effort: String,
+}
+
+/// `PATCH /api/apps/{slug}/agent/conversations/{sid}/settings` — persiste l'effort
+/// choisi pour la conversation (cf. commentaire de route : intention pré-resume).
+#[instrument(skip(state, body), fields(slug = %slug, sid = %sid))]
+async fn patch_conversation_settings(
+    State(state): State<ApiState>,
+    Path((slug, sid)): Path<(String, String)>,
+    Json(body): Json<SettingsBody>,
+) -> impl IntoResponse {
+    if !["low", "medium", "high", "xhigh", "max"].contains(&body.effort.as_str()) {
+        return err(StatusCode::BAD_REQUEST, "effort invalide");
+    }
+    // Cohérence du snapshot live pendant la fenêtre de drain (le run mourant sert
+    // encore le buffer mémoire) : on reflète aussi l'effort dans le RunState.
+    let rid = SID_RUN.lock().get(&sid).cloned();
+    if let Some(rid) = rid {
+        if let Some(r) = RUNS.lock().get_mut(&rid) {
+            r.effort = Some(body.effort.clone());
+        }
+    }
+    state.conversation_meta.set_effort(&slug, &sid, &body.effort).await;
+    (StatusCode::OK, Json(json!({"ok": true}))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -998,6 +1093,7 @@ async fn delete_conversation(
     let init = json!({ "op": "delete", "sessionId": sid, "cwd": cwd.to_string_lossy() }).to_string();
     match run_runner_op(&cwd, init).await {
         Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("ok") => {
+            state.conversation_meta.delete(&slug, &sid).await;
             (StatusCode::OK, Json(json!({"deleted": true}))).into_response()
         }
         Ok(v) => runner_bad_gateway(&v, "runner: échec delete"),
@@ -1035,6 +1131,7 @@ fn publish(
 /// Clone direct du pattern [`atelier_watcher::claude::ClaudeRunner::exec`] :
 /// process group + SIGKILL au cancel/timeout pour reaper le binaire `claude`
 /// petit-fils du SDK.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     events: std::sync::Arc<atelier_common::events::EventBus>,
     slug: String,
@@ -1043,6 +1140,7 @@ async fn run_agent(
     init_json: String,
     mut cancel: oneshot::Receiver<()>,
     mut input_rx: mpsc::UnboundedReceiver<String>,
+    meta: ConversationMetaStore,
 ) {
     let mut seq: u64 = 0;
     // Clé stable de la conversation : inconnue jusqu'à la 1re ligne `system` du runner.
@@ -1213,8 +1311,22 @@ async fn run_agent(
                             if let Some(sid) = obj.get("session_id").and_then(|x| x.as_str()) {
                                 session_id = Some(sid.to_string());
                                 SID_RUN.lock().insert(sid.to_string(), run_id.clone());
-                                if let Some(r) = RUNS.lock().get_mut(&run_id) {
-                                    r.session_id = Some(sid.to_string());
+                                // Réglages demandés (modèle/effort/mode) → persistés au binding.
+                                // Couvre query ET resume (chaque reprise re-émet `system` depuis
+                                // un runner frais). Clonés SOUS le lock, upsertés HORS lock via
+                                // spawn : un Postgres lent ne doit pas geler le relay des events.
+                                let settings = {
+                                    let mut runs = RUNS.lock();
+                                    runs.get_mut(&run_id).map(|r| {
+                                        r.session_id = Some(sid.to_string());
+                                        (r.model.clone(), r.effort.clone(), r.mode.clone())
+                                    })
+                                };
+                                if let Some((model, effort, mode)) = settings {
+                                    let (meta, slug, sid) = (meta.clone(), slug.clone(), sid.to_string());
+                                    tokio::spawn(async move {
+                                        meta.upsert(&slug, &sid, model.as_deref(), effort.as_deref(), &mode).await;
+                                    });
                                 }
                                 info!(run_id = %run_id, session_id = %sid, "agent session bound");
                             }
@@ -1231,6 +1343,21 @@ async fn run_agent(
                             }
                         } else {
                             flush(&events, &run_id, session_id.as_deref(), &slug, &mut seq, &mut pending_text, &mut pending_kind);
+                            // set_model / set_mode live → meta persisté (session déjà liée ;
+                            // le `permission_mode` initial arrive AVANT `system` → skip, le
+                            // binding ci-dessus écrit le mode courant juste après).
+                            if let Some(sid) = session_id.as_deref() {
+                                if t == "model" {
+                                    let model = obj.get("model").and_then(|x| x.as_str()).map(String::from);
+                                    let (meta, slug, sid) = (meta.clone(), slug.clone(), sid.to_string());
+                                    tokio::spawn(async move { meta.set_model(&slug, &sid, model.as_deref()).await });
+                                } else if t == "permission_mode" {
+                                    if let Some(mode) = obj.get("mode").and_then(|x| x.as_str()).map(String::from) {
+                                        let (meta, slug, sid) = (meta.clone(), slug.clone(), sid.to_string());
+                                        tokio::spawn(async move { meta.set_mode(&slug, &sid, &mode).await });
+                                    }
+                                }
+                            }
                             publish(&events, &run_id, session_id.as_deref(), &slug, &mut seq, &t, obj);
                         }
                     }

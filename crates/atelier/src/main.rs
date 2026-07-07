@@ -94,6 +94,10 @@ async fn main() -> Result<()> {
         Arc::new(atelier_common::task_store::TaskStore::new(meta_pool.clone()).await);
     // Studio open-tabs store (cross-PC tab sync). Degrades to no-op without the pool.
     let open_tabs = atelier_common::agent_ui_state::OpenTabsStore::new(meta_pool.clone());
+    // Réglages par conversation agent (modèle/effort/mode) — suivent l'utilisateur
+    // entre PCs, comme les onglets. Degrades to no-op without the pool.
+    let conversation_meta =
+        atelier_common::conversation_meta::ConversationMetaStore::new(meta_pool.clone());
     // EventBus créé AVANT les stores : le PlatformIssueStore et le
     // NotificationStore embarquent le sender de leur canal (`issue` / `notify`,
     // insert + publish indissociables).
@@ -204,6 +208,7 @@ async fn main() -> Result<()> {
         dv,
         task_store,
         open_tabs,
+        conversation_meta,
         issues,
         notifications,
         apps_src_root,

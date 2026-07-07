@@ -7,6 +7,7 @@ use atelier_watcher::SurveillanceService;
 use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
 use atelier_common::agent_ui_state::OpenTabsStore;
+use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::EventBus;
 use atelier_common::issue_store::PlatformIssueStore;
 use atelier_common::notification_store::NotificationStore;
@@ -33,6 +34,12 @@ pub struct ApiState {
     /// per app, in `atelier_meta`. Source of truth for cross-PC tab sync; pairs
     /// with the `agent_open_tabs` WS broadcast. No-op when Postgres is down.
     pub open_tabs: OpenTabsStore,
+
+    /// Réglages par conversation agent (modèle/effort/mode) dans
+    /// `atelier_meta.agent_conversation_meta`. Source de vérité serveur pour que
+    /// rouvrir une conversation depuis un autre PC restaure (et relance) le bon
+    /// modèle/effort au lieu du défaut localStorage. No-op quand Postgres est down.
+    pub conversation_meta: ConversationMetaStore,
 
     /// Remontées plateforme (CLAUDE_ISSUES) signalées par les chats Claude Code
     /// des apps, centralisées dans `atelier_meta.platform_issues` (plus aucun
@@ -101,6 +108,7 @@ impl ApiState {
         dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
         task_store: Arc<TaskStore>,
         open_tabs: OpenTabsStore,
+        conversation_meta: ConversationMetaStore,
         issues: PlatformIssueStore,
         notifications: NotificationStore,
         apps_src_root: PathBuf,
@@ -124,6 +132,7 @@ impl ApiState {
             apps_runtime_root,
             task_store,
             open_tabs,
+            conversation_meta,
             issues,
             notifications,
             dv,

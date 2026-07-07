@@ -9,7 +9,7 @@ import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, splitPath, charsToTokens, formatTokens, toolTarget } from '../lib/toolDisplay';
 import { TOOL_ICONS, useSmoothCount } from '../lib/toolPresentation';
-import { MODELS, MODES, buildSettings, resolveModelId } from '../lib/agentModels';
+import { MODELS, MODES, buildSettings, resolveModelId, modelIdFromApi } from '../lib/agentModels';
 
 // Réflexion = compteur SEUL (jamais le texte). Le front ne reçoit que `chars` (le serveur
 // n'envoie aucun détail), affiché en tokens (≈ chars/4). Non interactif, rien à déplier.
@@ -352,12 +352,48 @@ function PlanReviewCard({ plan, decided, approved, idle, onApprove, onReject }) 
   );
 }
 
+// Contrôle segmenté (Mode / Effort) : groupe arrondi, segment actif « en relief ».
+// Les gris sont auto-mirrorés par le thème (index.css) — seuls les accents couleur
+// portent une variante dark:. `accent(id)` → 'blue' | 'amber' colore par option.
+function Segmented({ options, value, onChange, disabled = false, title, accent }) {
+  return (
+    <div
+      title={title}
+      className={`inline-flex items-center rounded-md p-0.5 border border-gray-700/80 bg-gray-800/60 ${disabled ? 'opacity-40' : ''}`}
+    >
+      {options.map((o) => {
+        const active = value === o.id;
+        const color = (typeof accent === 'function' ? accent(o.id) : accent) === 'amber'
+          ? 'text-amber-700 dark:text-amber-300'
+          : 'text-blue-700 dark:text-blue-300';
+        return (
+          <button
+            key={o.id}
+            disabled={disabled}
+            onClick={() => onChange(o.id)}
+            title={o.title}
+            className={`px-2 py-0.5 min-h-[28px] sm:min-h-0 rounded-[5px] text-[11px] transition-colors ${
+              disabled
+                ? 'cursor-not-allowed'
+                : active
+                  ? ''
+                  : 'hover:text-gray-200 hover:bg-gray-700/50'
+            } ${active ? `bg-white dark:bg-gray-700 shadow-sm font-medium ${color}` : 'text-gray-500'}`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Panneau d'UNE conversation. Contrôlé : tout l'état (items, running, runId, question
 // en attente) vit dans le provider, indexé par `panelKey`. Le panneau ne fait que
 // rendre + déléguer (sendMessage/answer/cancel/closeConversation). La SAISIE est isolée
 // dans <Composer> (état local) pour que taper ne re-render pas la liste des messages.
 export default function AgentPanel({ panelKey }) {
-  const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, closeConversation } = useAgentConversations();
+  const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, changeEffort, closeConversation } = useAgentConversations();
   const convo = convos[panelKey];
 
   const [modelId, setModelId] = useState(() => resolveModelId(localStorage.getItem('agent:model')));
@@ -392,25 +428,37 @@ export default function AgentPanel({ panelKey }) {
     setShowNew(false);
   }, []);
 
-  // Choix mémorisés → défauts des prochaines conversations. Le MODÈLE se persiste ici (seul
-  // onChangeModel le mute ; l'effet nettoie aussi au mount un id stale normalisé par
-  // resolveModelId). L'effort et le MODE, eux, ne sont persistés que sur clic délibéré
-  // (chooseEffort / onChangeMode) : le mode est aussi muté par la sync backend→UI
-  // (activeMode, ex. plan imposé par « Résoudre tout » ou approbation de plan) — persister
-  // cette sync écraserait la préférence globale de l'utilisateur.
-  useEffect(() => { localStorage.setItem('agent:model', modelId); }, [modelId]);
+  // Préférences globales (localStorage) : persistées UNIQUEMENT sur choix délibéré
+  // (onChangeModel / chooseEffort / onChangeMode) — jamais par les syncs backend→UI
+  // ci-dessous (settings serveur, activeMode/activeModel, effort imposé par
+  // « Résoudre tout ») qui écraseraient la préférence de l'utilisateur.
 
-  // Reflète l'effort imposé au lancement (ex. 'max' depuis « Résoudre ») dès qu'il est connu.
+  // Vérité session → sélecteur MODÈLE : priorité au modèle RÉSOLU annoncé live
+  // (activeModel, events system/model), sinon au modèle demandé persisté serveur
+  // (settings.model — null = défaut Opus explicite). `undefined` = aucune info
+  // (brouillon neuf / conversation legacy sans meta) → préférence locale conservée.
+  const serverModel = convo?.activeModel ?? (convo?.settings ? (convo.settings.model ?? null) : undefined);
+  useEffect(() => {
+    if (serverModel !== undefined) setModelId(modelIdFromApi(serverModel));
+  }, [serverModel]);
+
+  // Reflète l'effort de la conversation (settings serveur au chargement, ou effort
+  // imposé au lancement ex. 'max' depuis « Résoudre ») dès qu'il est connu.
   useEffect(() => {
     if (convo?.effort) setEffort(convo.effort);
-     
+
   }, [convo?.effort]);
 
-  // Changement délibéré d'effort par l'utilisateur → applique + mémorise comme préférence.
+  // Changement délibéré d'effort par l'utilisateur → applique + mémorise comme
+  // préférence, et délègue au contexte (persistance meta serveur + recycle éventuel
+  // de la session vivante : l'effort SDK est figé au démarrage, pas d'API live —
+  // le prochain message reprend en resume avec le nouvel effort et toute la mémoire).
   const chooseEffort = useCallback((e) => {
+    if (e === effort) return;
     setEffort(e);
     localStorage.setItem('agent:effort', e);
-  }, []);
+    changeEffort(panelKey, e);
+  }, [effort, changeEffort, panelKey]);
   useEffect(() => { getSdkVersion().then((r) => setSdk(r.data)).catch(() => {}); }, []);
 
   const items = useMemo(() => convo?.items || [], [convo?.items]);
@@ -549,6 +597,7 @@ export default function AgentPanel({ panelKey }) {
   const selModel = MODELS.find((m) => m.id === modelId) || MODELS[0];
   const onChangeModel = (id) => {
     setModelId(id);
+    localStorage.setItem('agent:model', id); // choix délibéré → préférence globale
     const m = MODELS.find((x) => x.id === id);
     if (m && m.efforts.length && !m.efforts.includes(effort)) chooseEffort(m.efforts[m.efforts.length - 1]);
     if (live) changeModel(panelKey, m?.model || null); // session vivante → setModel à chaud
@@ -747,41 +796,44 @@ export default function AgentPanel({ panelKey }) {
       {running && !awaitingUser && liveActivity && <LiveBand activity={liveActivity} />}
 
       {/* Sélecteurs. Modèle + mode sont modifiables EN COURS de session (setModel /
-          setPermissionMode à chaud). L'effort, lui, est figé au démarrage (pas d'API live) →
-          verrouillé pendant une session ; ouvrir une nouvelle conversation pour le changer. */}
-      <div className="flex items-center flex-wrap gap-x-4 gap-y-1 px-3 py-1.5 border-t border-gray-800 shrink-0">
-        <div className="flex items-center gap-1 w-full sm:w-auto">
-          <span className="text-[11px] text-gray-600 mr-1">Modèle</span>
+          setPermissionMode à chaud). L'effort est figé côté SDK au démarrage : le changer
+          sur une session vivante mais idle la RECYCLE en douceur (cancel → resume au
+          prochain message, mémoire conservée) ; pendant un tour en vol il est verrouillé.
+          Les valeurs affichées se resynchronisent sur les settings serveur de la
+          conversation (agent_conversation_meta) — cohérentes entre PCs. */}
+      <div className="flex items-center flex-wrap gap-x-3 gap-y-1.5 px-3 py-1.5 border-t border-gray-800 bg-gray-950/40 shrink-0">
+        <label className="flex items-center gap-1.5 w-full sm:w-auto">
+          <span className="text-[10px] uppercase tracking-wider text-gray-500">Modèle</span>
           <select value={modelId} onChange={(e) => onChangeModel(e.target.value)}
-            className="flex-1 sm:flex-none bg-gray-800 border border-gray-700 rounded-sm text-[11px] text-gray-200 px-1 py-[3px] focus:outline-none focus:border-blue-500">
+            className="flex-1 sm:flex-none h-[29px] rounded-md border border-gray-700/80 bg-gray-800/60 text-[11px] text-gray-200 px-1.5 focus:outline-none focus:border-blue-500">
             {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="text-[11px] text-gray-600 mr-1">Mode</span>
-          {MODES.map((m) => (
-            <button key={m.id} onClick={() => onChangeMode(m.id)} title={m.title}
-              className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] ${
-                mode === m.id
-                  ? m.id === 'bypass'
-                    ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
-                    : 'bg-blue-500/20 text-blue-700 dark:text-blue-300'
-                  : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'
-              }`}>
-              {m.label}
-            </button>
-          ))}
+        </label>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-gray-500">Mode</span>
+          <Segmented
+            options={MODES.map((m) => ({ id: m.id, label: m.label, title: m.title }))}
+            value={mode}
+            onChange={onChangeMode}
+            accent={(id) => (id === 'bypass' ? 'amber' : 'blue')}
+          />
         </div>
         {selModel.efforts.length > 0 && (
-          <div className="flex items-center gap-1"
-            title={live ? 'Effort figé au démarrage de la session — ouvre une nouvelle conversation pour le changer' : undefined}>
-            <span className="text-[11px] text-gray-600 mr-1">Effort</span>
-            {selModel.efforts.map((e) => (
-              <button key={e} disabled={live} onClick={() => chooseEffort(e)}
-                className={`px-1.5 py-0.5 min-h-[30px] sm:min-h-0 rounded-sm text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${effort === e ? 'bg-blue-500/20 text-blue-700 dark:text-blue-300' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'}`}>
-                {e}
-              </button>
-            ))}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">Effort</span>
+            <Segmented
+              options={selModel.efforts.map((e) => ({ id: e, label: e }))}
+              value={effort}
+              onChange={chooseEffort}
+              disabled={running}
+              title={
+                running
+                  ? 'Effort modifiable dès la fin du tour en cours'
+                  : live
+                    ? 'Changer l’effort redémarre la session en douceur : le prochain message reprend avec la mémoire complète et le nouvel effort'
+                    : undefined
+              }
+            />
           </div>
         )}
       </div>

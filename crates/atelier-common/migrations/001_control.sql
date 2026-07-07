@@ -222,6 +222,24 @@ ALTER TABLE agent_open_tabs ADD COLUMN IF NOT EXISTS studio_tab  TEXT;
 ALTER TABLE agent_open_tabs ADD COLUMN IF NOT EXISTS studio_kind TEXT;
 
 -- ---------------------------------------------------------------------------
+-- agent_conversation_meta — réglages par conversation agent (modèle/effort/mode).
+-- WHY côté serveur : ces réglages doivent suivre l'utilisateur entre PCs (le
+-- localStorage ne le peut pas) — sans eux, rouvrir une conversation depuis un
+-- autre navigateur la relançait sur le modèle/effort par défaut. model NULL =
+-- défaut abonnement (Opus [1m]). Upserté au binding de session (query/resume) +
+-- sur set_model/set_mode live. Purge : delete conversation + delete app.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_conversation_meta (
+    slug        TEXT         NOT NULL,
+    session_id  TEXT         NOT NULL,
+    model       TEXT,
+    effort      TEXT,
+    mode        TEXT,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (slug, session_id)
+);
+
+-- ---------------------------------------------------------------------------
 -- studio_state — RETIRÉE (2026-06-21). Le singleton « app ouverte » n'a plus de
 -- sens depuis que le Studio est une app Vite séparée, ouverte en un onglet par
 -- app (`/studio/{slug}`) : l'app vient de l'URL, plus d'une sélection globale.

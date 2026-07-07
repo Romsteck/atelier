@@ -113,6 +113,9 @@ pub struct AppsContext {
     /// Notifications plateforme (`atelier_meta.platform_notifications`) —
     /// purgées au delete d'app, même raison que `issues`.
     pub notifications: atelier_common::notification_store::NotificationStore,
+    /// Réglages par conversation agent (`atelier_meta.agent_conversation_meta`) —
+    /// purgés au delete d'app (les sessions SDK de l'app disparaissent avec elle).
+    pub conversation_meta: atelier_common::conversation_meta::ConversationMetaStore,
 }
 
 impl AppsContext {
@@ -136,6 +139,7 @@ impl AppsContext {
             app_build_tx: state.events.app_build.clone(),
             issues: state.issues.clone(),
             notifications: state.notifications.clone(),
+            conversation_meta: state.conversation_meta.clone(),
         }
     }
 
@@ -554,6 +558,9 @@ impl AppsContext {
         // une app supprimée n'a plus de chat qui les contextualise.
         self.issues.delete_by_slug(&slug).await;
         self.notifications.delete_by_slug(&slug).await;
+        // Idem pour les réglages de conversations agent : les sessions SDK de
+        // l'app disparaissent avec son workspace, leur meta n'a plus de sens.
+        self.conversation_meta.delete_by_slug(&slug).await;
         if !keep_data {
             // De-provision the dataverse database (base app_{slug} + rôle +
             // entrée secrets + pool évincé). Sans ça, chaque delete laissait

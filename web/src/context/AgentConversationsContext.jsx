@@ -9,6 +9,7 @@ import {
   resumeAgentQuery,
   sendAgentMessage,
   interruptAgentRun,
+  cancelAgentRun,
   answerAgentRun,
   planDecisionAgentRun,
   setAgentMode,
@@ -16,6 +17,7 @@ import {
   listConversations,
   getConversation,
   renameConversation,
+  setConversationEffort,
   deleteConversation,
   getAgentOpenTabs,
   setAgentOpenTabs,
@@ -95,6 +97,17 @@ function canonTabs(descriptors) {
   return out;
 }
 
+// Réglages connus de la conversation → payload d'un resume implicite (answer/
+// decidePlan sur conversation fermée). WHY : un resume « nu » repartirait sur le
+// modèle/effort par défaut (Opus) ET écraserait le meta serveur au re-binding.
+function convoSettings(c) {
+  const effort = c?.settings?.effort || c?.effort;
+  return {
+    ...(c?.settings?.model ? { model: c.settings.model } : {}),
+    ...(effort ? { effort } : {}),
+  };
+}
+
 // Réponse AskUserQuestion d'une conversation FERMÉE → tour en clair (miroir de
 // `answerToTurn` côté runner) injecté via resume.
 function formatAnswer(payload) {
@@ -124,6 +137,7 @@ const emptyConvo = (key, sid) => ({
   autoSend: null, // {prompt, settings} à envoyer une fois le panneau commit (lancement depuis surveillance)
   scanKind: null, // si lancée par « Résoudre tout » : kind du scan (gate le bouton tant que l'onglet est ouvert)
   effort: null, // effort imposé au lancement (ex. 'max' depuis « Résoudre tout ») — reflété par le sélecteur du panneau
+  settings: null, // {model, effort, mode} persistés côté serveur (agent_conversation_meta) — null = legacy/brouillon
 });
 
 function reducer(state, a) {
@@ -300,7 +314,23 @@ function reducer(state, a) {
         ...state,
         convos: {
           ...state.convos,
-          [a.key]: { ...c, items, live: a.live, runId: a.runId || null, answered, decided, activeMode: a.mode || c.activeMode, running, loading: false, error: null },
+          [a.key]: {
+            ...c,
+            items,
+            live: a.live,
+            runId: a.runId || null,
+            answered,
+            decided,
+            activeMode: a.mode || c.activeMode,
+            running,
+            loading: false,
+            error: null,
+            // Réglages serveur de la conversation (vérité session, cross-PC). L'effort
+            // du snapshot prime sur le `eff` du descripteur d'onglet ; le panneau se
+            // resynchronise via ses effets convo.effort / convo.settings.
+            settings: a.settings || c.settings,
+            effort: a.settings?.effort || c.effort,
+          },
         },
       };
     }
@@ -327,6 +357,14 @@ function reducer(state, a) {
       const c = state.convos[a.key];
       if (!c) return state;
       return { ...state, convos: { ...state.convos, [a.key]: { ...c, running: false } } };
+    }
+    // Choix délibéré d'effort (changeEffort) : reflété localement pour que ni un
+    // snapshot resync ni la sync d'onglets (`eff`) ne revertent le sélecteur.
+    case 'SET_CONVO_EFFORT': {
+      const c = state.convos[a.key];
+      if (!c) return state;
+      const settings = c.settings ? { ...c.settings, effort: a.effort } : c.settings;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, effort: a.effort, settings } } };
     }
     case 'SET_ANSWERED': {
       const c = state.convos[a.key];
@@ -381,6 +419,9 @@ function reducer(state, a) {
           nc = { ...c, running: false };
           break;
         case 'done':
+          // `done` tardif d'un ANCIEN run (ex. session fermée par changeEffort puis
+          // déjà relancée en resume) : ne pas clobberer le runId du nouveau run.
+          if (ev.run_id && c.runId && ev.run_id !== c.runId) { nc = { ...c }; break; }
           nc = { ...c, running: false, live: false, runId: null };
           break;
         case 'result':
@@ -395,7 +436,9 @@ function reducer(state, a) {
           nc = { ...c, activeMode: ev.data?.mode || c.activeMode };
           break;
         case 'model':
-          nc = { ...c, activeModel: ev.data?.model || c.activeModel };
+          // `model: null` = retour explicite au défaut abonnement (Opus) — distinct
+          // d'un event sans champ. Un `||` avalait ce null et l'UI restait figée.
+          nc = { ...c, activeModel: ev.data && 'model' in ev.data ? (ev.data.model ?? null) : c.activeModel };
           break;
         case 'question':
           nc = {
@@ -452,7 +495,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   // Re-fetch du snapshot d'une conversation (helper partagé restore/sync).
   const fetchSnapshot = useCallback((sid) => {
     getConversation(slug, sid)
-      .then((r) => dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }))
+      .then((r) => dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running, settings: r.data?.settings || null }))
       .catch((e) => {
         if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
         else dispatch({ type: 'SNAPSHOT_ERR', key: sid, error: e.message });
@@ -714,7 +757,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       dispatch({ type: 'OPEN_PANEL', key, sid });
       getConversation(slug, sid)
         .then((r) =>
-          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running }),
+          dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running, settings: r.data?.settings || null }),
         )
         .catch((e) => dispatch({ type: 'SNAPSHOT_ERR', key, error: e.message }));
     },
@@ -850,14 +893,25 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
           ].join('\n');
       dispatch({ type: 'SET_ANSWERED', key, request_id, answerText });
       try {
+        let sent = false;
         if (c.runId) {
-          await answerAgentRun(slug, c.runId, { request_id, ...payload });
-        } else if (c.sid) {
+          try {
+            await answerAgentRun(slug, c.runId, { request_id, ...payload });
+            sent = true;
+          } catch (e) {
+            // runId périmé ou session en cours d'arrêt (drain) → même reprise que la
+            // conversation fermée ci-dessous (miroir du fallback de sendMessage).
+            if (!(e.response?.status === 404 && c.sid)) throw e;
+          }
+        }
+        if (!sent && c.sid) {
           // Conversation fermée : la réponse relance la session via resume, dans le MODE
-          // où la conversation se trouvait (sans ça, un resume repartait toujours en plan).
+          // où la conversation se trouvait (sans ça, un resume repartait toujours en plan)
+          // et avec ses réglages connus (sans ça, il repartait en Opus/effort défaut).
           const r = await resumeAgentQuery(slug, c.sid, {
             prompt: formatAnswer(payload),
             permission_mode: c.activeMode === 'bypass' ? 'bypassPermissions' : 'plan',
+            ...convoSettings(c),
           });
           if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
         }
@@ -893,14 +947,26 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if (!c) return;
       dispatch({ type: 'SET_PLAN_DECIDED', key, request_id, approved });
       try {
+        let sent = false;
         if (c.runId) {
-          await planDecisionAgentRun(slug, c.runId, { request_id, approved, feedback });
-        } else if (c.sid) {
+          try {
+            await planDecisionAgentRun(slug, c.runId, { request_id, approved, feedback });
+            sent = true;
+          } catch (e) {
+            // runId périmé / session en cours d'arrêt → reprise (miroir de sendMessage).
+            if (!(e.response?.status === 404 && c.sid)) throw e;
+          }
+        }
+        if (!sent && c.sid) {
           const why = feedback?.trim();
           const prompt = approved
             ? "J'approuve ton plan. Passe à l'implémentation maintenant."
             : `Je n'approuve pas encore le plan.${why ? ` Retour : ${why}` : ''} Affine-le puis re-propose.`;
-          const r = await resumeAgentQuery(slug, c.sid, { prompt, permission_mode: approved ? 'bypassPermissions' : 'plan' });
+          const r = await resumeAgentQuery(slug, c.sid, {
+            prompt,
+            permission_mode: approved ? 'bypassPermissions' : 'plan',
+            ...convoSettings(c),
+          });
           if (r.data?.run_id) dispatch({ type: 'SET_RUN', key, runId: r.data.run_id });
         }
       } catch (e) {
@@ -934,6 +1000,28 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         await setAgentModel(slug, c.runId, model);
       } catch (e) {
         dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
+      }
+    },
+    [slug],
+  );
+
+  // L'effort SDK est figé au démarrage de la session (pas de set_effort live) →
+  // changer l'effort d'une conversation : (1) persiste l'INTENTION dans le meta
+  // serveur (sinon un resync de snapshot / un autre PC reverterait le sélecteur à
+  // l'ancien effort avant le prochain message), (2) si la session est vivante mais
+  // idle, la ferme proprement (cancel = interrupt + EOF → transcript resumable) ;
+  // le `done` remet runId à null et le prochain send repart en resume avec le
+  // nouvel effort — mémoire complète conservée. Disabled pendant un tour en vol.
+  const changeEffort = useCallback(
+    async (key, effort) => {
+      const c = stateRef.current.convos[key];
+      if ((!c?.sid && !c?.runId) || c?.running) return; // brouillon (localStorage suffit) / tour en vol
+      dispatch({ type: 'SET_CONVO_EFFORT', key, effort });
+      try {
+        if (c.sid) await setConversationEffort(slug, c.sid, effort);
+        if (c.runId) await cancelAgentRun(slug, c.runId);
+      } catch {
+        /* best-effort : le resume du prochain send porte l'effort de toute façon */
       }
     },
     [slug],
@@ -992,6 +1080,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     decidePlan,
     changeMode,
     changeModel,
+    changeEffort,
     renameBySid,
     removeBySid,
   };
