@@ -243,6 +243,10 @@ impl ContextGenerator {
             info!(slug = %app.slug, file = %claude_md_path.display(), "CLAUDE.md skeleton created");
         }
 
+        // Step 9 — `.gitignore` : soustrait les fichiers générés au suivi git
+        // (churn à chaque évolution de template + `.mcp.json` porte le MCP_TOKEN).
+        ensure_atelier_gitignore(src_dir, &app.slug);
+
         info!(slug = %app.slug, "context files generated");
         Ok(())
     }
@@ -285,11 +289,10 @@ impl ContextGenerator {
                 Visibility::Private => "private",
             };
             table_rows.push_str(&format!(
-                "| {name} | `{slug}` | {stack} | https://{domain} | {visibility} | {db} |\n",
+                "| {name} | `{slug}` | {stack} | `/apps/{slug}/` | {visibility} | {db} |\n",
                 name = app.name,
                 slug = app.slug,
                 stack = app.stack,
-                domain = app.domain,
                 visibility = visibility,
                 db = db_cell,
             ));
@@ -323,15 +326,19 @@ impl ContextGenerator {
              chaque app pour le détail.\n\
              \n\
              ## Apps\n\
-             | Name | Slug | Stack | URL | Visibility | DB path |\n\
+             | Name | Slug | Stack | Accès (interne, path-proxy) | Visibility | DB path |\n\
              | --- | --- | --- | --- | --- | --- |\n\
              {table_rows}\
              \n\
              ## How Atelier runs apps\n\
              - Apps run **directly on the host** as processes supervised by Atelier \
              (no nspawn container, no env-agent).\n\
-             - The reverse proxy `hr-edge` terminates TLS on `*.{base_domain}` and forwards to \
-             each app's local port.\n\
+             - Apps are served **same-origin under `/apps/<slug>/`** by Atelier's \
+             path-proxy (port 4100) — that's the always-live access. A public hostname \
+             `<slug>.{base_domain}` exists **only after** the app is published via the \
+             Studio **Paramètres** page; `hr-edge` then forwards that hostname to \
+             **Atelier (:4100)**, never directly to the app's port. An unpublished app \
+             404s on its subdomain — expected, not a bug.\n\
              - The orchestrator manages the process lifecycle (start, stop, restart, logs, \
              health) and exposes everything via MCP.\n\
              \n\
@@ -340,8 +347,8 @@ impl ContextGenerator {
              folder will scope Claude Code to that project.\n\
              - From this root, use the MCP tool `app.list` to enumerate apps, then \
              `app.status` / `app.logs` / `app.restart` to operate on them.\n\
-             - Edit sources in `<slug>/src/`, then `app.restart <slug>` and verify on the \
-             public URL.\n\
+             - Edit sources in `<slug>/src/`, then `app.restart <slug>` and verify via \
+             `/apps/<slug>/` (path-proxy, same-origin — always live while the app runs).\n\
              \n\
              ## MCP\n\
              A single MCP server `studio` is configured at `{mcp_endpoint}` via \
@@ -386,7 +393,11 @@ impl ContextGenerator {
              - **Run:** `{run_command}`\n\
              - **Build:** `{build_cmd}`\n\
              - **Health:** `{health_path}`\n\
-             - **Public URL:** {url}\n\
+             - **Accès (path-proxy, toujours actif quand l'app tourne) :** \
+             `http://127.0.0.1:4100/apps/{slug}/` — **c'est ICI qu'on valide** en session.\n\
+             - **URL publique :** {url} — live **uniquement si l'app est publiée** via la \
+             page **Paramètres** du Studio ; sinon 404 hr-edge (normal, PAS un bug). hr-edge \
+             route ce host vers Atelier (:4100), jamais vers le port de l'app.\n\
              - Managed by Atelier as a host-level process. Use MCP `app.*` tools to \
              control it — **never** lancer le binaire à la main (`nohup`, `tmux`, \
              `./bin/xxx &`, `cargo run`, `systemctl`, `kill`).\n\
@@ -414,7 +425,8 @@ impl ContextGenerator {
              2. Build on place : `{build_cmd}` (toujours en production, jamais de mode dev).\n\
              3. Restart via MCP: `app.control` (ou `POST /api/apps/{slug}/control` avec `{{\"action\":\"restart\"}}`).\n\
              4. Check the result via `app.status` and `app.logs`.\n\
-             5. Open {url} to validate the change end-to-end.\n\
+             5. Ouvre `http://127.0.0.1:4100/apps/{slug}/` (path-proxy, toujours actif) \
+             pour valider end-to-end — **pas** le sous-domaine public (404 tant que non publiée).\n\
              \n\
              > Ce cycle (edit → build → `app.control restart`) sert à **itérer en \
              session** sur une feature en cours. La **livraison en prod** (0-build → \
@@ -422,13 +434,13 @@ impl ContextGenerator {
              \n\
              ## Fin de feature : livrer PUIS proposer le commit\n\
              Quand une feature / un correctif cohérent est **terminé et validé** \
-             (vérifié end-to-end sur {url}), applique **systématiquement** et **dans \
+             (vérifié end-to-end sur `/apps/{slug}/`), applique **systématiquement** et **dans \
              cet ordre** :\n\
              1. **Livre en prod, sans demander** : `0-build` (compile en place) puis, \
              s'il passe, le tool MCP `ship` (stop + restart — la skill `0-deploy` \
              documente le détail). La livraison est **libre** — tu ne demandes PAS \
              l'autorisation de déployer, comme un `make deploy-app`. Vérifie ensuite \
-             `app.status` (`running`) et {url}.\n\
+             `app.status` (`running`) et `/apps/{slug}/`.\n\
              2. **PROPOSE ensuite le commit** : le commit reste **décidé par \
              l'utilisateur**. Ne commit/push jamais en silence ni du travail à moitié \
              fait. S'il accepte, dans `{src_dir}` via Bash : `git add -A && git commit \
@@ -1089,7 +1101,10 @@ fn render_app_info_md(
          - **Nom :** {name}\n\
          - **Slug :** `{slug}`\n\
          - **Stack :** {stack}\n\
-         - **URL publique :** {url} ({visibility})\n\
+         - **Accès interne (toujours actif quand l'app tourne) :** `/apps/{slug}/` \
+         (même-origine, path-proxy Atelier — c'est ici qu'on valide en session)\n\
+         - **URL publique :** {url} ({visibility}) — live **uniquement si publiée** via la \
+         page **Paramètres** du Studio ; sinon 404 hr-edge (normal, pas un bug)\n\
          - **Port interne :** {port}\n\
          - **Health check :** `{health}`\n\
          - **Commande de run :** `{run}`\n\
@@ -1443,6 +1458,87 @@ fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
     Ok(true)
 }
 
+// Marqueurs du bloc `.gitignore` managé par Atelier (cf. `atelier_gitignore_block`).
+const GITIGNORE_BEGIN: &str = "# >>> atelier-generated (ne pas éditer — géré par Atelier) >>>";
+const GITIGNORE_END: &str = "# <<< atelier-generated <<<";
+
+/// Bloc `.gitignore` que la plateforme maintient dans chaque app.
+///
+/// WHY : les fichiers de contexte (`.mcp.json`, `settings.json`, `rules/*.md`
+/// générés, skills `0-*`) sont **régénérés** à chaque boot/AppUpdate
+/// (`write_if_changed`). S'ils sont suivis par git, la moindre évolution de
+/// template salit le repo de CHAQUE app (churn) — et surtout `.mcp.json` porte
+/// le `MCP_TOKEN` (header `Authorization: Bearer …`), qui ne doit JAMAIS être
+/// committé (fuite dans l'historique / le miroir). Les fichiers restent sur
+/// disque (Claude Code les lit) ; seul git les ignore.
+///
+/// Ne PAS ignorer `CLAUDE.md` (carnet agent-owned, write-once) ni les règles /
+/// skills que l'agent écrit lui-même (nommées autrement que `0-*`).
+fn atelier_gitignore_block() -> String {
+    // NB: garder synchro avec les writes de `generate_for_app` (Steps 3–6).
+    let entries = [
+        "/.mcp.json",
+        "/.claude/settings.json",
+        "/.claude/rules/docs.md",
+        "/.claude/rules/app-info.md",
+        "/.claude/rules/db.md",
+        "/.claude/rules/mcp-tools.md",
+        "/.claude/rules/workflow.md",
+        "/.claude/rules/conventions.md",
+        "/.claude/rules/surveillance.md",
+        "/.claude/rules/claude-md-upkeep.md",
+        "/.claude/rules/report-issues.md",
+        // Skills générées : toutes préfixées `0-` (convention plateforme ;
+        // l'agent nomme les siennes autrement) → glob robuste aux ajouts.
+        "/.claude/skills/0-*/",
+    ];
+    let mut b = String::with_capacity(512);
+    b.push_str(GITIGNORE_BEGIN);
+    b.push('\n');
+    for e in entries {
+        b.push_str(e);
+        b.push('\n');
+    }
+    b.push_str(GITIGNORE_END);
+    b.push('\n');
+    b
+}
+
+/// Insère/rafraîchit le bloc managé dans `src/.gitignore`, sans toucher le reste
+/// (l'agent y met ses propres entrées : venv, node_modules, artefacts…).
+/// Idempotent : remplace le bloc entre marqueurs s'il existe, sinon l'ajoute.
+fn ensure_atelier_gitignore(src_dir: &Path, slug: &str) {
+    let path = src_dir.join(".gitignore");
+    let block = atelier_gitignore_block();
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+
+    let merged = if let Some(start) = existing.find(GITIGNORE_BEGIN) {
+        // Bloc déjà présent : remplace de BEGIN jusqu'à la fin de la ligne END.
+        // Si END manque (fichier corrompu), on tronque à partir de BEGIN.
+        let tail = match existing[start..].find(GITIGNORE_END) {
+            Some(end_rel) => {
+                let mut t = start + end_rel + GITIGNORE_END.len();
+                if existing[t..].starts_with('\n') {
+                    t += 1;
+                }
+                existing[t..].to_string()
+            }
+            None => String::new(),
+        };
+        format!("{}{}{}", &existing[..start], block, tail)
+    } else if existing.trim().is_empty() {
+        block
+    } else {
+        // Ajoute le bloc après le contenu agent, séparé d'une ligne vide.
+        let sep = if existing.ends_with('\n') { "\n" } else { "\n\n" };
+        format!("{existing}{sep}{block}")
+    };
+
+    if let Err(e) = log_write(slug, &path, &merged) {
+        warn!(slug = %slug, error = %e, "gitignore write failed");
+    }
+}
+
 /// Write `content` to `path` only if the file does not already exist. Returns
 /// `true` if the file was created. Utilisé pour les fichiers « agent-owned »
 /// (typiquement `CLAUDE.md`) qu'on initialise avec un skeleton mais qu'on ne
@@ -1751,7 +1847,7 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          \n\
          | Verbe | Endpoint | Headers | Effet |\n\
          |---|---|---|---|\n\
-         | `GET` | `/api/dv/{slug}/{{table}}` | `Authorization: Bearer $HR_DV_TOKEN` | list (200, `{{rows, count?}}`) |\n\
+         | `GET` | `/api/dv/{slug}/{{table}}` | `Authorization: Bearer $HR_DV_TOKEN` | list (200, `{{value, @count?}}` — enveloppe OData) |\n\
          | `GET` | `/api/dv/{slug}/{{table}}/{{id}}` | idem | single row (200, `ETag` = version) |\n\
          | `POST` | `/api/dv/{slug}/{{table}}` | idem + body JSON | insert (201, row) |\n\
          | `PATCH` | `/api/dv/{slug}/{{table}}/{{id}}` | `+ If-Match: <version>` | update (200, row) |\n\
@@ -1760,11 +1856,18 @@ fn render_db_md_dataverse(app: &crate::types::Application) -> String {
          \n\
          **`If-Match` obligatoire** pour update/delete/restore — sinon 400 (optimistic lock).\n\
          \n\
+         **Réponse `list`** : enveloppe OData `{{\"value\": [...]}}` (jamais un tableau nu),\n\
+         plus `\"@count\"` (total) si `$count=true`. Parser `.value` ; ne traite JAMAIS la\n\
+         réponse elle-même comme une liste (un dict truthy → faux doublons / erreurs de\n\
+         validation).\n\
+         \n\
          Query params (sur GET) : `$filter`, `$select`, `$orderby`, `$top`, `$skip`,\n\
          `$count`, `$includeDeleted`, `$expand`. Le `$filter` est parsé en\n\
          **dvexpr** (dialect propriétaire) : `==`, `!=`, `<`, `>`, `<=`, `>=`,\n\
          `&&`, `||`, `contains(...)`, `startswith(...)`, `endswith(...)`.\n\
-         Exemple : `?$filter=active == true && contains(email, \"@example.com\")`.\n\
+         Exemple : `?$filter=active == true && contains(email, 'exemple')`. Les chaînes\n\
+         littérales sont en **guillemets simples** (`'...'`) ; les guillemets doubles\n\
+         échouent au lexer (422 `unexpected character`).\n\
          \n\
          ## Côté agent — MCP tools `dv_*`\n\
          \n\
@@ -2079,6 +2182,45 @@ mod tests {
         assert!(write_if_changed(&path, "world").unwrap());
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn atelier_gitignore_merges_idempotently_and_preserves_agent_content() {
+        let tmp = std::env::temp_dir().join("atelier-apps-context-gitignore");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let gi = tmp.join(".gitignore");
+
+        // App with a pre-existing agent-authored .gitignore.
+        fs::write(&gi, "# Python\n.venv/\n__pycache__/\n").unwrap();
+        ensure_atelier_gitignore(&tmp, "print-forge");
+        let after1 = fs::read_to_string(&gi).unwrap();
+        // Agent content preserved…
+        assert!(after1.contains(".venv/"));
+        assert!(after1.contains("# Python"));
+        // …and the managed block added, covering the token-bearing .mcp.json.
+        assert!(after1.contains(GITIGNORE_BEGIN));
+        assert!(after1.contains("/.mcp.json"));
+        assert!(after1.contains("/.claude/rules/db.md"));
+        assert!(after1.contains("/.claude/skills/0-*/"));
+
+        // Idempotent: second run must not duplicate the block.
+        ensure_atelier_gitignore(&tmp, "print-forge");
+        let after2 = fs::read_to_string(&gi).unwrap();
+        assert_eq!(after1, after2, "gitignore merge must be idempotent");
+        assert_eq!(after2.matches(GITIGNORE_BEGIN).count(), 1, "single managed block");
+
+        // No prior .gitignore → block created standalone.
+        let tmp2 = std::env::temp_dir().join("atelier-apps-context-gitignore-fresh");
+        let _ = fs::remove_dir_all(&tmp2);
+        fs::create_dir_all(&tmp2).unwrap();
+        ensure_atelier_gitignore(&tmp2, "fresh");
+        let fresh = fs::read_to_string(tmp2.join(".gitignore")).unwrap();
+        assert!(fresh.starts_with(GITIGNORE_BEGIN));
+        assert!(fresh.contains("/.mcp.json"));
+
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(&tmp2);
     }
 
     #[test]
