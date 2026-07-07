@@ -560,7 +560,7 @@ fn handle_tools_list(id: Value, project_slug: &Option<String>, readonly: bool) -
 fn is_project_simplified_tool(name: &str) -> bool {
     matches!(
         name,
-        "status" | "start" | "stop" | "restart" | "exec" | "logs"
+        "status" | "start" | "stop" | "restart" | "exec" | "logs" | "app_update"
             | "db_tables" | "db_schema" | "db_query" | "db_exec"
             | "db_overview" | "db_count_rows"
             | "db_get_schema" | "db_sync_schema"
@@ -591,7 +591,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
 fn is_dispatched_project_tool(name: &str) -> bool {
     matches!(
         name,
-        "status" | "start" | "stop" | "restart" | "exec" | "logs"
+        "status" | "start" | "stop" | "restart" | "exec" | "logs" | "app_update"
             | "db_tables" | "db_schema" | "db_query" | "db_exec"
             | "db_overview" | "db_count_rows"
             | "db_get_schema" | "db_sync_schema"
@@ -622,6 +622,7 @@ fn tool_definitions_project() -> Value {
         { "name": "restart", "description": "Restart the application process (stop + start).", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "exec", "description": "Execute a shell command in the project directory. Do NOT use this to run the build — invoke the `app-build` skill instead (it calls the dedicated HTTP endpoint).", "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "Shell command to execute" }, "timeout_secs": { "type": "integer", "default": 60 } }, "required": ["command"] } },
         { "name": "logs", "description": "Get recent application logs.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 100 }, "level": { "type": "string", "description": "Filter by level (info, warn, error)" } } } },
+        { "name": "app_update", "description": "Met à jour la config de CETTE app dans le registre : run_command, build_command, health_path, stack (label libre), build_artefact. C'est le registre qui pilote supervision + build — tiens-le à jour dès que ces valeurs changent. Champs plateforme (visibility, has_db) NON gérés ici (page Paramètres) ; variables d'env via env_set. Prise en compte au prochain start/restart (run) ou build.", "inputSchema": { "type": "object", "properties": { "run_command": { "type": "string", "description": "Commande de démarrage (process qui écoute $PORT)" }, "build_command": { "type": "string", "description": "Commande de build en une ligne (exécutée par la skill 0-build)" }, "health_path": { "type": "string", "description": "Chemin de healthcheck, ex. /api/health" }, "stack": { "type": "string", "description": "Label informatif libre (≤64 chars)" }, "build_artefact": { "type": "string", "description": "Artefacts produits par le build (optionnel ; requis seulement si build host distant)" } } } },
         // ── Database ──
         { "name": "db_tables", "description": "List all tables in the application's postgres-dataverse database.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
@@ -797,6 +798,7 @@ async fn handle_tools_call(
         }
         "exec" => tool_app_exec(id, &arguments, state).await,
         "logs" => tool_app_logs(id, &arguments, state).await,
+        "app_update" => tool_app_update_project(id, &arguments, state).await,
         "db_tables" => tool_db_tables(id, &arguments, state).await,
         "db_schema" => tool_db_describe(id, &arguments, state).await,
         "db_query" => tool_db_query(id, &arguments, state).await,
@@ -895,7 +897,7 @@ fn is_journaled_action(name: &str) -> bool {
             | "db_set_display_column" | "db_sync_schema"      // schema-ops
             | "dv_regen_client"                               // client typé régénéré
             | "scan_set"                                      // scan business
-            | "app.update"                                    // config app
+            | "app.update" | "app_update"                     // config app
     )
 }
 
@@ -928,7 +930,7 @@ async fn journal_agent_action(state: &McpState, slug: &str, tool: &str, args: &V
         }
         "scan_set" => "scan business redéfini".to_string(),
         "dv_regen_client" => "dv_regen_client (client Rust dataverse régénéré)".to_string(),
-        "app.update" => "app.update (config)".to_string(),
+        "app.update" | "app_update" => "app.update (config)".to_string(),
         _ => tool.to_string(),
     };
     let title = format!("Agent {slug} : {label}");
@@ -2027,6 +2029,51 @@ async fn tool_app_update(id: Value, args: &Value, state: &McpState) -> Value {
             opt_str("health_path"),
             env_vars,
             has_db,
+            opt_str("build_artefact"),
+        )
+        .await,
+    )
+}
+
+/// `app_update` (project scope) — RESTRICTED to the app's own build/run
+/// contract: `run_command`, `build_command`, `health_path`, `stack`,
+/// `build_artefact`. Platform-level fields are refused here so an agent can't
+/// flip its own `visibility` (make itself public) or `has_db` (toggle DB
+/// provisioning); env vars have their own channel (`env_set`). Resolves
+/// iss-6caa8702 — a project-scoped agent had no way to set run_command/
+/// build_command (the full `app.update` is global-only). WHY a separate handler
+/// rather than exposing `app.update`: the global tool sets every field, which is
+/// too much authority for an app's own agent.
+async fn tool_app_update_project(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = apps_ctx!(id, state);
+    let slug = req_str!(args, "slug", id);
+    if args.get("visibility").is_some() || args.get("has_db").is_some() {
+        return tool_error(
+            id,
+            "app_update (scope projet) ne gère PAS visibility/has_db (réglages plateforme — \
+             page Paramètres). Champs gérés : run_command, build_command, health_path, stack, \
+             build_artefact.",
+        );
+    }
+    if args.get("env_vars").is_some() {
+        return tool_error(
+            id,
+            "Les variables d'environnement se gèrent via env_set/env_delete, pas app_update.",
+        );
+    }
+    let opt_str = |key: &str| args.get(key).and_then(|v| v.as_str()).map(String::from);
+    ipc_resp_to_mcp(
+        id,
+        ctx.update(
+            slug.to_string(),
+            None, // name — pas éditable par l'agent ici
+            opt_str("stack"),
+            None, // visibility — refusé ci-dessus
+            opt_str("run_command"),
+            opt_str("build_command"),
+            opt_str("health_path"),
+            None, // env_vars — refusé ci-dessus (env_set)
+            None, // has_db — refusé ci-dessus
             opt_str("build_artefact"),
         )
         .await,

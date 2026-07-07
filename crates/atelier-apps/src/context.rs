@@ -538,6 +538,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `app.control` — start / stop / restart\n\
          - `app.exec` — run a one-shot command in the app's context\n\
          - `app.logs` — tail recent logs for an app\n\
+         - `app_update` — met à jour la config de CETTE app au registre : `run_command`, `build_command`, `health_path`, `stack`, `build_artefact` (mutation, journalisée). Champs plateforme (`visibility`/`has_db`) non gérés ici ; env via `env_set`.\n\
          - `app.delete` — remove an application (mutation, not auto-approved)\n\
          \n\
          ## Database (`db.*` schema-ops + `dv.*` runtime)\n\
@@ -911,7 +912,7 @@ fn render_conventions_md(app: &Application) -> String {
          - Le build tient en **une commande** = le `build_command` du registre \
          (exécuté par la skill `0-build`). Production only, pas de mode dev.\n\
          - `run_command` / `build_command` / `health_path` / label `stack` **à jour \
-         dans le registre** (tool MCP `app.update`) dès qu'ils changent — c'est le \
+         dans le registre** (tool MCP `app_update`) dès qu'ils changent — c'est le \
          registre qui pilote supervision et build, pas la doc.\n\
          - Structure de projet **idiomatique de l'écosystème choisi** : lisible pour \
          un dev de cette stack, sans chercher l'uniformité entre apps.\n",
@@ -957,13 +958,13 @@ fn render_app_build_skill(app: &Application) -> String {
                 "## Configuration de build de cette app\n\n\
                  - Commande de build (`build_command` du registre) : `{cmd}`.\n\
                  {artefact_line}\
-                 - Pour changer commande/artefacts : tool MCP `app.update` \
+                 - Pour changer commande/artefacts : tool MCP `app_update` \
                  (cette skill est régénérée automatiquement).\n",
             )
         }
         None => "## Configuration de build de cette app\n\n\
                  ⚠️ **Aucun `build_command` configuré** : `build.sh` échouera volontairement. \
-                 Configure d'abord le build via le tool MCP `app.update` \
+                 Configure d'abord le build via le tool MCP `app_update` \
                  (`build_command`, et `run_command`/`health_path` si pas encore posés) — \
                  c'est toi qui possèdes la définition du build de cette app.\n"
             .to_string(),
