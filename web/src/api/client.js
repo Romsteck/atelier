@@ -259,6 +259,16 @@ export const setAgentAuth = (token) =>
   api.post('/agent/sdk/auth', { token }, { timeout: 120000 });
 export const clearAgentAuth = () => api.delete('/agent/sdk/auth');
 
+// Token Claude destiné aux APPS (injecté en CLAUDE_CODE_OAUTH_TOKEN aux apps opt-in
+// `claude_access`). SÉPARÉ du token runner/scan ci-dessus. Même contrat (vue masquée,
+// ?probe=1 = smoke-test live, POST validé avant persist).
+export const getAppsClaudeToken = () => api.get('/agent/apps-token');
+export const probeAppsClaudeToken = () =>
+  api.get('/agent/apps-token', { params: { probe: 1 }, timeout: 120000 });
+export const setAppsClaudeToken = (token) =>
+  api.post('/agent/apps-token', { token }, { timeout: 120000 });
+export const clearAppsClaudeToken = () => api.delete('/agent/apps-token');
+
 // ========== Source (explorateur fichiers + git du working tree — Studio) ==========
 // Lit l'arbre de travail réel `…/{slug}/src` (≠ /git/repos qui sert les bare repos).
 export const getSourceTree = (slug, path = '') =>

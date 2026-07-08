@@ -2030,6 +2030,7 @@ async fn tool_app_update(id: Value, args: &Value, state: &McpState) -> Value {
             env_vars,
             has_db,
             opt_str("build_artefact"),
+            None, // claude_access — réglage plateforme (page Paramètres), pas via l'agent
         )
         .await,
     )
@@ -2075,6 +2076,7 @@ async fn tool_app_update_project(id: Value, args: &Value, state: &McpState) -> V
             None, // env_vars — refusé ci-dessus (env_set)
             None, // has_db — refusé ci-dessus
             opt_str("build_artefact"),
+            None, // claude_access — réglage plateforme (page Paramètres), pas via l'agent
         )
         .await,
     )

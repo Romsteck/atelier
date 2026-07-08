@@ -168,6 +168,12 @@ pub struct Application {
     pub stack: String,
     #[serde(default)]
     pub has_db: bool,
+    /// Opt-in : cette app reçoit le token Claude des apps (var plateforme calculée
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, cf. `AppClaudeAuthStore`). Réglage plateforme
+    /// (page Paramètres) — refusé aux agents via `app.update`/`env_set`. Défaut
+    /// `false` : une app n'obtient l'accès Claude que sur décision explicite.
+    #[serde(default)]
+    pub claude_access: bool,
     #[serde(default)]
     pub visibility: Visibility,
     pub domain: String,
@@ -224,6 +230,7 @@ impl Application {
             description: None,
             stack,
             has_db: false,
+            claude_access: false,
             visibility: Visibility::Private,
             domain,
             port: 0,

@@ -11,6 +11,7 @@ import {
   getHomerouteSettings, setHomerouteSettings, testHomeroute, registerHomeroute,
   getHomerouteAppRoutes, assignHomerouteRoute, removeHomerouteRoute, toggleHomerouteRoute,
   getAgentAuth, probeAgentAuth, setAgentAuth, clearAgentAuth, getSdkVersion, updateSdk,
+  getAppsClaudeToken, probeAppsClaudeToken, setAppsClaudeToken, clearAppsClaudeToken,
 } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useToast } from '../hooks/useToast';
@@ -75,15 +76,58 @@ export default function Settings() {
   const [authProbe, setAuthProbe] = useState(null); // { ok, error } du test « Vérifier »
   const [updatingSdk, setUpdatingSdk] = useState(false);
 
+  // ── Token Claude pour les APPS (séparé du token runner/scan ci-dessus) ──
+  const [appsTok, setAppsTok] = useState(null);      // statut masqué
+  const [appsTokInput, setAppsTokInput] = useState('');
+  const [revealAppsTok, setRevealAppsTok] = useState(false);
+  const [savingAppsTok, setSavingAppsTok] = useState(false);
+  const [probingAppsTok, setProbingAppsTok] = useState(false);
+  const [appsTokProbe, setAppsTokProbe] = useState(null);
+
   const loadAuth = useCallback(async () => {
-    const [a, v] = await Promise.all([
+    const [a, v, t] = await Promise.all([
       getAgentAuth().catch(() => null),
       getSdkVersion().catch(() => null),
+      getAppsClaudeToken().catch(() => null),
     ]);
     if (a?.data) setSdkAuth(a.data);
     if (v?.data) setSdk(v.data);
+    if (t?.data) setAppsTok(t.data);
   }, []);
   useEffect(() => { loadAuth(); }, [loadAuth]);
+
+  const onSaveAppsTok = async () => {
+    const tok = appsTokInput.trim();
+    if (!tok) return;
+    setSavingAppsTok(true); setAppsTokProbe(null);
+    try {
+      const r = await setAppsClaudeToken(tok);
+      setAppsTok(r.data);
+      setAppsTokInput('');
+      flash('ok', 'Token apps validé et enregistré (injecté aux apps opt-in au prochain reconcile).');
+    } catch (e) {
+      flash('error', apiErr(e, 'échec de validation du token apps'));
+    } finally { setSavingAppsTok(false); }
+  };
+  const onVerifyAppsTok = async () => {
+    setProbingAppsTok(true); setAppsTokProbe(null);
+    try {
+      const r = await probeAppsClaudeToken();
+      setAppsTok(r.data);
+      setAppsTokProbe(r.data?.probe || null);
+    } catch (e) {
+      setAppsTokProbe({ ok: false, error: apiErr(e, 'échec') });
+    } finally { setProbingAppsTok(false); }
+  };
+  const onClearAppsTok = async () => {
+    try {
+      const r = await clearAppsClaudeToken();
+      setAppsTok(r.data);
+      flash('ok', 'Token apps retiré (plus de CLAUDE_CODE_OAUTH_TOKEN injecté).');
+    } catch (e) {
+      flash('error', apiErr(e, 'échec du retrait'));
+    }
+  };
 
   const onSaveAuth = async () => {
     const tok = authToken.trim();
@@ -268,6 +312,13 @@ export default function Settings() {
   // Santé par onglet ('ok' | 'warn' | 'error') dérivée de l'état déjà calculé —
   // pilote le badge d'alerte sur chaque onglet.
   const authSt = authState(sdkAuth);
+  const appsTokSt = authState(appsTok);
+  const copyCmd = (cmd) => {
+    navigator.clipboard?.writeText(cmd).then(
+      () => flash('ok', 'Commande copiée.'),
+      () => flash('error', 'Copie impossible.'),
+    );
+  };
   const anyHostIssue = sortedApps.some((a) => a.assigned && (a.drift || a.require_auth === false));
   const tabHealth = {
     auth: authSt === 'error' ? 'error' : authSt === 'unconfigured' ? 'warn' : 'ok',
@@ -430,7 +481,97 @@ export default function Settings() {
           </div>
         )}
       </section>
+      )}
 
+      {/* ── Token Claude pour les APPS (séparé du token runner/scan) ─────── */}
+      {activeTab === 'auth' && (
+      <section className={`${CARD} mt-5`}>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
+          <KeyRound className="h-4 w-4 text-blue-400" /> Token Claude pour les apps
+        </h2>
+        <p className="mb-3 text-xs text-gray-500">
+          Token <strong>séparé</strong> du token du runner/scan ci-dessus : il est injecté aux apps
+          <em> opt-in</em> (case « Accès Claude » de leurs Paramètres) comme variable plateforme
+          <code className="mx-1">CLAUDE_CODE_OAUTH_TOKEN</code>. Une app n&apos;a alors besoin d&apos;aucun
+          <code className="mx-1">CLAUDE_CONFIG_DIR</code> ni fichier partagé. Génère-le sur ton poste puis
+          colle-le ci-dessous (validé par un vrai tour d&apos;inférence avant enregistrement) :
+        </p>
+
+        {/* Commande copiable */}
+        <div className="mb-4 flex items-center gap-2">
+          <code className="flex-1 rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 font-mono text-sm text-gray-200">
+            claude setup-token
+          </code>
+          <Button variant="secondary" onClick={() => copyCmd('claude setup-token')}>
+            Copier
+          </Button>
+        </div>
+
+        {/* Bandeau de statut (unconfigured = normal : l'accès Claude des apps est optionnel) */}
+        <div className="mb-4 text-sm">
+          {appsTokSt === 'error' ? (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-red-700 dark:text-red-300">
+              <XCircle className="h-4 w-4" /> Token présent mais en échec — les apps opt-in échouent l&apos;auth
+              {appsTok?.last_error_msg && <span className="text-gray-500">· {appsTok.last_error_msg}</span>}
+            </span>
+          ) : appsTokSt === 'unconfigured' ? (
+            <span className="inline-flex items-center gap-1.5 text-gray-400">
+              <AlertTriangle className="h-4 w-4" /> Aucun token — les apps opt-in n&apos;ont pas d&apos;accès Claude.
+            </span>
+          ) : (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-4 w-4" /> Configuré
+              {appsTok?.last_ok_at && <span className="text-gray-500">· vérifié {fmtTime(appsTok.last_ok_at)}</span>}
+            </span>
+          )}
+        </div>
+
+        <div>
+          <label className={LBL}>
+            Token <code>claude setup-token</code>
+            <button
+              type="button"
+              onClick={() => setRevealAppsTok((v) => !v)}
+              className="ml-2 text-[10px] text-gray-400 hover:text-gray-200"
+            >
+              {revealAppsTok ? 'masquer' : 'afficher'}
+            </button>
+          </label>
+          <textarea
+            className={`${FIELD} h-20 font-mono ${revealAppsTok ? '' : '[-webkit-text-security:disc]'}`}
+            value={appsTokInput}
+            onChange={(e) => setAppsTokInput(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="sk-ant-oat01-…"
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button onClick={onSaveAppsTok} loading={savingAppsTok} disabled={!appsTokInput.trim()}>
+            <KeyRound className="h-4 w-4" /> Enregistrer
+          </Button>
+          <Button onClick={onVerifyAppsTok} variant="secondary" loading={probingAppsTok} disabled={!appsTok?.configured}>
+            <RotateCw className="h-4 w-4" /> Vérifier
+          </Button>
+          {appsTok?.configured && (
+            <Button onClick={onClearAppsTok} variant="secondary">
+              <Trash2 className="h-4 w-4" /> Retirer
+            </Button>
+          )}
+          {appsTokProbe && (
+            appsTokProbe.ok ? (
+              <span className="inline-flex items-center gap-1.5 text-sm text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="h-4 w-4" /> Auth OK (inférence réussie)
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-sm text-red-700 dark:text-red-300">
+                <XCircle className="h-4 w-4" /> {appsTokProbe.error || 'authentification échouée'}
+              </span>
+            )
+          )}
+        </div>
+      </section>
       )}
 
       {/* ── Onglet Liaison Homeroute (identité + connexion) ─────────────── */}

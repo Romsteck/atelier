@@ -39,6 +39,8 @@ pub const PLATFORM_KEYS: &[&str] = &[
     "HR_APP_UUID",
     "ATELIER_INGEST_URL",
     "ATELIER_LOGS_TOKEN",
+    // Injecté (secret) aux apps opt-in `claude_access` depuis `app_claude_auth`.
+    "CLAUDE_CODE_OAUTH_TOKEN",
 ];
 
 /// Vestiges of eradicated subsystems. Dropped on import (never folded into the
@@ -57,6 +59,47 @@ pub fn is_platform_key(key: &str) -> bool {
 
 fn is_dead_key(key: &str) -> bool {
     DEAD_KEYS.contains(&key)
+}
+
+/// Clés qu'une app n'a JAMAIS à définir : la plateforme gère l'auth Claude des
+/// apps (via `CLAUDE_CODE_OAUTH_TOKEN` injecté quand `claude_access`). Laisser une
+/// app poser `CLAUDE_CONFIG_DIR` lui permettait de pointer le dossier de config du
+/// runner (`/var/lib/hr-studio/.claude`) et, tournant en root, d'en clobberer le
+/// `.credentials.json` → toute la pile agent hr-studio cassée (iss-d10ef97b).
+/// Rejetées à l'écriture + GC'd à l'import/render (comme [`DEAD_KEYS`]).
+const FORBIDDEN_KEYS: &[&str] = &["CLAUDE_CONFIG_DIR"];
+
+fn is_forbidden_key(key: &str) -> bool {
+    FORBIDDEN_KEYS.contains(&key)
+}
+
+/// Répertoires propriété de la plateforme : une var d'app dont la valeur pointe
+/// dessous est refusée (sinon un `HOME=/var/lib/hr-studio` recréerait le vecteur
+/// de clobber sans passer par `CLAUDE_CONFIG_DIR`).
+const PLATFORM_OWNED_PREFIXES: &[&str] =
+    &["/var/lib/hr-studio", "/opt/atelier", "/var/lib/atelier/state"];
+
+/// True si la valeur (ou un de ses segments PATH-style `a:/b`) résout sous un
+/// répertoire plateforme. Garde lexical (pas de canonicalisation FS — le chemin
+/// peut ne pas exister ; un garde de config n'a pas à suivre les symlinks).
+fn value_targets_platform_path(value: &str) -> bool {
+    value
+        .split([':', ' ', '\t'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|tok| {
+            PLATFORM_OWNED_PREFIXES
+                .iter()
+                .any(|p| tok == *p || tok.starts_with(&format!("{p}/")))
+        })
+}
+
+/// Une var USER doit-elle être bannie du modèle et du `.env` rendu ? (clé
+/// interdite OU valeur pointant une zone plateforme). Point de vérité partagé par
+/// l'écriture (`env_set_var`), l'import (`import_hand_seeded`) et le rendu
+/// (`render_env`).
+pub(crate) fn is_forbidden_user_var(key: &str, value: &str) -> bool {
+    is_forbidden_key(key) || value_targets_platform_path(value)
 }
 
 /// Heuristic: does this key name denote a secret? Used when importing
@@ -178,6 +221,24 @@ impl AppsContext {
                 });
             }
         }
+
+        // Auth Claude des apps — uniquement pour les apps opt-in, et seulement si
+        // un token est configuré (Paramètres → Token Claude pour les apps). Le SDK
+        // (JS ou Python) reconnaît `CLAUDE_CODE_OAUTH_TOKEN` en top-level : l'app
+        // n'a besoin d'aucun `CLAUDE_CONFIG_DIR` ni fichier partagé.
+        if app.claude_access {
+            if let Some(tok) = self.app_claude_auth.token().await {
+                out.push(RenderedVar {
+                    key: "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                    value: tok,
+                    secret: true,
+                    scope: EnvScope::Runtime,
+                    platform: true,
+                });
+            } else {
+                warn!(slug = %app.slug, "platform_env: claude_access activé mais aucun token apps configuré — CLAUDE_CODE_OAUTH_TOKEN omis");
+            }
+        }
         out
     }
 
@@ -189,6 +250,11 @@ impl AppsContext {
             rendered.iter().map(|v| v.key.clone()).collect();
         for ev in &app.env {
             if platform_keys.contains(&ev.key) {
+                continue;
+            }
+            // Garde de livraison : une var interdite qui aurait échappé aux gardes
+            // d'écriture/import ne doit JAMAIS atteindre le `.env` rendu.
+            if is_forbidden_user_var(&ev.key, &ev.value) {
                 continue;
             }
             rendered.push(RenderedVar {
@@ -292,6 +358,18 @@ impl AppsContext {
         if is_platform_key(key) {
             anyhow::bail!("'{key}' is platform-managed and cannot be set manually");
         }
+        if is_forbidden_key(key) {
+            anyhow::bail!(
+                "'{key}' est géré par la plateforme (l'app reçoit CLAUDE_CODE_OAUTH_TOKEN \
+                 si claude_access est activé) et ne peut pas être défini par l'app"
+            );
+        }
+        if value_targets_platform_path(value) {
+            anyhow::bail!(
+                "valeur interdite pour '{key}' : pointe sous un répertoire plateforme \
+                 (/var/lib/hr-studio, /opt/atelier, /var/lib/atelier/state)"
+            );
+        }
         if value.contains('\n') || value.contains('\r') {
             anyhow::bail!("env values cannot contain newlines");
         }
@@ -346,10 +424,21 @@ impl AppsContext {
     async fn import_hand_seeded(&self, app: &mut Application) -> Vec<String> {
         let mut imported = Vec::new();
 
+        // GC ACTIF du modèle : une var interdite déjà présente dans `app.env`
+        // (posée avant le garde-fou, ex. le `CLAUDE_CONFIG_DIR` de print-forge)
+        // est retirée du registre, pas seulement filtrée au rendu. Le reconcile
+        // la reportera dans `removed`.
+        app.env
+            .retain(|ev| !is_forbidden_user_var(&ev.key, &ev.value));
+
         let legacy: Vec<(String, String)> =
             app.env_vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (k, v) in legacy {
-            if is_platform_key(&k) || is_dead_key(&k) || app.env_get(&k).is_some() {
+            if is_platform_key(&k)
+                || is_dead_key(&k)
+                || is_forbidden_user_var(&k, &v)
+                || app.env_get(&k).is_some()
+            {
                 continue;
             }
             let secret = looks_secret(&k);
@@ -359,7 +448,11 @@ impl AppsContext {
         app.env_vars.clear();
 
         for (k, v) in read_env_file(&app.env_file()).await {
-            if is_platform_key(&k) || is_dead_key(&k) || app.env_get(&k).is_some() {
+            if is_platform_key(&k)
+                || is_dead_key(&k)
+                || is_forbidden_user_var(&k, &v)
+                || app.env_get(&k).is_some()
+            {
                 continue;
             }
             let secret = looks_secret(&k);

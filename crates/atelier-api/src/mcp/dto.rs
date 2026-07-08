@@ -18,6 +18,9 @@ pub struct ApplicationDto {
     pub stack: String,
     #[serde(default)]
     pub has_db: bool,
+    /// Opt-in : l'app reçoit `CLAUDE_CODE_OAUTH_TOKEN` (réglage Paramètres).
+    #[serde(default)]
+    pub claude_access: bool,
     #[serde(default)]
     pub visibility: String,
     pub domain: String,

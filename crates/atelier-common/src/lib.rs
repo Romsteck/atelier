@@ -1,5 +1,6 @@
 pub mod agent_auth;
 pub mod agent_ui_state;
+pub mod app_claude_auth;
 pub mod control_db;
 pub mod conversation_meta;
 pub mod events;

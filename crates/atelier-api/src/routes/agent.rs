@@ -230,6 +230,9 @@ pub fn app_router() -> Router<ApiState> {
 ///   GET    /api/agent/sdk/auth        (statut masqué ; ?probe=1 = smoke-test live)
 ///   POST   /api/agent/sdk/auth        (set token ; ?probe=1 = valider sans persister)
 ///   DELETE /api/agent/sdk/auth        (retire le token)
+///   GET    /api/agent/apps-token      (token Claude des apps : statut ; ?probe=1)
+///   POST   /api/agent/apps-token      (set token apps — validé avant persist)
+///   DELETE /api/agent/apps-token      (retire le token apps)
 pub fn global_router() -> Router<ApiState> {
     Router::new()
         .route("/sdk/version", get(sdk_version))
@@ -237,6 +240,10 @@ pub fn global_router() -> Router<ApiState> {
         .route(
             "/sdk/auth",
             get(get_sdk_auth).post(set_sdk_auth).delete(delete_sdk_auth),
+        )
+        .route(
+            "/apps-token",
+            get(get_apps_token).post(set_apps_token).delete(delete_apps_token),
         )
 }
 
@@ -1732,7 +1739,7 @@ struct AuthProbeQuery {
 /// `.credentials.json` / le token déjà injecté par run_runner_op côté stocké).
 /// `Ok(())` si l'inférence répond, `Err(msg)` sinon (auth morte / erreur). Le
 /// verrou single-flight sérialise les tests concurrents.
-async fn smoke_auth_check(candidate: Option<&str>) -> Result<(), String> {
+async fn smoke_auth_check(candidate: Option<&str>, isolate: bool) -> Result<(), String> {
     if AUTH_PROBING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -1750,7 +1757,14 @@ async fn smoke_auth_check(candidate: Option<&str>) -> Result<(), String> {
     // cwd du process = le dossier runner installé (toujours présent). auth_check
     // n'a pas besoin d'un workspace d'app (pas de MCP, pas de settingSources).
     let dir = runner_dir().unwrap_or_else(|| FsPath::new("/opt/atelier/runner").to_path_buf());
-    let init = json!({ "op": "auth_check" }).to_string();
+    // `isolate` (token apps) : le runner valide le candidat SEUL, dans un
+    // CLAUDE_CONFIG_DIR temp vide — aucun `.credentials.json` local ne peut masquer
+    // un token invalide (une app n'a pas ce fallback). Cf. runner.js op:auth_check.
+    let init = if isolate {
+        json!({ "op": "auth_check", "authIsolate": true }).to_string()
+    } else {
+        json!({ "op": "auth_check" }).to_string()
+    };
     match run_runner_op(&dir, init, candidate).await {
         Ok(v) => match v.get("t").and_then(|x| x.as_str()) {
             Some("auth_ok") => Ok(()),
@@ -1778,7 +1792,7 @@ async fn get_sdk_auth(
     let mut status = state.agent_auth.status().await;
     if q.probe.as_deref() == Some("1") {
         let token = state.agent_auth.token().await;
-        let probe = match smoke_auth_check(token.as_deref()).await {
+        let probe = match smoke_auth_check(token.as_deref(), false).await {
             Ok(()) => {
                 state.agent_auth.record_ok().await;
                 json!({ "ok": true })
@@ -1836,7 +1850,7 @@ async fn set_sdk_auth(
         );
     }
     // Valide AVANT de persister (le token candidat, pas le stocké).
-    if let Err(e) = smoke_auth_check(Some(&token)).await {
+    if let Err(e) = smoke_auth_check(Some(&token), false).await {
         info!(token_len = token.len(), "SDK auth: token rejeté (validation)"); // jamais la valeur
         return err(StatusCode::BAD_REQUEST, format!("le token n'authentifie pas : {e}"));
     }
@@ -1868,6 +1882,94 @@ async fn delete_sdk_auth(State(state): State<ApiState>) -> impl IntoResponse {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "échec du retrait du token");
     }
     Json(state.agent_auth.status().await).into_response()
+}
+
+// --- Token Claude destiné aux APPS (injecté en CLAUDE_CODE_OAUTH_TOKEN aux apps
+// opt-in `claude_access`) — SÉPARÉ du token runner/scan ci-dessus. Même UX (colle
+// un `claude setup-token`), même validation (op:auth_check), stocké dans
+// `atelier_meta.app_claude_auth`. Endpoints sous `/api/agent/apps-token`.
+
+/// `GET /api/agent/apps-token` — statut masqué. `?probe=1` = smoke-test live avec
+/// le token STOCKÉ + MAJ télémétrie.
+#[instrument(skip(state))]
+async fn get_apps_token(
+    State(state): State<ApiState>,
+    Query(q): Query<AuthProbeQuery>,
+) -> impl IntoResponse {
+    let mut status = state.app_claude_auth.status().await;
+    if q.probe.as_deref() == Some("1") {
+        let token = state.app_claude_auth.token().await;
+        // isolate=true : le token apps est validé SEUL (les apps n'ont pas de fallback).
+        let probe = match smoke_auth_check(token.as_deref(), true).await {
+            Ok(()) => {
+                state.app_claude_auth.record_ok().await;
+                json!({ "ok": true })
+            }
+            Err(e) => {
+                state.app_claude_auth.record_failure(&e).await;
+                json!({ "ok": false, "error": e })
+            }
+        };
+        status = state.app_claude_auth.status().await;
+        if let Value::Object(ref mut m) = status {
+            m.insert("probe".into(), probe);
+        }
+    }
+    Json(status)
+}
+
+/// `POST /api/agent/apps-token` `{token}` — valide le token candidat par un vrai
+/// tour d'inférence PUIS le persiste. La valeur n'est JAMAIS loguée.
+#[instrument(skip(state, body))]
+async fn set_apps_token(
+    State(state): State<ApiState>,
+    Json(body): Json<SdkAuthBody>,
+) -> impl IntoResponse {
+    let token = body.token.trim().to_string();
+    if token.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "token vide");
+    }
+    if !state.app_claude_auth.status().await.get("available").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control-plane Postgres indisponible — impossible de persister le token",
+        );
+    }
+    if let Err(e) = smoke_auth_check(Some(&token), true).await {
+        info!(token_len = token.len(), "apps-token: token rejeté (validation)");
+        return err(StatusCode::BAD_REQUEST, format!("le token n'authentifie pas : {e}"));
+    }
+    if let Err(e) = state.app_claude_auth.set_token(&token).await {
+        error!(error = %e, "apps-token: persistance échouée");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "échec de persistance du token");
+    }
+    info!(token_len = token.len(), "apps-token: token validé et persisté");
+    // Le nouveau token n'atteint les apps opt-in qu'au prochain reconcile de leur
+    // `.env` (create/env-change/boot-sweep) ; on ne force pas de re-render ici.
+    let _ = state
+        .notifications
+        .push(
+            None,
+            "system",
+            "action",
+            "info",
+            "Token Claude des apps configuré",
+            Some("Les apps opt-in (claude_access) recevront CLAUDE_CODE_OAUTH_TOKEN au prochain reconcile de leur .env."),
+        )
+        .await;
+    Json(state.app_claude_auth.status().await).into_response()
+}
+
+/// `DELETE /api/agent/apps-token` — retire le token (les apps opt-in n'auront plus
+/// `CLAUDE_CODE_OAUTH_TOKEN` au prochain reconcile).
+#[instrument(skip(state))]
+async fn delete_apps_token(State(state): State<ApiState>) -> impl IntoResponse {
+    if let Err(e) = state.app_claude_auth.clear_token().await {
+        error!(error = %e, "apps-token: clear échoué");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "échec du retrait du token");
+    }
+    Json(state.app_claude_auth.status().await).into_response()
 }
 
 #[instrument]

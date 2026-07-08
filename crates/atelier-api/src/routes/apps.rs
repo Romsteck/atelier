@@ -59,6 +59,8 @@ fn env_err(e: anyhow::Error) -> axum::response::Response {
     } else if msg.contains("platform-managed")
         || msg.contains("invalid env key")
         || msg.contains("cannot contain")
+        || msg.contains("géré par la plateforme") // clé interdite (CLAUDE_CONFIG_DIR)
+        || msg.contains("valeur interdite") // valeur pointant une zone plateforme
     {
         StatusCode::BAD_REQUEST
     } else {
@@ -335,6 +337,9 @@ struct UpdateAppBody {
     env_vars: Option<BTreeMap<String, String>>,
     has_db: Option<bool>,
     build_artefact: Option<String>,
+    /// Réglage plateforme (page Paramètres) : injecter `CLAUDE_CODE_OAUTH_TOKEN`
+    /// à cette app. Non exposé aux agents (les tools MCP `app.update` passent None).
+    claude_access: Option<bool>,
 }
 
 /// `PATCH /api/apps/{slug}` — update app settings (name/visibility/commands/
@@ -365,6 +370,7 @@ async fn update_app(
             b.env_vars,
             b.has_db,
             b.build_artefact,
+            b.claude_access,
         )
         .await;
     ipc_to_http(resp)

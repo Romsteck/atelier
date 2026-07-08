@@ -147,17 +147,18 @@ function SettingsTab({ app, onUpdate, onDelete }) {
   const [runCmd, setRunCmd] = useState(app?.run_command || '');
   const [buildCmd, setBuildCmd] = useState(app?.build_command || '');
   const [healthPath, setHealthPath] = useState(app?.health_path || '/api/health');
+  const [claudeAccess, setClaudeAccess] = useState(!!app?.claude_access);
   const [saving, setSaving] = useState(false);
   const { toast, showToast } = useToast();
 
   useEffect(() => {
-    if (app) { setName(app.name); setVisibility(app.visibility); setRunCmd(app.run_command); setBuildCmd(app.build_command || ''); setHealthPath(app.health_path); }
+    if (app) { setName(app.name); setVisibility(app.visibility); setRunCmd(app.run_command); setBuildCmd(app.build_command || ''); setHealthPath(app.health_path); setClaudeAccess(!!app.claude_access); }
   }, [app]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await onUpdate({ name, visibility, run_command: runCmd, build_command: buildCmd || null, health_path: healthPath });
+      await onUpdate({ name, visibility, run_command: runCmd, build_command: buildCmd || null, health_path: healthPath, claude_access: claudeAccess });
       showToast('Réglages sauvegardés');
     } catch (e) {
       showToast(apiErr(e), 'error');
@@ -192,6 +193,17 @@ function SettingsTab({ app, onUpdate, onDelete }) {
             </label>
           ))}
         </div>
+      </div>
+      <div>
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" checked={claudeAccess} onChange={e => setClaudeAccess(e.target.checked)} className="mt-0.5 text-blue-500" />
+          <span className="text-sm text-gray-300">
+            Accès Claude
+            <span className="block text-xs text-gray-500">
+              Injecte <code>CLAUDE_CODE_OAUTH_TOKEN</code> à l&apos;app (token défini dans Paramètres → Authentification → « Token Claude pour les apps »). Ne jamais poser <code>CLAUDE_CONFIG_DIR</code> soi-même.
+            </span>
+          </span>
+        </label>
       </div>
       <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
         {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder

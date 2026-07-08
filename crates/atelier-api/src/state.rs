@@ -7,6 +7,7 @@ use atelier_watcher::SurveillanceService;
 use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
 use atelier_common::agent_auth::AgentAuthStore;
+use atelier_common::app_claude_auth::AppClaudeAuthStore;
 use atelier_common::agent_ui_state::OpenTabsStore;
 use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::EventBus;
@@ -60,6 +61,14 @@ pub struct ApiState {
     /// injecter le token par stdin ; endpoints `/api/agent/sdk/auth`. No-op quand
     /// Postgres est down.
     pub agent_auth: AgentAuthStore,
+
+    /// Token Claude destiné aux APPS opt-in (`Application.claude_access`), injecté
+    /// comme var plateforme calculée `CLAUDE_CODE_OAUTH_TOKEN` — SÉPARÉ du token
+    /// runner/scan (`agent_auth`) pour borner le rayon de fuite. Dans
+    /// `atelier_meta.app_claude_auth` ; endpoints `/api/agent/apps-token`. Remplace
+    /// le hack `CLAUDE_CONFIG_DIR` → dossier hr-studio (iss-d10ef97b). No-op quand
+    /// Postgres est down.
+    pub app_claude_auth: AppClaudeAuthStore,
 
     // Dataverse
     pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
@@ -119,6 +128,7 @@ impl ApiState {
         issues: PlatformIssueStore,
         notifications: NotificationStore,
         agent_auth: AgentAuthStore,
+        app_claude_auth: AppClaudeAuthStore,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
         events: Arc<EventBus>,
@@ -144,6 +154,7 @@ impl ApiState {
             issues,
             notifications,
             agent_auth,
+            app_claude_auth,
             dv,
             events,
             app_registry,

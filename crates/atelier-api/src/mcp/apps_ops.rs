@@ -116,6 +116,9 @@ pub struct AppsContext {
     /// Réglages par conversation agent (`atelier_meta.agent_conversation_meta`) —
     /// purgés au delete d'app (les sessions SDK de l'app disparaissent avec elle).
     pub conversation_meta: atelier_common::conversation_meta::ConversationMetaStore,
+    /// Token Claude des apps opt-in — lu FRAIS à chaque render `.env` par
+    /// `platform_env` pour injecter `CLAUDE_CODE_OAUTH_TOKEN` quand `claude_access`.
+    pub app_claude_auth: atelier_common::app_claude_auth::AppClaudeAuthStore,
 }
 
 impl AppsContext {
@@ -140,6 +143,7 @@ impl AppsContext {
             issues: state.issues.clone(),
             notifications: state.notifications.clone(),
             conversation_meta: state.conversation_meta.clone(),
+            app_claude_auth: state.app_claude_auth.clone(),
         }
     }
 
@@ -404,6 +408,7 @@ impl AppsContext {
         env_vars: Option<BTreeMap<String, String>>,
         has_db: Option<bool>,
         build_artefact: Option<String>,
+        claude_access: Option<bool>,
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
@@ -450,7 +455,10 @@ impl AppsContext {
             // scope), MERGED with existing user vars (not a full replace). The
             // `.env` is re-rendered by the reconcile at the end of this fn.
             for (k, v) in ev {
-                if super::env_ops::is_platform_key(&k) || !atelier_apps::valid_env_key(&k) {
+                if super::env_ops::is_platform_key(&k)
+                    || super::env_ops::is_forbidden_user_var(&k, &v)
+                    || !atelier_apps::valid_env_key(&k)
+                {
                     continue;
                 }
                 let secret = super::env_ops::looks_secret(&k);
@@ -470,6 +478,12 @@ impl AppsContext {
                 info!(slug = %slug, "has_db disabled");
             }
             app.has_db = new_has_db;
+        }
+        if let Some(new_ca) = claude_access {
+            if new_ca != app.claude_access {
+                info!(slug = %slug, claude_access = new_ca, "claude_access changed");
+            }
+            app.claude_access = new_ca;
         }
 
         if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
@@ -2099,6 +2113,7 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
         description: app.description.clone(),
         stack: app.stack.clone(),
         has_db: app.has_db,
+        claude_access: app.claude_access,
         visibility: visibility_to_str(&app.visibility).to_string(),
         domain: app.domain.clone(),
         port: app.port,

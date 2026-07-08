@@ -268,6 +268,32 @@ CREATE TABLE IF NOT EXISTS agent_auth (
 INSERT INTO agent_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
+-- app_claude_auth — singleton : token Claude LONGUE DURÉE destiné aux APPS
+-- (produit par `claude setup-token`, ~1 an, inference-only). SÉPARÉ d'agent_auth
+-- (token du runner/scan plateforme) : une app est un tiers moins fiable que
+-- l'agent plateforme → un credential dédié, révocable indépendamment, borne le
+-- rayon de fuite. Injecté aux apps opt-in (Application.claude_access) comme var
+-- plateforme calculée CLAUDE_CODE_OAUTH_TOKEN — remplace le hack où une app
+-- pointait CLAUDE_CONFIG_DIR sur /var/lib/hr-studio/.claude et clobberait
+-- .credentials.json en root:root (iss-d10ef97b). En clair (base root-only, même
+-- exposition que agent_auth / dataverse-secrets / le .env rendu).
+--   token         = setup-token (NULL = non configuré → aucune injection)
+--   last_ok_at    = dernier smoke-test OK
+--   last_error_at = dernier smoke-test en échec
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_claude_auth (
+    id             INTEGER      PRIMARY KEY DEFAULT 1,
+    token          TEXT,
+    updated_at     TIMESTAMPTZ,
+    last_ok_at     TIMESTAMPTZ,
+    last_error_at  TIMESTAMPTZ,
+    last_error_msg TEXT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT app_claude_auth_single CHECK (id = 1)
+);
+INSERT INTO app_claude_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
 -- studio_state — RETIRÉE (2026-06-21). Le singleton « app ouverte » n'a plus de
 -- sens depuis que le Studio est une app Vite séparée, ouverte en un onglet par
 -- app (`/studio/{slug}`) : l'app vient de l'URL, plus d'une sélection globale.

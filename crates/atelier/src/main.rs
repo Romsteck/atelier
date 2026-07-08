@@ -122,6 +122,10 @@ async fn main() -> Result<()> {
     // init_surveillance ET ApiState::new) car le sink de panne d'auth du watcher en
     // dépend. No-op quand Postgres est down.
     let agent_auth = atelier_common::agent_auth::AgentAuthStore::new(meta_pool.clone());
+    // Token Claude destiné aux apps opt-in (injecté en CLAUDE_CODE_OAUTH_TOKEN) —
+    // séparé du token runner/scan ci-dessus. No-op quand Postgres est down.
+    let app_claude_auth =
+        atelier_common::app_claude_auth::AppClaudeAuthStore::new(meta_pool.clone());
     let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
     // Apps supervisor wiring. The registries (apps + ports) live in the shared
@@ -265,6 +269,7 @@ async fn main() -> Result<()> {
         issues,
         notifications,
         agent_auth,
+        app_claude_auth,
         apps_src_root,
         apps_runtime_root,
         events,

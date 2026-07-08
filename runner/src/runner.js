@@ -22,6 +22,11 @@ import {
   tagSession,
 } from '@anthropic-ai/claude-agent-sdk';
 import { createInterface } from 'node:readline';
+import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as pathJoin } from 'node:path';
+
+const APPTOK_PREFIX = 'atelier-apptok-';
 import {
   makeIo,
   assertOAuthOnly,
@@ -284,6 +289,7 @@ const {
   mcpEndpoint,
   mcpToken,
   oauthToken, // token longue durée `claude setup-token` injecté par Atelier (stdin) — jamais argv/env
+  authIsolate, // op:auth_check — valider le token SEUL (sans fallback .credentials.json). Cf. token apps.
 } = init || {};
 
 // Token OAuth abonnement longue durée : posé sur process.env AVANT la garde et
@@ -299,6 +305,28 @@ await assertOAuthOnly('runner', fail);
 // lit le disque local (aucun appel réseau) → il ne détecte PAS un token révoqué.
 // Consommé par POST/GET /api/agent/sdk/auth (validation avant persistance + probe).
 if (op === 'auth_check') {
+  // Validation ISOLÉE (token apps) : pointer CLAUDE_CONFIG_DIR sur un dossier TEMP
+  // vide → aucun `.credentials.json` ne peut masquer un token candidat invalide.
+  // Le token injecté (env) devient l'UNIQUE source d'auth (mode headless du
+  // setup-token). Créé ici EN hr-studio → inscriptible ; nettoyé après le test.
+  // WHY seulement pour les apps : une app ne reçoit QUE CLAUDE_CODE_OAUTH_TOKEN
+  // (pas de fichier de secours), donc la validation doit refléter cette isolation.
+  let isolateDir = null;
+  if (authIsolate) {
+    try {
+      // Auto-cure : purge les dossiers de validation résiduels (le binaire `claude`
+      // enfant peut survivre au rmSync ci-dessous et empêcher la purge en fin de run
+      // → on nettoie au DÉBUT du run suivant). Single-flight (AUTH_PROBING) côté
+      // Atelier → au plus un résiduel à la fois.
+      for (const d of readdirSync(tmpdir())) {
+        if (d.startsWith(APPTOK_PREFIX)) {
+          try { rmSync(pathJoin(tmpdir(), d), { recursive: true, force: true }); } catch { /* autre proc */ }
+        }
+      }
+      isolateDir = mkdtempSync(pathJoin(tmpdir(), APPTOK_PREFIX)); // 0700 hr-studio
+      process.env.CLAUDE_CONFIG_DIR = isolateDir;
+    } catch { /* si mkdtemp échoue, on retombe sur le dossier par défaut (non isolé) */ }
+  }
   let ok = false;
   let authFailed = false;
   let detail = '';
@@ -322,8 +350,10 @@ if (op === 'auth_check') {
     if (ok) out = { t: 'auth_ok' };
     else if (authFailed || SDK_AUTH_RE.test(detail)) out = { t: 'error', code: 'sdk_auth_failed', message: detail.slice(0, 200) };
     else out = { t: 'error', message: `auth_check: ${detail.slice(0, 200) || 'échec inconnu'}` };
+    if (isolateDir) { try { rmSync(isolateDir, { recursive: true, force: true }); } catch { /* /tmp */ } }
     process.stdout.write(JSON.stringify(out) + '\n', () => process.exit(0));
   } catch (e) {
+    if (isolateDir) { try { rmSync(isolateDir, { recursive: true, force: true }); } catch { /* /tmp */ } }
     const msg = String(e?.message || e).slice(0, 200);
     process.stdout.write(
       JSON.stringify(
