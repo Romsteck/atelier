@@ -89,6 +89,7 @@ impl ClaudeRunner {
         &self,
         work_dir: &PathBuf,
         prompt: &str,
+        oauth_token: Option<String>,
         mut cancel: oneshot::Receiver<()>,
         mut on_line: impl FnMut(&str) + Send,
     ) -> ScanExec {
@@ -125,6 +126,7 @@ impl ClaudeRunner {
                     spawn_error: Some(format!("spawn scan runner (sudo node) failed: {e}")),
                     cancelled: false,
                     mcp_error: None,
+                    auth_error: None,
                 };
             }
         };
@@ -142,6 +144,9 @@ impl ClaudeRunner {
             "effort": self.cfg.effort,
             "mcpEndpoint": self.cfg.mcp_endpoint,
             "mcpToken": std::env::var("MCP_TOKEN").ok(),
+            // Token OAuth abonnement longue durée (None = fallback .credentials.json).
+            // Par stdin (comme mcpToken) → jamais journalisé par sudo.
+            "oauthToken": oauth_token,
         });
         if let Some(mut stdin) = child.stdin.take() {
             let line = format!("{init}\n");
@@ -168,6 +173,7 @@ impl ClaudeRunner {
         let mut tokens_out: Option<i32> = None;
         let mut session_id: Option<String> = None;
         let mut mcp_error: Option<String> = None;
+        let mut auth_error: Option<String> = None;
         let mut cancelled = false;
         let mut timed_out = false;
         if let Some(out) = child.stdout.take() {
@@ -204,17 +210,25 @@ impl ClaudeRunner {
                                     // les findings passent par les tools MCP, donc ce run n'a
                                     // rien pu enregistrer même s'il sort en exit 0 — service.rs
                                     // mappe ce signal en run FAILED (jamais success_empty).
-                                    Some("error") if mcp_error.is_none() => {
-                                        if v.get("code")
-                                            .and_then(|x| x.as_str())
-                                            .is_some_and(|c| c.starts_with("mcp_"))
+                                    Some("error") => {
+                                        let code = v.get("code").and_then(|x| x.as_str());
+                                        let msg = || {
+                                            v.get("message")
+                                                .and_then(|x| x.as_str())
+                                                .map(String::from)
+                                        };
+                                        if mcp_error.is_none()
+                                            && code.is_some_and(|c| c.starts_with("mcp_"))
                                         {
-                                            mcp_error = Some(
-                                                v.get("message")
-                                                    .and_then(|x| x.as_str())
-                                                    .unwrap_or("MCP auth failed — findings not recorded")
-                                                    .to_string(),
-                                            );
+                                            mcp_error = Some(msg().unwrap_or_else(|| {
+                                                "MCP auth failed — findings not recorded".into()
+                                            }));
+                                        }
+                                        // Auth SDK morte (token OAuth expiré/révoqué).
+                                        if auth_error.is_none() && code == Some("sdk_auth_failed") {
+                                            auth_error = Some(msg().unwrap_or_else(|| {
+                                                "authentication_failed — token OAuth expiré/révoqué".into()
+                                            }));
                                         }
                                     }
                                     _ => {}
@@ -265,9 +279,10 @@ impl ClaudeRunner {
                 tokens_out: None,
                 spawn_error: None,
                 cancelled: false,
-                // Cause racine plus précise qu'un timeout brut si l'auth MCP était
+                // Cause racine plus précise qu'un timeout brut si l'auth MCP/SDK était
                 // déjà morte avant que le run ne traîne jusqu'au timeout.
                 mcp_error,
+                auth_error,
             };
         }
         if cancelled {
@@ -280,6 +295,7 @@ impl ClaudeRunner {
                 spawn_error: None,
                 cancelled: true,
                 mcp_error: None,
+                auth_error: None,
             };
         }
 
@@ -297,6 +313,7 @@ impl ClaudeRunner {
             spawn_error: None,
             cancelled: false,
             mcp_error,
+            auth_error,
         }
     }
 

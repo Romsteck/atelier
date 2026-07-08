@@ -14,9 +14,20 @@
 // HOME/CLAUDE_CONFIG_DIR ; le token MCP arrive par l'init (stdin), jamais par l'env.
 import { query, deleteSession } from '@anthropic-ai/claude-agent-sdk';
 import { createInterface } from 'node:readline';
-import { makeIo, assertOAuthOnly, buildMcpServers, toolResultText } from './common.js';
+import {
+  makeIo,
+  assertOAuthOnly,
+  buildMcpServers,
+  toolResultText,
+  makeSdkAuthReporter,
+  SDK_AUTH_ERRORS,
+  SDK_AUTH_RE,
+} from './common.js';
 
 const { emit, diag, fail } = makeIo('scan');
+// Signale UNE fois un authentication_failed du SDK (token OAuth mort) → run FAILED
+// côté Rust (claude.rs::exec) + notification plateforme dédupliquée.
+const reportSdkAuth = makeSdkAuthReporter(emit);
 
 // Fin propre : émet `done`, sort dans le callback du write (flush garanti). Le driver Rust
 // voit l'EOF de stdout = fin du scan (sans attendre le timeout → run `success`, pas `failed`).
@@ -35,7 +46,8 @@ function failMcp(message) {
   return new Promise(() => {});
 }
 
-await assertOAuthOnly('scan runner', fail);
+// La garde OAuth est appelée APRÈS le parse de l'init (le token longue durée
+// éventuel arrive par stdin et doit être posé sur process.env AVANT la garde).
 
 // Arrêt sur signal : aucune session à flush (persistSession:false), on sort directement.
 // Le driver Rust SIGKILL le groupe de process sur cancel/timeout ; ce handler couvre le
@@ -58,7 +70,11 @@ try {
   await fail(`Init JSON invalide sur stdin : ${e?.message || e}`);
 }
 
-const { op, prompt, cwd, model, effort, mcpEndpoint, mcpToken } = init || {};
+const { op, prompt, cwd, model, effort, mcpEndpoint, mcpToken, oauthToken } = init || {};
+
+// Token OAuth abonnement longue durée injecté par Atelier (stdin) : posé sur
+// process.env AVANT tout query(). Même canal anti-leak que MCP_TOKEN.
+if (oauthToken) process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
 
 // Mode nettoyage one-shot : supprime la session SDK persistée puis sort. WHY : le scan ne
 // doit PAS polluer la liste de conversations du Studio (listSessions). `persistSession:false`
@@ -72,6 +88,11 @@ if (op === 'delete') {
   // Sortie exclusive via le callback du write ci-dessus — ne JAMAIS retomber dans le flux scan.
   await new Promise(() => {});
 }
+
+// Garde OAuth : après le bloc `op:delete` (deleteSession est disque-only, sans
+// auth) et après l'injection du token. Refuse ANTHROPIC_API_KEY ; accepte le token
+// longue durée OU un .credentials.json présent.
+await assertOAuthOnly('scan runner', fail);
 
 if (!prompt) await fail('Champ "prompt" manquant dans l\'init.');
 
@@ -161,6 +182,8 @@ try {
   for await (const msg of query({ prompt, options })) {
     switch (msg.type) {
       case 'system': {
+        // Retry API en boucle sur une auth morte (token OAuth qui ne se refresh plus).
+        if (msg.subtype === 'api_retry' && SDK_AUTH_ERRORS.has(msg.error)) reportSdkAuth(`api_retry=${msg.error}`);
         if (!sessionEmitted) {
           emit({ t: 'system', subtype: msg.subtype, session_id: msg.session_id, model: msg.model });
           sessionEmitted = true;
@@ -192,7 +215,10 @@ try {
             emit({ t: 'tool_use', id: b.id, name: b.name, input: b.input });
           }
         }
-        if (msg.error) emit({ t: 'error', message: `assistant: ${msg.error}` });
+        if (msg.error) {
+          if (SDK_AUTH_ERRORS.has(msg.error)) reportSdkAuth(`assistant.error=${msg.error}`);
+          else emit({ t: 'error', message: `assistant: ${msg.error}` });
+        }
         break;
       case 'user':
         for (const b of msg.message?.content || []) {
@@ -220,6 +246,10 @@ try {
         }
         break;
       case 'result':
+        // Cause d'auth éventuellement portée par errors[] (texte libre) du result.
+        if (Array.isArray(msg.errors) && msg.errors.some((e) => SDK_AUTH_RE.test(String(e)))) {
+          reportSdkAuth('result.errors[]');
+        }
         // usage porte input_tokens/output_tokens (lus par le driver Rust pour surveillance_runs).
         emit({
           t: 'result',
@@ -236,7 +266,9 @@ try {
     }
   }
 } catch (e) {
-  await fail(`query() a échoué : ${e?.message || e}`, 1);
+  const m = String(e?.message || e);
+  if (SDK_AUTH_RE.test(m)) reportSdkAuth(`exception: ${m.slice(0, 160)}`);
+  await fail(`query() a échoué : ${m}`, 1);
 }
 
 emitDoneAndExit();

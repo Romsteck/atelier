@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Settings2, RefreshCw, Globe, Link2, Plug, CheckCircle2, XCircle,
-  AlertTriangle, ExternalLink, Power, Trash2, RotateCw, Server, KeyRound,
+  AlertTriangle, ExternalLink, Power, Trash2, RotateCw, Server, KeyRound, ShieldCheck,
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
@@ -9,6 +10,7 @@ import useWebSocket from '../hooks/useWebSocket';
 import {
   getHomerouteSettings, setHomerouteSettings, testHomeroute, registerHomeroute,
   getHomerouteAppRoutes, assignHomerouteRoute, removeHomerouteRoute, toggleHomerouteRoute,
+  getAgentAuth, probeAgentAuth, setAgentAuth, clearAgentAuth, getSdkVersion, updateSdk,
 } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useToast } from '../hooks/useToast';
@@ -17,10 +19,31 @@ const FIELD = 'w-full rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2
 const LBL = 'mb-1 block text-xs font-medium text-gray-400';
 const CARD = 'rounded-xl border border-gray-700/70 bg-gray-800/50 p-5';
 
+// Onglets de la page. L'ordre = ordre d'affichage ; `id` = valeur de `?tab=`.
+const TABS = [
+  { id: 'auth', label: 'Authentification', icon: ShieldCheck },
+  { id: 'homeroute', label: 'Liaison Homeroute', icon: Server },
+  { id: 'hostnames', label: 'Hostnames', icon: Globe },
+];
+
 function fmtTime(iso) {
   if (!iso) return null;
   const d = new Date(iso);
   return Number.isFinite(d.getTime()) ? d.toLocaleString() : null;
+}
+
+// État d'auth SDK dérivé du statut masqué, partagé par le bandeau ET le badge
+// d'onglet (une seule source de vérité). `error` = une erreur d'auth est plus
+// récente que le dernier OK (ou aucun OK) → l'auth échoue activement, même sans
+// token managé (le fallback .credentials.json est mort). `unconfigured` = pas de
+// token managé et aucune erreur connue. Sinon `healthy`.
+function authState(a) {
+  if (!a) return 'unconfigured';
+  const okAt = a.last_ok_at ? new Date(a.last_ok_at) : null;
+  const errAt = a.last_error_at ? new Date(a.last_error_at) : null;
+  if (errAt && (!okAt || errAt > okAt)) return 'error';
+  if (!a.configured) return 'unconfigured';
+  return 'healthy';
 }
 
 export default function Settings() {
@@ -41,6 +64,75 @@ export default function Settings() {
   const [subdomains, setSubdomains] = useState({}); // per-slug editable subdomain
   const [requireAuth, setRequireAuth] = useState({}); // per-slug edge forward-auth
   const dirty = useRef(false);                       // user touched the per-row inputs
+
+  // ── Authentification du Claude Agent SDK ─────────────────────────────
+  const [sdkAuth, setSdkAuth] = useState(null);   // statut masqué { configured, last_ok_at, ... }
+  const [sdk, setSdk] = useState(null);           // version SDK { installed, latest, update_available }
+  const [authToken, setAuthToken] = useState(''); // saisie (write-only, jamais re-seedée)
+  const [revealAuth, setRevealAuth] = useState(false);
+  const [savingAuth, setSavingAuth] = useState(false);
+  const [probingAuth, setProbingAuth] = useState(false);
+  const [authProbe, setAuthProbe] = useState(null); // { ok, error } du test « Vérifier »
+  const [updatingSdk, setUpdatingSdk] = useState(false);
+
+  const loadAuth = useCallback(async () => {
+    const [a, v] = await Promise.all([
+      getAgentAuth().catch(() => null),
+      getSdkVersion().catch(() => null),
+    ]);
+    if (a?.data) setSdkAuth(a.data);
+    if (v?.data) setSdk(v.data);
+  }, []);
+  useEffect(() => { loadAuth(); }, [loadAuth]);
+
+  const onSaveAuth = async () => {
+    const tok = authToken.trim();
+    if (!tok) return;
+    setSavingAuth(true); setAuthProbe(null);
+    try {
+      const r = await setAgentAuth(tok);
+      setSdkAuth(r.data);
+      setAuthToken('');
+      flash('ok', "Token validé et enregistré — l'agent et les scans repartent.");
+    } catch (e) {
+      flash('error', apiErr(e, 'échec de validation du token'));
+    } finally { setSavingAuth(false); }
+  };
+
+  // « Vérifier » teste le token DÉJÀ configuré (vrai tour d'inférence) — utile pour
+  // confirmer que l'auth live fonctionne encore. Pour un NOUVEAU token, « Enregistrer »
+  // le valide avant de le persister.
+  const onVerifyAuth = async () => {
+    setProbingAuth(true); setAuthProbe(null);
+    try {
+      const r = await probeAgentAuth();
+      setSdkAuth(r.data);
+      setAuthProbe(r.data?.probe || null);
+    } catch (e) {
+      setAuthProbe({ ok: false, error: apiErr(e, 'échec') });
+    } finally { setProbingAuth(false); }
+  };
+
+  const onClearAuth = async () => {
+    try {
+      const r = await clearAgentAuth();
+      setSdkAuth(r.data);
+      flash('ok', 'Token retiré (retour au fallback .credentials.json).');
+    } catch (e) {
+      flash('error', apiErr(e, 'échec du retrait'));
+    }
+  };
+
+  const onUpdateSdk = async () => {
+    setUpdatingSdk(true);
+    try {
+      const r = await updateSdk();
+      setSdk((s) => ({ ...s, installed: r.data.installed, update_available: false }));
+      flash('ok', `Agent SDK mis à jour (${r.data.installed}).`);
+    } catch (e) {
+      flash('error', apiErr(e, 'MAJ SDK échouée'));
+    } finally { setUpdatingSdk(false); }
+  };
 
   const reload = useCallback(async () => {
     try {
@@ -167,6 +259,27 @@ export default function Settings() {
     return [...routes.apps].sort((x, y) => x.name.localeCompare(y.name));
   }, [routes]);
 
+  // Onglet actif porté par l'URL (?tab=) → deep-linkable + rechargeable. Défaut 'auth'.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const activeTab = TABS.some((t) => t.id === tabParam) ? tabParam : 'auth';
+  const setActiveTab = (id) => setSearchParams({ tab: id }, { replace: true });
+
+  // Santé par onglet ('ok' | 'warn' | 'error') dérivée de l'état déjà calculé —
+  // pilote le badge d'alerte sur chaque onglet.
+  const authSt = authState(sdkAuth);
+  const anyHostIssue = sortedApps.some((a) => a.assigned && (a.drift || a.require_auth === false));
+  const tabHealth = {
+    auth: authSt === 'error' ? 'error' : authSt === 'unconfigured' ? 'warn' : 'ok',
+    homeroute:
+      (configured && !reachable) || (testResult && !testResult.reachable)
+        ? 'error'
+        : !configured
+          ? 'warn'
+          : 'ok',
+    hostnames: configured && !reachable ? 'error' : !configured || anyHostIssue ? 'warn' : 'ok',
+  };
+
   if (loading) {
     return (
       <div className="p-6 text-sm text-gray-400">
@@ -192,6 +305,137 @@ export default function Settings() {
         </div>
       )}
 
+      {/* ── Barre d'onglets (badge d'alerte par onglet en état dégradé) ─── */}
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-gray-700">
+        {TABS.map((t) => {
+          const active = t.id === activeTab;
+          const h = tabHealth[t.id];
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`relative flex h-11 shrink-0 items-center gap-2 px-4 text-sm transition-colors ${
+                active ? 'font-medium text-gray-50' : 'text-gray-400 hover:text-gray-200'}`}
+              title={h === 'error' ? 'Erreur dans cet onglet' : h === 'warn' ? 'Avertissement dans cet onglet' : undefined}
+            >
+              <Icon className="h-4 w-4" />
+              {t.label}
+              {h !== 'ok' && (
+                <AlertTriangle className={`h-3.5 w-3.5 ${h === 'error' ? 'text-red-500' : 'text-amber-500'}`} />
+              )}
+              {active && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-400" />}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Onglet Authentification Claude Agent SDK ────────────────────── */}
+      {activeTab === 'auth' && (
+      <section className={CARD}>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
+          <ShieldCheck className="h-4 w-4 text-blue-400" /> Authentification Claude Agent SDK
+        </h2>
+        <p className="mb-4 text-xs text-gray-500">
+          L&apos;agent et les scans de surveillance tournent en <code>hr-studio</code> avec l&apos;OAuth
+          abonnement. Quand le token expire/est révoqué (<code>authentication_failed</code>), génère un
+          token longue durée sur ton poste — <code>claude setup-token</code> (navigateur → token OAuth
+          ~1&nbsp;an) — puis colle-le ci-dessous. Il est validé par un vrai tour d&apos;inférence puis
+          injecté au runner sans redémarrage.
+        </p>
+
+        {/* Bandeau de statut (même source que le badge d'onglet : authState) */}
+        <div className="mb-4 text-sm">
+          {authSt === 'error' ? (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-red-700 dark:text-red-300">
+              <XCircle className="h-4 w-4" /> Expiré — ré-authentification requise
+              {sdkAuth?.last_error_msg && <span className="text-gray-500">· {sdkAuth.last_error_msg}</span>}
+            </span>
+          ) : authSt === 'unconfigured' ? (
+            <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="h-4 w-4" /> Non configuré — le runner utilise le
+              <code className="mx-1">.credentials.json</code> local (fallback). Colle un token ci-dessous.
+            </span>
+          ) : (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-4 w-4" /> Authentifié (token longue durée)
+              {sdkAuth?.last_ok_at && <span className="text-gray-500">· vérifié {fmtTime(sdkAuth.last_ok_at)}</span>}
+            </span>
+          )}
+        </div>
+
+        <div>
+          <label className={LBL}>
+            Token <code>claude setup-token</code>
+            <button
+              type="button"
+              onClick={() => setRevealAuth((v) => !v)}
+              className="ml-2 text-[10px] text-gray-400 hover:text-gray-200"
+            >
+              {revealAuth ? 'masquer' : 'afficher'}
+            </button>
+          </label>
+          <textarea
+            className={`${FIELD} h-20 font-mono ${revealAuth ? '' : '[-webkit-text-security:disc]'}`}
+            value={authToken}
+            onChange={(e) => setAuthToken(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="sk-ant-oat01-…"
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button onClick={onSaveAuth} loading={savingAuth} disabled={!authToken.trim()}>
+            <KeyRound className="h-4 w-4" /> Enregistrer
+          </Button>
+          <Button onClick={onVerifyAuth} variant="secondary" loading={probingAuth} disabled={!sdkAuth?.configured}>
+            <RotateCw className="h-4 w-4" /> Vérifier l&apos;auth actuelle
+          </Button>
+          {sdkAuth?.configured && (
+            <Button onClick={onClearAuth} variant="secondary">
+              <Trash2 className="h-4 w-4" /> Retirer
+            </Button>
+          )}
+          {authProbe && (
+            authProbe.ok ? (
+              <span className="inline-flex items-center gap-1.5 text-sm text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="h-4 w-4" /> Auth OK (inférence réussie)
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-sm text-red-700 dark:text-red-300">
+                <XCircle className="h-4 w-4" /> {authProbe.error || 'authentification échouée'}
+              </span>
+            )
+          )}
+        </div>
+
+        {sdk && (
+          <div className="mt-3 text-xs text-gray-500">
+            Agent SDK <code>{sdk.installed || '?'}</code>
+            {sdk.update_available ? (
+              <>
+                {' → '}<code>{sdk.latest}</code> disponible.
+                <button
+                  onClick={onUpdateSdk}
+                  disabled={updatingSdk}
+                  className="ml-2 text-amber-500 hover:text-amber-400 disabled:opacity-50"
+                >
+                  {updatingSdk ? 'MAJ…' : 'Mettre à jour'}
+                </button>
+              </>
+            ) : (
+              <span> · à jour</span>
+            )}
+          </div>
+        )}
+      </section>
+
+      )}
+
+      {/* ── Onglet Liaison Homeroute (identité + connexion) ─────────────── */}
+      {activeTab === 'homeroute' && (
+      <>
       {/* ── Identité & liaison ─────────────────────────────────────────── */}
       <section className={CARD}>
         <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
@@ -297,7 +541,11 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* ── Hostnames des apps ────────────────────────────────────────── */}
+      </>
+      )}
+
+      {/* ── Onglet Hostnames des applications ───────────────────────────── */}
+      {activeTab === 'hostnames' && (
       <section className={CARD}>
         <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
           <Globe className="h-4 w-4 text-blue-400" /> Hostnames des applications
@@ -447,6 +695,7 @@ export default function Settings() {
           </table>
         </div>
       </section>
+      )}
     </div>
   );
 }

@@ -214,6 +214,21 @@ struct RunningScan {
     cancel: Option<oneshot::Sender<()>>,
 }
 
+/// Provider ASYNC du token d'auth SDK à injecter dans le stdin de CHAQUE run de
+/// scan. Relu à chaque run (pas mis en cache) → une ré-auth depuis Paramètres
+/// s'applique sans redémarrer le service. Construit par `main.rs` (qui a accès au
+/// store `agent_auth`) pour éviter une dépendance du watcher vers `atelier-common`.
+pub type TokenProvider = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Sink appelé quand un scan détecte `authentication_failed` : la closure (dans
+/// `main.rs`) déduplique (claim `agent_auth`) et pousse UNE notification plateforme.
+/// Le watcher ne connaît ni le store ni le NotificationStore — juste ce callback.
+pub type AuthFailureSink = Arc<dyn Fn(String) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SurveillanceService {
     inner: Arc<Inner>,
@@ -251,6 +266,11 @@ struct Inner {
     /// `execute` quand le run se termine.
     running: Mutex<HashMap<(String, String), RunningScan>>,
     enabled: bool,
+    /// Token d'auth SDK frais par run (injecté dans le stdin de scan.js). `None` =
+    /// pas de token configuré → scan.js retombe sur le `.credentials.json` local.
+    token_provider: Option<TokenProvider>,
+    /// Remontée d'un `authentication_failed` détecté par un scan (dédup + notif).
+    on_auth_failure: Option<AuthFailureSink>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,7 +289,15 @@ pub struct SurveillanceConfig {
 }
 
 impl SurveillanceService {
-    pub async fn start(cfg: SurveillanceConfig) -> Self {
+    /// `token_provider` / `on_auth_failure` : câblage d'auth SDK (cf. types). Passés
+    /// en params plutôt que dans `SurveillanceConfig` (qui dérive Debug/Clone/Default
+    /// — incompatible avec des `Arc<dyn Fn…>`). `None`/`None` = auth SDK non gérée
+    /// par Atelier (le scan retombe sur le `.credentials.json` local, pas de notif).
+    pub async fn start(
+        cfg: SurveillanceConfig,
+        token_provider: Option<TokenProvider>,
+        on_auth_failure: Option<AuthFailureSink>,
+    ) -> Self {
         let pool = match bootstrap(&cfg).await {
             Ok(p) => Some(p),
             Err(err) => {
@@ -318,6 +346,8 @@ impl SurveillanceService {
                 transcripts: Mutex::new(HashMap::new()),
                 running: Mutex::new(HashMap::new()),
                 enabled,
+                token_provider,
+                on_auth_failure,
             }),
         };
 
@@ -1010,6 +1040,12 @@ impl SurveillanceService {
 
         // Acquire concurrency permit + run the scan.
         let _permit = self.inner.sem.acquire().await.ok();
+        // Token d'auth SDK FRAIS (relu par run → ré-auth sans restart). None → scan.js
+        // retombe sur le .credentials.json local.
+        let oauth_token = match self.inner.token_provider.as_ref() {
+            Some(tp) => tp().await,
+            None => None,
+        };
         let measure_from = Utc::now();
         // Stream each stdout line to the live console (ephemeral; not persisted)
         // and append to the per-run buffer for mid-run tab re-opens.
@@ -1020,7 +1056,7 @@ impl SurveillanceService {
         let exec = self
             .inner
             .runner
-            .exec(&src, &prompt, cancel_rx, |line| {
+            .exec(&src, &prompt, oauth_token, cancel_rx, |line| {
                 seq += 1;
                 let tl = TranscriptLine {
                     run_id,
@@ -1064,6 +1100,19 @@ impl SurveillanceService {
             finish_with_retry("finish_failed", || runs.finish_failed(run_id, mcp_err)).await;
             self.note_failure(&slug, kind, memory).await;
             error!(slug = %slug, kind, error = %mcp_err, "scan MCP failure — findings not recorded");
+            return RunOutcome::Failed;
+        }
+        // Échec d'AUTH SDK (`authentication_failed` : token OAuth abonnement mort/
+        // révoqué) signalé par scan.js. On remonte au sink (dédup + notification
+        // plateforme) et on marque FAILED. Un token mort touche tous les scans du
+        // sweep → le sink déduplique en une seule notif via le claim `agent_auth`.
+        if let Some(auth_err) = exec.auth_error.as_deref() {
+            if let Some(sink) = self.inner.on_auth_failure.as_ref() {
+                sink(auth_err.to_string());
+            }
+            finish_with_retry("finish_failed", || runs.finish_failed(run_id, auth_err)).await;
+            self.note_failure(&slug, kind, memory).await;
+            error!(slug = %slug, kind, error = %auth_err, "scan SDK auth failure — token OAuth expiré/révoqué");
             return RunOutcome::Failed;
         }
         if !exec.exit_ok {

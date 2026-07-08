@@ -22,11 +22,23 @@ import {
   tagSession,
 } from '@anthropic-ai/claude-agent-sdk';
 import { createInterface } from 'node:readline';
-import { makeIo, assertOAuthOnly, buildMcpServers, toolResultText } from './common.js';
+import {
+  makeIo,
+  assertOAuthOnly,
+  buildMcpServers,
+  toolResultText,
+  makeSdkAuthReporter,
+  SDK_AUTH_ERRORS,
+  SDK_AUTH_RE,
+} from './common.js';
 
 const { emit, diag, fail } = makeIo('runner');
+// Signale UNE fois un authentication_failed du SDK (token OAuth mort) au driver Rust.
+const reportSdkAuth = makeSdkAuthReporter(emit);
 
-await assertOAuthOnly('runner', fail);
+// La garde OAuth (`assertOAuthOnly`) est déplacée APRÈS le parse de l'init stdin :
+// le token longue durée éventuel (CLAUDE_CODE_OAUTH_TOKEN) arrive dans l'init et
+// doit être posé sur process.env AVANT que la garde ne s'exécute.
 
 // Toolchain sur PATH (WHY) : le runner est spawné via `sudo -H -u hr-studio` qui
 // réinitialise l'env vers son secure_path — `~/.cargo/bin` (cargo) et `~/.local/bin`
@@ -271,7 +283,59 @@ const {
   model,
   mcpEndpoint,
   mcpToken,
+  oauthToken, // token longue durée `claude setup-token` injecté par Atelier (stdin) — jamais argv/env
 } = init || {};
+
+// Token OAuth abonnement longue durée : posé sur process.env AVANT la garde et
+// tout query() (le binaire `claude` enfant le lit dans son env). Reçu par stdin
+// (jamais argv/env parent) pour que sudo ne le journalise pas — même canal que MCP_TOKEN.
+if (oauthToken) process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+
+// Garde OAuth (déplacée ici depuis le haut du fichier — cf. commentaire à l'import).
+await assertOAuthOnly('runner', fail);
+
+// Sonde d'auth one-shot : lance une inférence minimale (1 tour) et rapporte si
+// l'auth abonnement fonctionne. WHY un vrai query() et pas `op:list` : listSessions
+// lit le disque local (aucun appel réseau) → il ne détecte PAS un token révoqué.
+// Consommé par POST/GET /api/agent/sdk/auth (validation avant persistance + probe).
+if (op === 'auth_check') {
+  let ok = false;
+  let authFailed = false;
+  let detail = '';
+  try {
+    for await (const m of query({ prompt: 'ping', options: { maxTurns: 1, ...(cwd ? { cwd } : {}) } })) {
+      if (m.type === 'assistant' && SDK_AUTH_ERRORS.has(m.error)) { authFailed = true; detail = m.error; break; }
+      if (m.type === 'system' && m.subtype === 'api_retry' && SDK_AUTH_ERRORS.has(m.error)) { authFailed = true; detail = m.error; break; }
+      if (m.type === 'result') {
+        ok = !m.is_error;
+        if (m.is_error) {
+          detail = typeof m.result === 'string'
+            ? m.result
+            : Array.isArray(m.errors) ? m.errors.join('; ') : 'error';
+        }
+        break;
+      }
+    }
+    // On ne classe `sdk_auth_failed` QUE si on a vu un signal d'auth (enum ou texte) —
+    // un `is_error` non-auth (ex. max_turns) NE doit PAS déclencher une fausse panne d'auth.
+    let out;
+    if (ok) out = { t: 'auth_ok' };
+    else if (authFailed || SDK_AUTH_RE.test(detail)) out = { t: 'error', code: 'sdk_auth_failed', message: detail.slice(0, 200) };
+    else out = { t: 'error', message: `auth_check: ${detail.slice(0, 200) || 'échec inconnu'}` };
+    process.stdout.write(JSON.stringify(out) + '\n', () => process.exit(0));
+  } catch (e) {
+    const msg = String(e?.message || e).slice(0, 200);
+    process.stdout.write(
+      JSON.stringify(
+        SDK_AUTH_RE.test(msg)
+          ? { t: 'error', code: 'sdk_auth_failed', message: msg }
+          : { t: 'error', message: `auth_check: ${msg}` },
+      ) + '\n',
+      () => process.exit(0),
+    );
+  }
+  await new Promise(() => {}); // sortie exclusive via le callback de write ci-dessus
+}
 
 // Mode introspection : opère sur les sessions SDK persistées (CLAUDE_CONFIG_DIR)
 // puis sort, SANS démarrer de session chat streaming. C'est le pont d'Atelier vers
@@ -670,6 +734,10 @@ pushTurn(userMsg(prompt, init.images));
 let sessionEmitted = false; // `system` (session_id/model) n'est émis qu'une fois
 // Émission de la FIN DE TOUR (result + turn_done) — aussi utilisée par le leak-guard.
 function emitTurnResult(msg) {
+  // Un result d'erreur peut porter la cause d'auth dans `errors[]` (texte libre).
+  if (Array.isArray(msg.errors) && msg.errors.some((e) => SDK_AUTH_RE.test(String(e)))) {
+    reportSdkAuth('result.errors[]');
+  }
   emit({
     t: 'result',
     subtype: msg.subtype,
@@ -696,6 +764,8 @@ try {
     if (leakGuard) { clearTimeout(leakGuard); leakGuard = null; heldResult = null; }
     switch (msg.type) {
       case 'system':
+        // Retry API en boucle sur une auth morte (le token OAuth ne se refresh plus).
+        if (msg.subtype === 'api_retry' && SDK_AUTH_ERRORS.has(msg.error)) reportSdkAuth(`api_retry=${msg.error}`);
         // msg.model = modèle réellement résolu (vérité terrain affichée par l'UI).
         // Émis une seule fois : la session garde le même session_id sur tous les tours.
         if (!sessionEmitted) {
@@ -739,7 +809,10 @@ try {
           if (isPlanFileWrite(block.name, block.input)) { maskedToolUseIds.add(block.id); continue; }
           emit({ t: 'tool_use', id: block.id, name: block.name, input: trimToolInput(block.name, block.input) });
         }
-        if (msg.error) emit({ t: 'error', message: `assistant: ${msg.error}` });
+        if (msg.error) {
+          if (SDK_AUTH_ERRORS.has(msg.error)) reportSdkAuth(`assistant.error=${msg.error}`);
+          else emit({ t: 'error', message: `assistant: ${msg.error}` });
+        }
         break;
       }
       case 'user': {
@@ -801,7 +874,10 @@ try {
     }
   }
 } catch (e) {
-  await fail(`query() a échoué : ${e?.message || e}`, 1);
+  const m = String(e?.message || e);
+  // Filet : une exception jetée par l'itérateur query() peut porter la cause d'auth.
+  if (SDK_AUTH_RE.test(m)) reportSdkAuth(`exception: ${m.slice(0, 160)}`);
+  await fail(`query() a échoué : ${m}`, 1);
 }
 
 // Sortie de boucle = générateur d'entrée terminé (EOF/{type:'end'}) = fin de session.

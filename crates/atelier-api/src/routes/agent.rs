@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -69,6 +69,10 @@ static SID_RUN: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mute
 /// Verrou single-flight de la MAJ SDK : `npm install` n'est pas transactionnel, deux MAJ
 /// concurrentes corrompraient le snapshot/rollback. Posé/levé par [`sdk_update`] (garde RAII).
 static SDK_UPDATING: AtomicBool = AtomicBool::new(false);
+
+/// Verrou single-flight du smoke-test d'auth SDK (`op:auth_check` = un vrai tour
+/// d'inférence). Évite d'empiler des `query()` concurrents (validation + probe).
+static AUTH_PROBING: AtomicBool = AtomicBool::new(false);
 
 /// Écrit une ligne NDJSON sur le stdin du runner d'un run. `false` si inconnu/terminé
 /// OU en cours d'arrêt (`cancel_tx` pris = drain demandé : la boucle ne lira plus
@@ -221,12 +225,19 @@ pub fn app_router() -> Router<ApiState> {
 }
 
 /// Routes globales, montées sous `/api/agent` :
-///   GET  /api/agent/sdk/version
-///   POST /api/agent/sdk/update
+///   GET    /api/agent/sdk/version
+///   POST   /api/agent/sdk/update
+///   GET    /api/agent/sdk/auth        (statut masqué ; ?probe=1 = smoke-test live)
+///   POST   /api/agent/sdk/auth        (set token ; ?probe=1 = valider sans persister)
+///   DELETE /api/agent/sdk/auth        (retire le token)
 pub fn global_router() -> Router<ApiState> {
     Router::new()
         .route("/sdk/version", get(sdk_version))
         .route("/sdk/update", post(sdk_update))
+        .route(
+            "/sdk/auth",
+            get(get_sdk_auth).post(set_sdk_auth).delete(delete_sdk_auth),
+        )
 }
 
 // --- État d'UI des onglets ouverts (sync cross-PC) ---
@@ -409,7 +420,24 @@ fn runner_command(cwd: &FsPath) -> Command {
 /// Lance le runner en mode introspection one-shot (op:list/messages/rename/delete) :
 /// écrit l'init sur stdin, ferme stdin (EOF), lit le PREMIER objet NDJSON émis, reape
 /// le process. Pas d'EventBus — la réponse part directe en HTTP. Timeout court.
-async fn run_runner_op(cwd: &FsPath, init_json: String) -> Result<Value, String> {
+async fn run_runner_op(
+    cwd: &FsPath,
+    init_json: String,
+    oauth_token: Option<&str>,
+) -> Result<Value, String> {
+    // Le token OAuth abonnement (setup-token) est fusionné dans l'init ICI, pour
+    // TOUS les ops : `assertOAuthOnly` (runner.js) exige désormais soit ce token
+    // soit un `.credentials.json`. Passe par stdin (comme mcpToken) — jamais argv/env.
+    let init_json = match oauth_token.filter(|t| !t.is_empty()) {
+        Some(tok) => match serde_json::from_str::<Value>(&init_json) {
+            Ok(mut v) => {
+                v["oauthToken"] = json!(tok);
+                v.to_string()
+            }
+            Err(_) => init_json,
+        },
+        None => init_json,
+    };
     let mut cmd = runner_command(cwd);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -537,9 +565,10 @@ async fn query(
         // fini, le snapshot repasse par op:messages sur disque (= transcript complet, resume
         // ne forkant pas la session).
         let m = json!({ "op": "messages", "sessionId": sid, "cwd": cwd.to_string_lossy() }).to_string();
-        let preload = match run_runner_op(&cwd, m.clone()).await {
+        let oauth = state.agent_auth.token().await;
+        let preload = match run_runner_op(&cwd, m.clone(), oauth.as_deref()).await {
             Ok(v) => Ok(v),
-            Err(_) => run_runner_op(&cwd, m).await,
+            Err(_) => run_runner_op(&cwd, m, oauth.as_deref()).await,
         };
         match preload {
             Ok(v) => {
@@ -556,9 +585,11 @@ async fn query(
     let permission_mode = body.permission_mode.clone().unwrap_or_else(|| "plan".into());
     let ui_mode = if permission_mode == "bypassPermissions" { "bypass" } else { "plan" };
 
-    // L'init est consommé par runner.js (clés camelCase). Le token MCP passe ICI,
-    // par stdin (pipe) — que ni Atelier ni sudo ne journalisent. (Le passer en
-    // env via sudo --preserve-env le ferait apparaître en clair dans journald.)
+    // L'init est consommé par runner.js (clés camelCase). Le token MCP ET le token
+    // OAuth abonnement (setup-token) passent ICI, par stdin (pipe) — que ni Atelier
+    // ni sudo ne journalisent. (Les passer en env via sudo --preserve-env les ferait
+    // apparaître en clair dans journald.) `oauthToken` relu FRAIS ici → une ré-auth
+    // depuis Paramètres s'applique au prochain run sans redémarrer le service.
     let init = json!({
         "prompt": body.prompt,
         "effort": body.effort, // None → null → runner omet (Haiku ne supporte pas effort)
@@ -567,6 +598,7 @@ async fn query(
         "cwd": cwd.to_string_lossy(),
         "mcpEndpoint": format!("{}?project={}", mcp_endpoint_base(), slug),
         "mcpToken": std::env::var("MCP_TOKEN").ok(),
+        "oauthToken": state.agent_auth.token().await, // None → null → runner ignore (fallback creds)
         "resume": body.resume,
         "model": body.model,
         "images": body.images, // None → null → runner omet (texte seul)
@@ -595,10 +627,24 @@ async fn query(
     info!(run_id = %run_id, "agent run started");
     let events = state.events.clone();
     let meta = state.conversation_meta.clone();
+    let notifications = state.notifications.clone();
+    let agent_auth = state.agent_auth.clone();
     let run_id_task = run_id.clone();
     let slug_task = slug.clone();
     tokio::spawn(async move {
-        run_agent(events, slug_task, run_id_task, cwd, init.to_string(), cancel_rx, input_rx, meta).await;
+        run_agent(
+            events,
+            slug_task,
+            run_id_task,
+            cwd,
+            init.to_string(),
+            cancel_rx,
+            input_rx,
+            meta,
+            notifications,
+            agent_auth,
+        )
+        .await;
         // run_agent nettoie RUNS / SID_RUN en fin de run (graceful → session persistée).
     });
 
@@ -913,7 +959,8 @@ async fn list_conversations(
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
     let init = json!({ "op": "list", "cwd": cwd.to_string_lossy() }).to_string();
-    match run_runner_op(&cwd, init).await {
+    let oauth = state.agent_auth.token().await;
+    match run_runner_op(&cwd, init, oauth.as_deref()).await {
         Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("sessions") => {
             let live = live_sessions_for(&slug);
             let mut on_disk: Vec<String> = Vec::new();
@@ -996,7 +1043,8 @@ async fn get_conversation(
     }
     // Sinon → transcript persisté sur disque.
     let init = json!({ "op": "messages", "sessionId": sid, "cwd": cwd.to_string_lossy() }).to_string();
-    match run_runner_op(&cwd, init).await {
+    let oauth = state.agent_auth.token().await;
+    match run_runner_op(&cwd, init, oauth.as_deref()).await {
         Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("transcript") => {
             // Réglages de la dernière exécution depuis le store. `settings: null` =
             // conversation legacy sans meta → le frontend garde ses défauts locaux.
@@ -1063,7 +1111,8 @@ async fn rename_conversation(
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
     let init = json!({ "op": "rename", "sessionId": sid, "title": body.title, "cwd": cwd.to_string_lossy() }).to_string();
-    match run_runner_op(&cwd, init).await {
+    let oauth = state.agent_auth.token().await;
+    match run_runner_op(&cwd, init, oauth.as_deref()).await {
         Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("ok") => {
             (StatusCode::OK, Json(json!({"ok": true}))).into_response()
         }
@@ -1091,7 +1140,8 @@ async fn delete_conversation(
         }
     }
     let init = json!({ "op": "delete", "sessionId": sid, "cwd": cwd.to_string_lossy() }).to_string();
-    match run_runner_op(&cwd, init).await {
+    let oauth = state.agent_auth.token().await;
+    match run_runner_op(&cwd, init, oauth.as_deref()).await {
         Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("ok") => {
             state.conversation_meta.delete(&slug, &sid).await;
             (StatusCode::OK, Json(json!({"deleted": true}))).into_response()
@@ -1141,6 +1191,8 @@ async fn run_agent(
     mut cancel: oneshot::Receiver<()>,
     mut input_rx: mpsc::UnboundedReceiver<String>,
     meta: ConversationMetaStore,
+    notifications: atelier_common::notification_store::NotificationStore,
+    agent_auth: atelier_common::agent_auth::AgentAuthStore,
 ) {
     let mut seq: u64 = 0;
     // Clé stable de la conversation : inconnue jusqu'à la 1re ligne `system` du runner.
@@ -1299,6 +1351,46 @@ async fn run_agent(
                             Err(_) => { continue; } // ligne non-JSON ignorée (robustesse)
                         };
                         let t = obj.get("t").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        // authentication_failed du SDK (token OAuth abonnement mort/révoqué),
+                        // émis typé par le runner (`code:'sdk_auth_failed'`). On remonte UNE
+                        // notification plateforme (dédup atomique côté DB) EN PLUS de laisser
+                        // l'event `error` s'afficher dans le chat. spawn : un Postgres lent ne
+                        // doit pas geler le relay des events.
+                        if t == "error"
+                            && obj.get("code").and_then(|x| x.as_str()) == Some("sdk_auth_failed")
+                        {
+                            let msg = obj
+                                .get("message")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("authentication_failed")
+                                .to_string();
+                            let (auth, notif) = (agent_auth.clone(), notifications.clone());
+                            tokio::spawn(async move {
+                                if auth
+                                    .record_failure(
+                                        &msg,
+                                        atelier_common::agent_auth::notify_interval_secs(),
+                                    )
+                                    .await
+                                {
+                                    let _ = notif
+                                        .push(
+                                            None,
+                                            "system",
+                                            "notice",
+                                            "error",
+                                            "Authentification Claude expirée",
+                                            Some(&format!(
+                                                "L'agent ne peut plus appeler le modèle (token OAuth \
+                                                 abonnement expiré/révoqué). Renouvelle-le \
+                                                 (`claude setup-token`) puis Paramètres → \
+                                                 Authentification Claude. Détail : {msg}"
+                                            )),
+                                        )
+                                        .await;
+                                }
+                            });
+                        }
                         // Fin de tour → bascule sur l'idle court (la session est entre tours).
                         if t == "turn_done" {
                             turn_active_local = false;
@@ -1617,6 +1709,167 @@ async fn pin_sdk_source(target: &str) -> Result<(), String> {
     }
 }
 
+// ===================== Authentification du Claude Agent SDK =====================
+// Le runner tourne headless en hr-studio → on ne peut pas y relancer `claude login`
+// (flow navigateur). Romain génère un token longue durée sur son poste
+// (`claude setup-token`, ~1 an, inference-only) et le colle ici ; il est validé par
+// un VRAI tour d'inférence (op:auth_check) puis stocké, et injecté au runner/scan par
+// stdin (jamais argv/env). Une ré-auth s'applique au prochain run, sans restart.
+
+#[derive(Debug, Deserialize)]
+struct SdkAuthBody {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthProbeQuery {
+    #[serde(default)]
+    probe: Option<String>,
+}
+
+/// Smoke-test d'auth : lance `op:auth_check` (un tour d'inférence minimal) sous
+/// l'exec réel hr-studio. `candidate` = token à valider (None → utilise le
+/// `.credentials.json` / le token déjà injecté par run_runner_op côté stocké).
+/// `Ok(())` si l'inférence répond, `Err(msg)` sinon (auth morte / erreur). Le
+/// verrou single-flight sérialise les tests concurrents.
+async fn smoke_auth_check(candidate: Option<&str>) -> Result<(), String> {
+    if AUTH_PROBING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("un test d'authentification est déjà en cours".into());
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            AUTH_PROBING.store(false, Ordering::Release);
+        }
+    }
+    let _guard = Guard;
+
+    // cwd du process = le dossier runner installé (toujours présent). auth_check
+    // n'a pas besoin d'un workspace d'app (pas de MCP, pas de settingSources).
+    let dir = runner_dir().unwrap_or_else(|| FsPath::new("/opt/atelier/runner").to_path_buf());
+    let init = json!({ "op": "auth_check" }).to_string();
+    match run_runner_op(&dir, init, candidate).await {
+        Ok(v) => match v.get("t").and_then(|x| x.as_str()) {
+            Some("auth_ok") => Ok(()),
+            _ => {
+                // Message runner si présent, sinon générique (auth échouée).
+                let m = v
+                    .get("message")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("le token n'authentifie pas (authentication_failed)");
+                Err(m.to_string())
+            }
+        },
+        Err(e) => Err(format!("smoke-test auth_check échoué: {e}")),
+    }
+}
+
+/// `GET /api/agent/sdk/auth` — statut masqué (jamais la valeur du token).
+/// `?probe=1` lance en plus un smoke-test live avec le token STOCKÉ et met à jour
+/// la télémétrie (record_ok / record_failure).
+#[instrument(skip(state))]
+async fn get_sdk_auth(
+    State(state): State<ApiState>,
+    Query(q): Query<AuthProbeQuery>,
+) -> impl IntoResponse {
+    let mut status = state.agent_auth.status().await;
+    if q.probe.as_deref() == Some("1") {
+        let token = state.agent_auth.token().await;
+        let probe = match smoke_auth_check(token.as_deref()).await {
+            Ok(()) => {
+                state.agent_auth.record_ok().await;
+                json!({ "ok": true })
+            }
+            Err(e) => {
+                // Débounce partagé avec la détection en vol (une seule notif/intervalle).
+                if state
+                    .agent_auth
+                    .record_failure(&e, atelier_common::agent_auth::notify_interval_secs())
+                    .await
+                {
+                    let _ = state
+                        .notifications
+                        .push(
+                            None,
+                            "system",
+                            "notice",
+                            "error",
+                            "Authentification Claude expirée",
+                            Some(&format!(
+                                "Le test d'authentification a échoué : {e}. Renouvelle le token \
+                                 (`claude setup-token`) dans Paramètres → Authentification Claude."
+                            )),
+                        )
+                        .await;
+                }
+                json!({ "ok": false, "error": e })
+            }
+        };
+        // Recharge le statut (record_ok/failure a bougé la télémétrie).
+        status = state.agent_auth.status().await;
+        if let Value::Object(ref mut m) = status {
+            m.insert("probe".into(), probe);
+        }
+    }
+    Json(status)
+}
+
+/// `POST /api/agent/sdk/auth` `{token}` — valide le token candidat par un vrai tour
+/// d'inférence PUIS le persiste. Refuse un token vide ; 400 s'il n'authentifie pas.
+/// La valeur n'est JAMAIS loguée (seulement sa longueur).
+#[instrument(skip(state, body))]
+async fn set_sdk_auth(
+    State(state): State<ApiState>,
+    Json(body): Json<SdkAuthBody>,
+) -> impl IntoResponse {
+    let token = body.token.trim().to_string();
+    if token.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "token vide");
+    }
+    if !state.agent_auth.status().await.get("available").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control-plane Postgres indisponible — impossible de persister le token",
+        );
+    }
+    // Valide AVANT de persister (le token candidat, pas le stocké).
+    if let Err(e) = smoke_auth_check(Some(&token)).await {
+        info!(token_len = token.len(), "SDK auth: token rejeté (validation)"); // jamais la valeur
+        return err(StatusCode::BAD_REQUEST, format!("le token n'authentifie pas : {e}"));
+    }
+    if let Err(e) = state.agent_auth.set_token(&token).await {
+        error!(error = %e, "SDK auth: persistance du token échouée");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "échec de persistance du token");
+    }
+    info!(token_len = token.len(), "SDK auth: token validé et persisté");
+    let _ = state
+        .notifications
+        .push(
+            None,
+            "system",
+            "action",
+            "info",
+            "Authentification Claude reconfigurée",
+            Some("Nouveau token OAuth abonnement validé — l'agent et les scans repartent."),
+        )
+        .await;
+    Json(state.agent_auth.status().await).into_response()
+}
+
+/// `DELETE /api/agent/sdk/auth` — retire le token (retour au fallback
+/// `.credentials.json` s'il existe).
+#[instrument(skip(state))]
+async fn delete_sdk_auth(State(state): State<ApiState>) -> impl IntoResponse {
+    if let Err(e) = state.agent_auth.clear_token().await {
+        error!(error = %e, "SDK auth: clear token échoué");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "échec du retrait du token");
+    }
+    Json(state.agent_auth.status().await).into_response()
+}
+
 #[instrument]
 async fn sdk_version() -> impl IntoResponse {
     let installed = installed_sdk_version();
@@ -1641,8 +1894,11 @@ struct SdkUpdateBody {
 /// — pas de restart. En cas de succès, le pin SOURCE est aussi bumpé (`pin_sdk_source`) pour
 /// survivre aux `make deploy` (qui resynchronisent le déployé depuis la source) ; ce bump source
 /// est best-effort (non-fatal, reporté via `source_pinned`/`source_note`).
-#[instrument(skip(body))]
-async fn sdk_update(body: Option<Json<SdkUpdateBody>>) -> axum::response::Response {
+#[instrument(skip(state, body))]
+async fn sdk_update(
+    State(state): State<ApiState>,
+    body: Option<Json<SdkUpdateBody>>,
+) -> axum::response::Response {
     if SDK_UPDATING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -1700,7 +1956,8 @@ async fn sdk_update(body: Option<Json<SdkUpdateBody>>) -> axum::response::Respon
             } else {
                 // Smoke-test : op:list importe le SDK et tourne sous l'exec réel hr-studio.
                 let init = json!({ "op": "list", "cwd": dir.to_string_lossy() }).to_string();
-                match run_runner_op(&dir, init).await {
+                let oauth = state.agent_auth.token().await;
+                match run_runner_op(&dir, init, oauth.as_deref()).await {
                     Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("sessions") => Ok(()),
                     Ok(v) => Err(format!("smoke-test op:list inattendu: {v}")),
                     Err(e) => Err(format!("smoke-test op:list échoué: {e}")),

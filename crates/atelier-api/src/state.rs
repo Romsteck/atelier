@@ -6,6 +6,7 @@ use atelier_logging::LogIngestService;
 use atelier_watcher::SurveillanceService;
 use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
+use atelier_common::agent_auth::AgentAuthStore;
 use atelier_common::agent_ui_state::OpenTabsStore;
 use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::EventBus;
@@ -53,6 +54,12 @@ pub struct ApiState {
     /// canal `notify` de l'EventBus (relayé en WS `notify:event`). No-op/vide
     /// quand Postgres est down.
     pub notifications: NotificationStore,
+
+    /// Authentification du Claude Agent SDK (token OAuth abonnement longue durée
+    /// du runner/scan) dans `atelier_meta.agent_auth`. Lu FRAIS à chaque run pour
+    /// injecter le token par stdin ; endpoints `/api/agent/sdk/auth`. No-op quand
+    /// Postgres est down.
+    pub agent_auth: AgentAuthStore,
 
     // Dataverse
     pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
@@ -111,6 +118,7 @@ impl ApiState {
         conversation_meta: ConversationMetaStore,
         issues: PlatformIssueStore,
         notifications: NotificationStore,
+        agent_auth: AgentAuthStore,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
         events: Arc<EventBus>,
@@ -135,6 +143,7 @@ impl ApiState {
             conversation_meta,
             issues,
             notifications,
+            agent_auth,
             dv,
             events,
             app_registry,

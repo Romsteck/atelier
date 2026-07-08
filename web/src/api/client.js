@@ -249,6 +249,16 @@ export const getSdkVersion = () => api.get('/agent/sdk/version');
 export const updateSdk = (version) =>
   api.post('/agent/sdk/update', version ? { version } : {}, { timeout: 200000 });
 
+// Authentification du Claude Agent SDK (token OAuth abonnement longue durée du runner).
+// Vue REDACTÉE (jamais le secret) : { configured, available, last_ok_at, last_error_at, ... }.
+export const getAgentAuth = () => api.get('/agent/sdk/auth');
+// ?probe=1 = statut + smoke-test live (vrai tour d'inférence). timeout long (round-trip modèle).
+export const probeAgentAuth = () => api.get('/agent/sdk/auth', { params: { probe: 1 }, timeout: 120000 });
+// Persiste après validation (vrai tour d'inférence côté serveur). timeout long.
+export const setAgentAuth = (token) =>
+  api.post('/agent/sdk/auth', { token }, { timeout: 120000 });
+export const clearAgentAuth = () => api.delete('/agent/sdk/auth');
+
 // ========== Source (explorateur fichiers + git du working tree — Studio) ==========
 // Lit l'arbre de travail réel `…/{slug}/src` (≠ /git/repos qui sert les bare repos).
 export const getSourceTree = (slug, path = '') =>

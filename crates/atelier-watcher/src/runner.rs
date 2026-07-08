@@ -57,6 +57,11 @@ pub struct ScanExec {
     /// run would be recorded `success_empty` (silent false negative). When set,
     /// the run must finish `failed`, never `empty`.
     pub mcp_error: Option<String>,
+    /// Fatal SDK auth failure reported by scan.js (`{t:"error",
+    /// code:"sdk_auth_failed"}`) : le token OAuth abonnement est mort/révoqué.
+    /// Distinct de `mcp_error` (auth du serveur MCP local). Quand présent, le run
+    /// finit `failed` ET le service remonte une notification plateforme.
+    pub auth_error: Option<String>,
 }
 
 /// Build the full prompt for a run from the app's scan definition (its

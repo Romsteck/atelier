@@ -117,6 +117,11 @@ async fn main() -> Result<()> {
         events.notify.clone(),
     );
     notifications.prune_old_actions().await;
+    // Authentification du Claude Agent SDK : token OAuth abonnement longue durée du
+    // runner/scan (setup-token). Construit ICI (après notifications, avant
+    // init_surveillance ET ApiState::new) car le sink de panne d'auth du watcher en
+    // dépend. No-op quand Postgres est down.
+    let agent_auth = atelier_common::agent_auth::AgentAuthStore::new(meta_pool.clone());
     let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
     // Apps supervisor wiring. The registries (apps + ports) live in the shared
@@ -167,11 +172,59 @@ async fn main() -> Result<()> {
     // le même `Arc<EventBus>` que celui passé à `ApiState::new` ci-dessous.
     source_watcher::spawn_source_watcher(events.clone(), apps_src_root.clone());
 
+    // Câblage d'auth SDK pour le watcher (closures plutôt qu'une dép du watcher vers
+    // atelier-common) : (1) provider de token frais injecté au stdin de chaque scan
+    // (ré-auth sans restart) ; (2) sink de panne — dédup atomique (claim agent_auth)
+    // puis UNE notification plateforme rouge. Un token mort touche tous les scans du
+    // sweep → le débounce évite le spam.
+    let token_provider: atelier_watcher::TokenProvider = {
+        let aa = agent_auth.clone();
+        std::sync::Arc::new(move || {
+            let aa = aa.clone();
+            Box::pin(async move { aa.token().await })
+        })
+    };
+    let on_auth_failure: atelier_watcher::AuthFailureSink = {
+        let aa = agent_auth.clone();
+        let notif = notifications.clone();
+        std::sync::Arc::new(move |msg: String| {
+            let (aa, notif) = (aa.clone(), notif.clone());
+            tokio::spawn(async move {
+                if aa
+                    .record_failure(&msg, atelier_common::agent_auth::notify_interval_secs())
+                    .await
+                {
+                    let _ = notif
+                        .push(
+                            None,
+                            "system",
+                            "notice",
+                            "error",
+                            "Authentification Claude expirée",
+                            Some(&format!(
+                                "Le token OAuth abonnement du runner est expiré/révoqué — scans et \
+                                 agent bloqués. Renouvelle-le (`claude setup-token`) puis \
+                                 Paramètres → Authentification Claude. Détail : {msg}"
+                            )),
+                        )
+                        .await;
+                }
+            });
+        })
+    };
+
     // Surveillance IA (sécurité + code_review + business). Migrate schema, spawn
     // git_watcher + sweep scheduler loops. Runs manuels, sweep automatique
     // (manuel ou planifié). Le scan-agent est le Claude Agent SDK (runner
     // `scan.js` en hr-studio, OAuth abonnement). Noop si pas de DSN.
-    let surveillance = init_surveillance(&app_registry, &apps_src_root, &mcp_endpoint).await;
+    let surveillance = init_surveillance(
+        &app_registry,
+        &apps_src_root,
+        &mcp_endpoint,
+        Some(token_provider),
+        Some(on_auth_failure),
+    )
+    .await;
 
     // Sauvegarde restic+rclone vers Samba. Noop si pas de DSN ; runs manuels
     // (scheduler présent mais désactivé tant que schedule_enabled=false).
@@ -211,6 +264,7 @@ async fn main() -> Result<()> {
         conversation_meta,
         issues,
         notifications,
+        agent_auth,
         apps_src_root,
         apps_runtime_root,
         events,
@@ -326,6 +380,8 @@ async fn init_surveillance(
     registry: &atelier_apps::AppRegistry,
     apps_src_root: &PathBuf,
     mcp_endpoint: &str,
+    token_provider: Option<atelier_watcher::TokenProvider>,
+    on_auth_failure: Option<atelier_watcher::AuthFailureSink>,
 ) -> SurveillanceService {
     let admin_dsn = std::env::var("ATELIER_DV_ADMIN_URL")
         .ok()
@@ -380,14 +436,18 @@ async fn init_surveillance(
     };
     info!(max_concurrent, "surveillance scan engine: Claude Agent SDK");
 
-    SurveillanceService::start(SurveillanceConfig {
-        admin_dsn,
-        db_name: None,
-        seed_apps,
-        apps_src_root: apps_src_root.clone(),
-        driver: driver_cfg,
-        max_concurrent,
-    })
+    SurveillanceService::start(
+        SurveillanceConfig {
+            admin_dsn,
+            db_name: None,
+            seed_apps,
+            apps_src_root: apps_src_root.clone(),
+            driver: driver_cfg,
+            max_concurrent,
+        },
+        token_provider,
+        on_auth_failure,
+    )
     .await
 }
 

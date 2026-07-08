@@ -240,6 +240,34 @@ CREATE TABLE IF NOT EXISTS agent_conversation_meta (
 );
 
 -- ---------------------------------------------------------------------------
+-- agent_auth — singleton : token OAuth abonnement LONGUE DURÉE du runner/scan
+-- (produit par `claude setup-token` sur un poste avec navigateur, ~1 an, inference-
+-- only) + télémétrie d'auth. WHY côté serveur : le runner tourne headless en
+-- hr-studio → impossible d'y relancer `claude login` (flow navigateur) ; quand le
+-- refresh token meurt (authentication_failed), Romant recolle un token depuis
+-- Paramètres → Authentification Claude, injecté au runner par stdin (JAMAIS argv/env :
+-- sudo journalise l'env — même anti-leak que MCP_TOKEN). En clair (base root-only,
+-- même exposition que homeroute_settings.bearer_token / dataverse-secrets / le .env).
+--   token            = setup-token (NULL = non configuré → fallback .credentials.json)
+--   last_ok_at       = dernier smoke-test / run authentifié OK
+--   last_error_at    = dernière authentication_failed observée
+--   last_notified_at = watermark de dédup des notifications (claim atomique cross-
+--                      subsystem : un token mort touche chaque scan du sweep + l'agent)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_auth (
+    id               INTEGER      PRIMARY KEY DEFAULT 1,
+    token            TEXT,
+    updated_at       TIMESTAMPTZ,
+    last_ok_at       TIMESTAMPTZ,
+    last_error_at    TIMESTAMPTZ,
+    last_error_msg   TEXT,
+    last_notified_at TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT agent_auth_single CHECK (id = 1)
+);
+INSERT INTO agent_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
 -- studio_state — RETIRÉE (2026-06-21). Le singleton « app ouverte » n'a plus de
 -- sens depuis que le Studio est une app Vite séparée, ouverte en un onglet par
 -- app (`/studio/{slug}`) : l'app vient de l'URL, plus d'une sélection globale.
