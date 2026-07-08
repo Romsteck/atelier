@@ -236,9 +236,9 @@ function ServerCard({ target, onConfigure, onReveal }) {
         </div>
         <div className="flex items-center gap-2">
           {target?.has_restic_password && (
-            <Button onClick={onReveal} variant="secondary" className="flex items-center gap-2"><Eye className="h-4 w-4" /> Mot de passe</Button>
+            <Button onClick={onReveal} variant="neutral" size="md" icon={Eye}>Mot de passe</Button>
           )}
-          <Button onClick={onConfigure} className="flex items-center gap-2"><Settings2 className="h-4 w-4" /> Configurer</Button>
+          <Button onClick={onConfigure} variant="primary" size="md" icon={Settings2}>Configurer</Button>
         </div>
       </div>
     </section>
@@ -388,20 +388,19 @@ function ConfigWizard({ target, onClose, onSaved, setToast }) {
 
         {/* Pied — navigation */}
         <div className="flex items-center justify-between border-t border-gray-700 px-5 py-3">
-          <Button variant="secondary" onClick={step === 1 ? onClose : () => setStep(step - 1)}>
+          <Button variant="neutral" size="md" onClick={step === 1 ? onClose : () => setStep(step - 1)}>
             {step === 1 ? 'Annuler' : 'Retour'}
           </Button>
           {step === 1 && (
             <div className="flex gap-2">
-              {form.share && <Button variant="secondary" onClick={() => setStep(2)}>Continuer →</Button>}
-              <Button onClick={discover} disabled={discovering} className="flex items-center gap-2">
-                {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderSearch className="h-4 w-4" />}
+              {form.share && <Button variant="neutral" size="md" onClick={() => setStep(2)}>Continuer →</Button>}
+              <Button onClick={discover} variant="primary" size="md" icon={FolderSearch} loading={discovering}>
                 {discovering ? 'Connexion…' : 'Lister les partages'}
               </Button>
             </div>
           )}
-          {step === 2 && <Button onClick={() => setStep(3)} disabled={!form.share.trim()}>Suivant →</Button>}
-          {step === 3 && <Button onClick={save} disabled={saving}>{saving ? 'Enregistrement…' : 'Enregistrer'}</Button>}
+          {step === 2 && <Button onClick={() => setStep(3)} variant="neutral" size="md" disabled={!form.share.trim()}>Suivant →</Button>}
+          {step === 3 && <Button onClick={save} variant="primary" size="md" loading={saving}>Enregistrer</Button>}
         </div>
       </div>
     </div>
@@ -551,10 +550,10 @@ export default function Backup() {
     <div className="mx-auto flex max-w-4xl flex-col gap-6 p-6">
       <PageHeader icon={Archive} title="Sauvegarde" subtitle="Incrémentale, chiffrée — vers votre serveur Samba.">
         {running ? (
-          <Button onClick={stop} variant="danger" className="flex items-center gap-2"><Square className="h-4 w-4" /> Arrêter</Button>
+          <Button onClick={stop} variant="danger" size="md" icon={Square}>Arrêter</Button>
         ) : (
-          <Button onClick={trigger} disabled={triggering || loading || !configured || !toolsOk} className="flex items-center gap-2">
-            {triggering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Lancer une sauvegarde
+          <Button onClick={trigger} variant="success" size="md" icon={Play} loading={triggering} disabled={triggering || loading || !configured || !toolsOk}>
+            Lancer une sauvegarde
           </Button>
         )}
       </PageHeader>
@@ -642,9 +641,9 @@ export default function Backup() {
         </div>
         {runs.length < total && (
           <div className="mt-3 text-center">
-            <button onClick={() => setLimit((l) => l + 50)} className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">
+            <Button onClick={() => setLimit((l) => l + 50)} variant="ghost" size="sm">
               Voir plus ({runs.length}/{total})
-            </button>
+            </Button>
           </div>
         )}
       </section>

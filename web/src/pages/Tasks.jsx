@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { CheckCircle, XCircle, Loader, Clock, ChevronRight, ListTodo } from 'lucide-react';
 import { timeAgo } from '../utils/formatters';
 import { getTasks } from '../api/client';
+import Button from '../components/Button';
 
 const STATUS_CONFIG = {
   pending: { icon: Clock, color: 'text-gray-400', bg: 'bg-gray-400/10', label: 'En attente' },
@@ -136,23 +137,23 @@ export default function Tasks() {
       {/* Pagination */}
       {total > limit && (
         <div className="flex justify-center gap-2 mt-4">
-          <button
+          <Button
+            variant="neutral"
             disabled={offset === 0}
             onClick={() => setOffset(Math.max(0, offset - limit))}
-            className="px-3 py-1.5 text-xs bg-gray-800 text-gray-400 border border-gray-700 rounded-lg disabled:opacity-40 hover:bg-gray-700"
           >
             Précédent
-          </button>
+          </Button>
           <span className="px-3 py-1.5 text-xs text-gray-500">
             {offset + 1}-{Math.min(offset + limit, total)} / {total}
           </span>
-          <button
+          <Button
+            variant="neutral"
             disabled={offset + limit >= total}
             onClick={() => setOffset(offset + limit)}
-            className="px-3 py-1.5 text-xs bg-gray-800 text-gray-400 border border-gray-700 rounded-lg disabled:opacity-40 hover:bg-gray-700"
           >
             Suivant
-          </button>
+          </Button>
         </div>
       )}
     </div>

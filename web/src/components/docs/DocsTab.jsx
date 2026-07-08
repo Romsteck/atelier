@@ -5,6 +5,7 @@ import DocsSidebar from './DocsSidebar';
 import DocsSearch from './DocsSearch';
 import DocsOverview from './DocsOverview';
 import DocsEntryView from './DocsEntryView';
+import Button from '../Button';
 
 export default function DocsTab({ slug }) {
   const [overview, setOverview] = useState(null);
@@ -123,12 +124,15 @@ export default function DocsTab({ slug }) {
           La documentation est créée et maintenue par l&apos;agent. Demande-lui de l&apos;initialiser
           ou attends la prochaine itération sur l&apos;app.
         </div>
-        <button
+        <Button
           onClick={loadOverview}
-          className="mt-2 inline-flex items-center gap-1.5 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+          variant="ghost"
+          size="sm"
+          icon={RefreshCw}
+          className="mt-2"
         >
-          <RefreshCw className="w-3.5 h-3.5" /> Actualiser
-        </button>
+          Actualiser
+        </Button>
       </div>
     );
   }
@@ -141,12 +145,15 @@ export default function DocsTab({ slug }) {
           <div>
             <div className="font-medium">Erreur</div>
             <div className="text-sm mt-1">{overviewError}</div>
-            <button
+            <Button
               onClick={loadOverview}
-              className="mt-2 inline-flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+              variant="ghost"
+              size="sm"
+              icon={RefreshCw}
+              className="mt-2"
             >
-              <RefreshCw className="w-3 h-3" /> Réessayer
-            </button>
+              Réessayer
+            </Button>
           </div>
         </div>
       </div>

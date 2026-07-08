@@ -11,6 +11,7 @@ import {
 import { openStudio } from '../lib/openStudio';
 import PageHeader from '../components/PageHeader';
 import StatCard, { StatSkeleton } from '../components/StatCard';
+import Button from '../components/Button';
 import SweepLiveView from '../components/surveillance/SweepLiveView';
 import SchedulePopover from '../components/surveillance/SchedulePopover';
 import { mergeLines } from '../components/surveillance/scanFormat';
@@ -294,7 +295,9 @@ export default function Surveillance() {
       <PageHeader title="Surveillance IA" icon={ShieldAlert}>
         <SchedulePopover schedule={schedule} onSave={saveSchedule} disabled={anyRunning} />
         {!sweepActive && (
-          <button
+          <Button
+            variant="success"
+            icon={Radar}
             onClick={handleStartSweep}
             disabled={anyResolving || anyRunning}
             title={anyRunning
@@ -302,10 +305,9 @@ export default function Surveillance() {
               : anyResolving
                 ? 'Indisponible : une résolution groupée est en cours (conversation agent ouverte). Ferme-la avant de tout scanner.'
                 : 'Scanner toutes les apps (3 scans chacune, app par app)'}
-            className="px-2 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed bg-emerald-500/20 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-500/30 border-emerald-500/30"
           >
-            <Radar className="w-3 h-3" /> Tout scanner
-          </button>
+            Tout scanner
+          </Button>
         )}
       </PageHeader>
 

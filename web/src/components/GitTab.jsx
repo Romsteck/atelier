@@ -1,6 +1,7 @@
 import { useEffect, useCallback, useMemo, useState } from 'react';
 import { Loader2, GitBranch, GitCommit, ArrowUp, ArrowDown } from 'lucide-react';
 import FileStatusBadge from './git/FileStatusBadge';
+import Button from './Button';
 import { getSourceGitLog, pushSource } from '../api/client';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 
@@ -91,11 +92,10 @@ export default function GitTab({ slug, active = true, status, statusLoading = fa
             <span className="flex items-center text-amber-400" title="en retard sur l'upstream"><ArrowDown className="w-3 h-3" />{status.behind}</span>
           )}
           {ahead > 0 && (
-            <button onClick={doPush} disabled={pushing} title={`Pousser ${ahead} commit(s) vers l'upstream`}
-              className="flex items-center gap-1 px-2 py-0.5 rounded-sm bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 text-[11px] font-medium">
-              {pushing ? <Loader2 className="w-3 h-3 animate-spin" /> : <ArrowUp className="w-3 h-3" />}
+            <Button variant="primary" icon={ArrowUp} loading={pushing} disabled={pushing} onClick={doPush}
+              title={`Pousser ${ahead} commit(s) vers l'upstream`}>
               Push {ahead}
-            </button>
+            </Button>
           )}
         </div>
       </div>

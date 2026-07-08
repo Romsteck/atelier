@@ -7,6 +7,7 @@ import DocsTab from '../components/docs/DocsTab';
 import SurveillanceTab from '../components/SurveillanceTab';
 import AgentWorkspace from '../components/AgentWorkspace';
 import EnvTab from '../components/EnvTab';
+import Button from '../components/Button';
 import BuildBadge from '../components/BuildBadge';
 import ThemeToggle from '../components/ThemeToggle';
 import NotificationsToggle from '../components/NotificationsToggle';
@@ -205,12 +206,10 @@ function SettingsTab({ app, onUpdate, onDelete }) {
           </span>
         </label>
       </div>
-      <button onClick={handleSave} disabled={saving} className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
-        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
-      </button>
+      <Button onClick={handleSave} disabled={saving} loading={saving} icon={Save} variant="primary" size="md">Sauvegarder</Button>
       <p className="text-xs text-gray-500">Les variables d&apos;environnement sont désormais dans l&apos;onglet <span className="text-gray-300">Variables</span>.</p>
       <div className="pt-6 border-t border-gray-700">
-        <button onClick={onDelete} className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-sm flex items-center gap-1.5"><Trash2 className="w-4 h-4" /> Supprimer l&apos;application</button>
+        <Button onClick={onDelete} icon={Trash2} variant="danger" size="md">Supprimer l&apos;application</Button>
       </div>
       </div>
       <Toast toast={toast} />

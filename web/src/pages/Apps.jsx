@@ -6,6 +6,7 @@ import { createApp } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import PageHeader from '../components/PageHeader';
 import ScrollableTable from '../components/ScrollableTable';
+import Button from '../components/Button';
 import { useApps } from '../context/AppsContext';
 import { openStudio } from '../lib/openStudio';
 import { SLUG_RE, slugify, stackLabel, statusDot } from '../lib/appsUi';
@@ -44,8 +45,8 @@ function CreateAppModal({ onClose, onCreated }) {
           <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 font-mono rounded-sm outline-hidden" /></div>
           <div><label className="block text-xs text-gray-400 mb-1">Stack <span className="text-gray-500">(label libre, optionnel)</span></label><input type="text" value={stack} onChange={e => setStack(e.target.value)} maxLength={64} placeholder="ex : Vite+Rust, Next.js, Python FastAPI…" className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-gray-50 rounded-sm outline-hidden placeholder:text-gray-600" /><p className="mt-1 text-[11px] text-gray-500">L'app naît vide : c'est la première conversation Studio qui génère le projet (n'importe quelle stack) et configure build/run.</p></div>
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-700">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 bg-gray-700 rounded-sm">Annuler</button>
-            <button type="submit" disabled={submitting} className="px-4 py-2 text-sm text-white bg-blue-500 rounded-sm disabled:opacity-50 flex items-center gap-2">{submitting && <Loader2 className="w-4 h-4 animate-spin" />}Creer</button>
+            <Button type="button" onClick={onClose} variant="neutral" size="md">Annuler</Button>
+            <Button type="submit" loading={submitting} variant="primary" size="md">Creer</Button>
           </div>
         </form>
       </div>
@@ -63,12 +64,9 @@ export default function Apps() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader title="Applications" icon={LayoutGrid}>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" /> Nouvelle application
-        </button>
+        <Button onClick={() => setShowCreate(true)} variant="primary" size="sm" icon={Plus}>
+          Nouvelle application
+        </Button>
       </PageHeader>
 
       <div className="flex-1 overflow-y-auto p-5">

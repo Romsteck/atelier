@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Filter, X } from 'lucide-react';
+import Button from '../Button';
 
 const OPS = [
   { value: 'eq', label: '=' },
@@ -104,13 +105,9 @@ export function FilterDropdown({ column, fieldType, choices, currentFilter, onFi
           )}
           <div className="flex justify-between">
             {hasFilter && (
-              <button onClick={clear} className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 flex items-center gap-1 border-none bg-transparent cursor-pointer">
-                <X className="w-3 h-3" /> Retirer
-              </button>
+              <Button variant="danger" size="xs" icon={X} onClick={clear}>Retirer</Button>
             )}
-            <button onClick={apply} className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 ml-auto border-none bg-transparent cursor-pointer">
-              Appliquer
-            </button>
+            <Button variant="primary" size="xs" onClick={apply} className="ml-auto">Appliquer</Button>
           </div>
         </div>
       )}

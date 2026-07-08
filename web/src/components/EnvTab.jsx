@@ -4,6 +4,7 @@ import {
   RefreshCw, KeyRound,
 } from 'lucide-react';
 import { getAppEnv, getAppEnvVar, setAppEnvVar, deleteAppEnvVar } from '../api/client';
+import Button from './Button';
 
 // Per-variable env editor — line by line (name | value), ownership-aware.
 // Platform vars (PORT / HR_DV_* / ATELIER_*) are computed and locked; user
@@ -154,20 +155,14 @@ export default function EnvTab({ slug, onRestart }) {
             <KeyRound className="w-4 h-4 text-gray-400" />
             <h3 className="text-sm font-medium text-gray-50">Variables d&apos;environnement</h3>
           </div>
-          <button onClick={load} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-50">
-            <RefreshCw className="w-3.5 h-3.5" /> Rafraîchir
-          </button>
+          <Button onClick={load} icon={RefreshCw} variant="ghost" size="sm">Rafraîchir</Button>
         </div>
 
         {restartNeeded && (
           <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-sm bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-200 text-xs">
             <span>Les changements s&apos;appliquent au prochain démarrage du process.</span>
             {onRestart && (
-              <button onClick={doRestart} disabled={restarting}
-                className="px-2.5 py-1 rounded-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-100 flex items-center gap-1.5 disabled:opacity-50">
-                {restarting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                Redémarrer
-              </button>
+              <Button onClick={doRestart} disabled={restarting} loading={restarting} icon={RefreshCw} variant="warning" size="sm">Redémarrer</Button>
             )}
           </div>
         )}
@@ -310,18 +305,12 @@ export default function EnvTab({ slug, onRestart }) {
                     </select>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button onClick={addVar} disabled={form.saving || !form.key.trim()}
-                      className="px-3 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded-sm disabled:opacity-50 flex items-center gap-1.5">
-                      {form.saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} Ajouter
-                    </button>
-                    <button onClick={() => { setAdding(false); setForm({ key: '', value: '', secret: false, scope: 'runtime', saving: false }); }}
-                      className="px-3 py-1 text-xs text-gray-400 hover:text-gray-200">Annuler</button>
+                    <Button onClick={addVar} disabled={form.saving || !form.key.trim()} loading={form.saving} icon={Save} variant="primary" size="sm">Ajouter</Button>
+                    <Button onClick={() => { setAdding(false); setForm({ key: '', value: '', secret: false, scope: 'runtime', saving: false }); }} variant="neutral" size="sm">Annuler</Button>
                   </div>
                 </div>
               ) : (
-                <button onClick={() => setAdding(true)} className="flex items-center gap-1.5 text-xs text-blue-700 dark:text-blue-300 hover:text-blue-800 dark:hover:text-blue-200">
-                  <Plus className="w-3.5 h-3.5" /> Ajouter une variable
-                </button>
+                <Button onClick={() => setAdding(true)} icon={Plus} variant="ghost" size="xs">Ajouter une variable</Button>
               )}
             </div>
           </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Settings, X, CalendarClock } from 'lucide-react';
+import Button from '../Button';
 
 // Config for the scheduled automatic sweep. A header trigger button opens a real
 // centered modal (portal → document.body, so no overflow ancestor can clip it).
@@ -26,22 +27,18 @@ export default function SchedulePopover({ schedule, onSave, disabled = false }) 
 
   return (
     <>
-      <button
-        type="button"
+      <Button
+        icon={Settings}
+        variant={enabled ? undefined : 'neutral'}
+        active={enabled}
         onClick={() => { if (!disabled) setOpen(true); }}
         disabled={disabled}
         title={disabled
           ? 'Indisponible : un scan est en cours (lancé depuis le Studio).'
           : 'Planification de la surveillance automatique'}
-        className={`px-2 py-1 text-xs border rounded-sm flex items-center gap-1 transition disabled:opacity-50 disabled:cursor-not-allowed ${
-          enabled
-            ? 'border-emerald-500/40 text-emerald-700 dark:text-emerald-300 bg-emerald-500/10'
-            : 'border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-600'
-        }`}
       >
-        <Settings className="w-3 h-3" />
         {enabled ? `Planifié ${String(hour).padStart(2, '0')}h` : 'Planification'}
-      </button>
+      </Button>
 
       {open && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

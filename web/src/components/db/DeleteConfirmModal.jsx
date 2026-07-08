@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { X, Trash2, Loader2 } from 'lucide-react';
+import { X, Trash2 } from 'lucide-react';
+import Button from '../Button';
 
 export function DeleteConfirmModal({ count, onConfirm, onClose }) {
   const [deleting, setDeleting] = useState(false);
@@ -37,12 +38,10 @@ export function DeleteConfirmModal({ count, onConfirm, onClose }) {
           {error && <div className="text-xs text-red-400 bg-red-500/10 rounded-sm px-3 py-2">{error}</div>}
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-gray-50">
-            Annuler
-          </button>
-          <button onClick={handleDelete} disabled={deleting} className="px-4 py-1.5 text-xs text-white bg-red-500 rounded-sm border-none cursor-pointer hover:bg-red-600 disabled:opacity-50 flex items-center gap-1">
-            {deleting ? <><Loader2 className="w-3 h-3 animate-spin" /> Suppression...</> : <><Trash2 className="w-3 h-3" /> Supprimer</>}
-          </button>
+          <Button variant="neutral" size="sm" onClick={onClose}>Annuler</Button>
+          <Button variant="danger" size="sm" icon={Trash2} loading={deleting} disabled={deleting} onClick={handleDelete}>
+            {deleting ? 'Suppression...' : 'Supprimer'}
+          </Button>
         </div>
       </div>
     </div>

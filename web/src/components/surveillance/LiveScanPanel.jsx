@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Square, Terminal, ListTree } from 'lucide-react';
 import { formatScanEvent, TONE_CLS } from './scanFormat';
 import ScanStepsView from './ScanStepsView';
+import Button from '../Button';
 
 // Live console of a scan run in progress. Lines stream in over WebSocket. Two
 // views: a derived STEP list (default — driven by the agent's `scan_progress`
@@ -50,13 +51,9 @@ export default function LiveScanPanel({
         </button>
         <RefreshCw className={`w-3 h-3 shrink-0 animate-spin ${stopping ? 'text-red-700 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'}`} />
         {onStop && (
-          <button
-            onClick={onStop}
-            disabled={stopping}
-            className="px-2 py-0.5 text-xs border border-red-500/40 text-red-700 dark:text-red-200 hover:bg-red-500/20 rounded-sm flex items-center gap-1 disabled:opacity-50"
-          >
-            <Square className="w-3 h-3" /> Arrêter
-          </button>
+          <Button variant="danger" icon={Square} loading={stopping} onClick={onStop}>
+            Arrêter
+          </Button>
         )}
       </div>
       <div ref={bodyRef} className="flex-1 overflow-y-auto min-h-0">

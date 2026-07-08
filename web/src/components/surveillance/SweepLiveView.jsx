@@ -1,8 +1,9 @@
 import {
-  RefreshCw, Square, ShieldCheck, AlertOctagon, Activity,
+  Square, ShieldCheck, AlertOctagon, Activity,
   CheckCircle2, Clock, XCircle, Loader2,
 } from 'lucide-react';
 import LiveScanPanel from './LiveScanPanel';
+import Button from '../Button';
 
 // The three scan cells of the current app, in launch order.
 const KIND_CELLS = [
@@ -53,14 +54,9 @@ export default function SweepLiveView({ sweep, transcripts, onCancel }) {
             {done}/{total} apps
           </span>
           <div className="flex-1" />
-          <button
-            onClick={onCancel}
-            disabled={cancelling}
-            className="px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-700 dark:text-red-200 hover:bg-red-500/30 border-red-500/30"
-          >
-            {cancelling ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
+          <Button variant="danger" icon={Square} loading={cancelling} onClick={onCancel}>
             {cancelling ? 'Arrêt en cours…' : 'Annuler'}
-          </button>
+          </Button>
         </div>
 
         <div className="h-1.5 overflow-hidden rounded-full bg-gray-950/60">

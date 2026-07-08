@@ -3,6 +3,7 @@ import { CheckCircle, XCircle, Loader, Clock, ChevronRight } from 'lucide-react'
 import { useNavigate } from 'react-router-dom';
 import { useEffect, useRef } from 'react';
 import { timeAgo } from '../../utils/formatters';
+import Button from '../Button';
 
 const STATUS_CONFIG = {
   pending: { icon: Clock, color: 'text-gray-400', bg: 'bg-gray-400/10' },
@@ -87,12 +88,13 @@ export default function TaskDropdown() {
     >
       <div className="p-3 border-b border-gray-700 flex justify-between items-center">
         <span className="text-sm font-medium text-gray-200">Activité</span>
-        <button
+        <Button
           onClick={() => { setIsOpen(false); navigate('/tasks'); }}
-          className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+          variant="ghost"
+          size="xs"
         >
           Voir tout
-        </button>
+        </Button>
       </div>
       <div className="overflow-y-auto flex-1">
         {tasks.length === 0 ? (

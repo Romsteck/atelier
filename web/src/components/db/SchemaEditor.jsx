@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useToast, Toast } from '../../hooks/useToast';
 import { apiErr } from '../../utils/apiErr';
+import Button from '../Button';
 
 const FIELD_TYPES = [
   'Text', 'Number', 'Decimal', 'Boolean', 'DateTime', 'Date', 'Time',
@@ -193,24 +194,9 @@ export function SchemaEditor({ appSlug, onSchemaChanged }) {
                 <span className="text-sm font-medium text-gray-50">{table.name}</span>
                 <span className="text-xs text-gray-500">{table.columns.length} colonnes</span>
                 <div className="flex-1" />
-                <button
-                  onClick={() => setShowAddColumn(table.name)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-400 hover:bg-green-500/10 rounded-sm border-none bg-transparent cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Colonne
-                </button>
-                <button
-                  onClick={() => setShowCreateRelation(true)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-purple-400 hover:bg-purple-500/10 rounded-sm border-none bg-transparent cursor-pointer"
-                >
-                  <Link2 className="w-3 h-3" /> Relation
-                </button>
-                <button
-                  onClick={() => handleDropTable(table.name)}
-                  className="flex items-center gap-1 px-2 py-1 text-[11px] text-red-400 hover:bg-red-500/10 rounded-sm border-none bg-transparent cursor-pointer"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+                <Button variant="success" size="xs" icon={Plus} onClick={() => setShowAddColumn(table.name)}>Colonne</Button>
+                <Button variant="primary" size="xs" icon={Link2} onClick={() => setShowCreateRelation(true)}>Relation</Button>
+                <Button variant="danger" size="xs" icon={Trash2} onClick={() => handleDropTable(table.name)} title="Supprimer la table" />
               </div>
 
               {/* Columns table */}
@@ -424,9 +410,7 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs text-gray-400">Colonnes</label>
-              <button type="button" onClick={addColumn} className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1 border-none bg-transparent cursor-pointer">
-                <Plus className="w-3 h-3" /> Ajouter
-              </button>
+              <Button variant="ghost" size="xs" icon={Plus} onClick={addColumn}>Ajouter</Button>
             </div>
             <div className="space-y-2">
               {columns.map((col, idx) => (
@@ -469,11 +453,8 @@ function CreateTableModal({ appSlug, onCreated, onClose, showToast }) {
           </div>
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-gray-50">Annuler</button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded-sm border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1">
-            {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-            Creer
-          </button>
+          <Button variant="neutral" size="sm" onClick={onClose}>Annuler</Button>
+          <Button variant="primary" size="sm" icon={Plus} loading={saving} disabled={saving} onClick={handleSubmit}>Creer</Button>
         </div>
       </div>
     </div>
@@ -560,10 +541,8 @@ function AddColumnModal({ appSlug, table, onAdded, onClose, showToast }) {
           )}
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-gray-50">Annuler</button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-blue-500 rounded-sm border-none cursor-pointer hover:bg-blue-600 disabled:opacity-50">
-            {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Ajouter'}
-          </button>
+          <Button variant="neutral" size="sm" onClick={onClose}>Annuler</Button>
+          <Button variant="primary" size="sm" loading={saving} disabled={saving} onClick={handleSubmit}>Ajouter</Button>
         </div>
       </div>
     </div>
@@ -673,10 +652,8 @@ function CreateRelationModal({ appSlug, tables, onCreated, onClose, showToast })
           </div>
         </form>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-400 rounded-sm border-none bg-transparent cursor-pointer hover:text-gray-50">Annuler</button>
-          <button onClick={handleSubmit} disabled={saving} className="px-4 py-1.5 text-xs text-white bg-purple-500 rounded-sm border-none cursor-pointer hover:bg-purple-600 disabled:opacity-50">
-            {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Creer'}
-          </button>
+          <Button variant="neutral" size="sm" onClick={onClose}>Annuler</Button>
+          <Button variant="primary" size="sm" loading={saving} disabled={saving} onClick={handleSubmit}>Creer</Button>
         </div>
       </div>
     </div>

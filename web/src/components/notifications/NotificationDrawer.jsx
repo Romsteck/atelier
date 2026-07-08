@@ -3,6 +3,7 @@ import { CheckCheck, X } from 'lucide-react';
 import { useNotifications } from '../../context/NotificationsContext';
 import { useIsPhone } from '../../hooks/useMediaQuery';
 import NotificationItem from './NotificationItem';
+import Button from '../Button';
 
 const FILTERS = [
   { key: 'all', label: 'Tout' },
@@ -52,14 +53,15 @@ export default function NotificationDrawer({ contextSlug }) {
           Notifications{unread > 0 && <span className="ml-2 text-xs text-amber-500">{unread} non lue{unread > 1 ? 's' : ''}</span>}
         </span>
         <div className="flex items-center gap-1">
-          <button
+          <Button
             onClick={markAllRead}
-            className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 px-1.5 py-1"
+            variant="ghost"
+            size="xs"
+            icon={CheckCheck}
             title="Tout marquer lu"
           >
-            <CheckCheck className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Tout lu</span>
-          </button>
+          </Button>
           {isPhone && (
             <button onClick={() => setIsOpen(false)} className="p-1.5 text-gray-400 hover:text-gray-50" title="Fermer">
               <X className="w-4 h-4" />

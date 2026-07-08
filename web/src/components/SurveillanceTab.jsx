@@ -13,6 +13,7 @@ import {
   deleteFinding,
 } from '../api/client';
 import MarkdownView from './docs/MarkdownView';
+import Button from './Button';
 import LiveScanPanel from './surveillance/LiveScanPanel';
 import { mergeLines } from './surveillance/scanFormat';
 import useWebSocket from '../hooks/useWebSocket';
@@ -477,10 +478,9 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
       {/* Action bar */}
       <div className="px-4 py-2 border-b border-gray-700 bg-gray-800/30 flex items-center gap-2 flex-wrap">
         {activeRun ? (
-          <button onClick={handleStop} disabled={busy} className="px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 disabled:opacity-50 bg-red-500/20 text-red-700 dark:text-red-200 hover:bg-red-500/30 border-red-500/30">
-            {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
+          <Button variant="danger" icon={Square} loading={busy} onClick={handleStop}>
             Arrêter le scan
-          </button>
+          </Button>
         ) : (
           <button onClick={handleRun} disabled={busy || atCap || blankBusiness}
             title={blankBusiness ? 'Scan Business en veille — défini par l\'agent du projet' : atCap ? `${openCount} findings ouvertes (max ${MAX_OPEN_FINDINGS}) — résous-en avant de relancer` : `Lancer le scan ${meta.label}`}
@@ -500,19 +500,15 @@ export default function SurveillanceTab({ slug, initialKind, onResolve }) {
                 ? 'Aucun finding ouvert pour ce scan'
                 : `Confier les ${openCount} findings ouverts à l'agent dans une conversation unique (conciliation + résolution orchestrée)`;
           return (
-            <button
+            <Button
+              variant="success"
+              icon={Wrench}
               onClick={handleResolveAll}
               disabled={disabled}
               title={title}
-              className={`px-2.5 py-1 text-xs border rounded-sm flex items-center gap-1 ${
-                disabled
-                  ? 'text-gray-500 border-gray-700 opacity-60 cursor-not-allowed'
-                  : 'bg-blue-500/20 text-blue-700 dark:text-blue-200 hover:bg-blue-500/30 border-blue-500/30'
-              }`}
             >
-              <Wrench className="w-3 h-3" />
               {resolving ? 'Conversation ouverte' : `Résoudre tout${openCount > 0 ? ` (${openCount})` : ''}`}
-            </button>
+            </Button>
           );
         })()}
         <div className="flex-1" />

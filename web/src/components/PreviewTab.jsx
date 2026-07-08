@@ -3,6 +3,7 @@ import {
   ArrowLeft, ArrowRight, RotateCw, Home, ExternalLink, Loader2,
   Monitor, Tablet, Smartphone, Power, Play,
 } from 'lucide-react';
+import Button from './Button';
 
 // Mini-navigateur embarqué : iframe même-origine sur /apps/{slug}/ (le proxy path-routing Atelier).
 // Même-origine ⇒ on peut lire contentWindow.location / écouter `load` ⇒ vraie barre d'adresse + historique.
@@ -149,12 +150,15 @@ export default function PreviewTab({ slug, status, onControl }) {
                 Démarre l&apos;application pour afficher l&apos;aperçu de{' '}
                 <span className="font-mono text-gray-300">/apps/{slug}/</span>.
               </p>
-              <button
+              <Button
                 onClick={() => onControl?.(slug, 'start')}
-                className="w-full px-4 py-2 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md flex items-center justify-center gap-2 transition-colors"
+                variant="success"
+                size="md"
+                icon={Play}
+                className="w-full"
               >
-                <Play className="w-4 h-4" /> Démarrer l&apos;app
-              </button>
+                Démarrer l&apos;app
+              </Button>
             </>
           )}
         </div>

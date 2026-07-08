@@ -3,6 +3,7 @@ import {
   Loader2, Bot, ChevronRight, ChevronDown, Wrench, AlertTriangle, X, ListChecks, Brain,
 } from 'lucide-react';
 import MarkdownView from './docs/MarkdownView';
+import Button from './Button';
 import Composer from './agent/Composer';
 import { getSdkVersion, updateSdk } from '../api/client';
 import { apiErr } from '../utils/apiErr';
@@ -321,13 +322,12 @@ function QuestionCard({ questions, answered, answerText, idle, onSubmit, onCance
             </div>
           )}
           <div className="flex items-center gap-2">
-            <button onClick={() => onSubmit(build())} disabled={!hasAny}
-              className="px-3 py-1 rounded-md text-[12px] bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed">
+            <Button variant="primary" size="sm" onClick={() => onSubmit(build())} disabled={!hasAny}>
               Répondre
-            </button>
-            <button onClick={onCancel} className="px-2 py-1 rounded-md text-[12px] text-gray-400 hover:text-gray-200 hover:bg-gray-800">
+            </Button>
+            <Button variant="ghost" size="sm" onClick={onCancel}>
               Passer
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -362,14 +362,12 @@ function PlanReviewCard({ plan, decided, approved, idle, onApprove, onReject }) 
             placeholder="Remarques (optionnel, si tu renvoies en révision)"
             className="w-full bg-gray-800 border border-gray-700 rounded-sm px-2 py-1 text-[12px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-amber-500" />
           <div className="flex items-center gap-2">
-            <button onClick={() => onApprove(feedback)}
-              className="px-3 py-1 rounded-md text-[12px] bg-amber-500 text-white hover:bg-amber-600">
+            <Button variant="warning" size="sm" onClick={() => onApprove(feedback)}>
               Implémenter
-            </button>
-            <button onClick={() => onReject(feedback)}
-              className="px-2 py-1 rounded-md text-[12px] text-gray-400 hover:text-gray-200 hover:bg-gray-800">
+            </Button>
+            <Button variant="neutral" size="sm" onClick={() => onReject(feedback)}>
               Renvoyer en révision
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -780,12 +778,10 @@ export default function AgentPanel({ panelKey }) {
             </span>
           )}
           {sdk?.update_available && (
-            <button onClick={onUpdateSdk} disabled={updatingSdk}
-              className="px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+            <Button variant="warning" size="xs" onClick={onUpdateSdk} loading={updatingSdk}
               title={`MAJ Agent SDK : ${sdk.installed} → ${sdk.latest}`}>
-              {updatingSdk && <Loader2 className="w-3 h-3 animate-spin" />}
               {updatingSdk ? 'MAJ…' : `MAJ ${sdk.latest}`}
-            </button>
+            </Button>
           )}
           <button onClick={() => closeConversation(panelKey)} title="Fermer (la conversation reste dans l'historique)"
             className="p-1 rounded-sm text-gray-500 hover:text-gray-200 hover:bg-gray-800">

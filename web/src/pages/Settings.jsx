@@ -343,7 +343,7 @@ export default function Settings() {
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-5xl">
       <PageHeader title="Paramètres" icon={Settings2}>
-        <Button onClick={reload} variant="secondary"><RefreshCw className="h-4 w-4" /> Rafraîchir</Button>
+        <Button onClick={reload} variant="neutral" size="md" icon={RefreshCw}>Rafraîchir</Button>
       </PageHeader>
 
       {toast && (
@@ -437,15 +437,15 @@ export default function Settings() {
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Button onClick={onSaveAuth} loading={savingAuth} disabled={!authToken.trim()}>
-            <KeyRound className="h-4 w-4" /> Enregistrer
+          <Button onClick={onSaveAuth} variant="primary" size="md" icon={KeyRound} loading={savingAuth} disabled={!authToken.trim()}>
+            Enregistrer
           </Button>
-          <Button onClick={onVerifyAuth} variant="secondary" loading={probingAuth} disabled={!sdkAuth?.configured}>
-            <RotateCw className="h-4 w-4" /> Vérifier l&apos;auth actuelle
+          <Button onClick={onVerifyAuth} variant="neutral" size="md" icon={RotateCw} loading={probingAuth} disabled={!sdkAuth?.configured}>
+            Vérifier l&apos;auth actuelle
           </Button>
           {sdkAuth?.configured && (
-            <Button onClick={onClearAuth} variant="secondary">
-              <Trash2 className="h-4 w-4" /> Retirer
+            <Button onClick={onClearAuth} variant="neutral" size="md" icon={Trash2}>
+              Retirer
             </Button>
           )}
           {authProbe && (
@@ -466,14 +466,10 @@ export default function Settings() {
             Agent SDK <code>{sdk.installed || '?'}</code>
             {sdk.update_available ? (
               <>
-                {' → '}<code>{sdk.latest}</code> disponible.
-                <button
-                  onClick={onUpdateSdk}
-                  disabled={updatingSdk}
-                  className="ml-2 text-amber-500 hover:text-amber-400 disabled:opacity-50"
-                >
-                  {updatingSdk ? 'MAJ…' : 'Mettre à jour'}
-                </button>
+                {' → '}<code>{sdk.latest}</code> disponible.{' '}
+                <Button onClick={onUpdateSdk} variant="warning" size="xs" loading={updatingSdk}>
+                  Mettre à jour
+                </Button>
               </>
             ) : (
               <span> · à jour</span>
@@ -502,7 +498,7 @@ export default function Settings() {
           <code className="flex-1 rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 font-mono text-sm text-gray-200">
             claude setup-token
           </code>
-          <Button variant="secondary" onClick={() => copyCmd('claude setup-token')}>
+          <Button variant="neutral" size="md" onClick={() => copyCmd('claude setup-token')}>
             Copier
           </Button>
         </div>
@@ -548,15 +544,15 @@ export default function Settings() {
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Button onClick={onSaveAppsTok} loading={savingAppsTok} disabled={!appsTokInput.trim()}>
-            <KeyRound className="h-4 w-4" /> Enregistrer
+          <Button onClick={onSaveAppsTok} variant="primary" size="md" icon={KeyRound} loading={savingAppsTok} disabled={!appsTokInput.trim()}>
+            Enregistrer
           </Button>
-          <Button onClick={onVerifyAppsTok} variant="secondary" loading={probingAppsTok} disabled={!appsTok?.configured}>
-            <RotateCw className="h-4 w-4" /> Vérifier
+          <Button onClick={onVerifyAppsTok} variant="neutral" size="md" icon={RotateCw} loading={probingAppsTok} disabled={!appsTok?.configured}>
+            Vérifier
           </Button>
           {appsTok?.configured && (
-            <Button onClick={onClearAppsTok} variant="secondary">
-              <Trash2 className="h-4 w-4" /> Retirer
+            <Button onClick={onClearAppsTok} variant="neutral" size="md" icon={Trash2}>
+              Retirer
             </Button>
           )}
           {appsTokProbe && (
@@ -623,7 +619,7 @@ export default function Settings() {
         </div>
 
         <div className="mt-4 flex items-center gap-3">
-          <Button onClick={saveSettings} loading={saving}>Enregistrer</Button>
+          <Button onClick={saveSettings} variant="primary" size="md" loading={saving}>Enregistrer</Button>
           <span className="text-xs text-gray-500">
             La liaison est active dès qu&apos;un token est renseigné.
           </span>
@@ -641,11 +637,11 @@ export default function Settings() {
         </p>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={doRegister} loading={registering} disabled={!configured}>
-            <Plug className="h-4 w-4" /> Connecter / S&apos;enregistrer
+          <Button onClick={doRegister} variant="primary" size="md" icon={Plug} loading={registering} disabled={!configured}>
+            Connecter / S&apos;enregistrer
           </Button>
-          <Button onClick={doTest} variant="secondary" loading={testing}>
-            <RotateCw className="h-4 w-4" /> Tester la connexion
+          <Button onClick={doTest} variant="neutral" size="md" icon={RotateCw} loading={testing}>
+            Tester la connexion
           </Button>
           {testResult && (
             testResult.reachable ? (
@@ -820,7 +816,7 @@ export default function Settings() {
                             </button>
                           </>
                         ) : (
-                          <Button onClick={() => assign(a)} disabled={!canAct} loading={rowBusy} className="px-3 py-1 text-xs">
+                          <Button onClick={() => assign(a)} variant="primary" size="sm" disabled={!canAct} loading={rowBusy}>
                             Attribuer
                           </Button>
                         )}

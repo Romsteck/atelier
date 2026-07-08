@@ -6,6 +6,7 @@ import {
 import { useIssues } from '../context/IssuesContext';
 import PageHeader from '../components/PageHeader';
 import StatCard from '../components/StatCard';
+import Button from '../components/Button';
 import { useToast, Toast } from '../hooks/useToast';
 
 // Nature de la remontée — l'axe `kind` du store (error | limitation | suggestion).
@@ -62,20 +63,6 @@ function Chip({ meta, children, title }) {
   );
 }
 
-function ActionButton({ icon: Icon, label, onClick, danger }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`text-xs px-2 py-1 rounded-sm border border-gray-700/50 flex items-center gap-1.5 transition ${
-        danger ? 'text-red-700 dark:text-red-300 hover:bg-red-500/10' : 'text-gray-300 hover:bg-gray-700/40'
-      }`}
-    >
-      <Icon className="w-3.5 h-3.5" /> {label}
-    </button>
-  );
-}
-
 function IssueCard({ it, onPatch, onDelete, onCopy }) {
   const kind = KINDS[it.kind] || KINDS.error;
   const sev = SEVERITIES[it.severity] || SEVERITIES.medium;
@@ -129,9 +116,7 @@ function IssueCard({ it, onPatch, onDelete, onCopy }) {
                 placeholder="Note de triage (commit, explication…)"
                 className="flex-1 text-xs bg-gray-900/60 border border-gray-700/50 rounded-sm px-2 py-1.5 text-gray-300 focus:outline-none focus:border-gray-500"
               />
-              <button type="button" onClick={saveNote} className="text-xs px-2 py-1 rounded-sm border border-gray-700/50 text-gray-300 hover:bg-gray-700/40">
-                Enregistrer
-              </button>
+              <Button variant="neutral" onClick={saveNote}>Enregistrer</Button>
             </div>
           )}
         </div>
@@ -139,16 +124,16 @@ function IssueCard({ it, onPatch, onDelete, onCopy }) {
       <div className="px-3 py-2 border-t border-gray-700/50 flex items-center gap-2 flex-wrap">
         {it.status === 'open' ? (
           <>
-            <ActionButton icon={CircleCheck} label="Résoudre" onClick={() => onPatch(it.id, { status: 'resolved' })} />
-            <ActionButton icon={CircleSlash} label="Écarter" onClick={() => onPatch(it.id, { status: 'dismissed' })} />
+            <Button variant="success" icon={CircleCheck} onClick={() => onPatch(it.id, { status: 'resolved' })}>Résoudre</Button>
+            <Button variant="neutral" icon={CircleSlash} onClick={() => onPatch(it.id, { status: 'dismissed' })}>Écarter</Button>
           </>
         ) : (
-          <ActionButton icon={RotateCcw} label="Rouvrir" onClick={() => onPatch(it.id, { status: 'open' })} />
+          <Button variant="neutral" icon={RotateCcw} onClick={() => onPatch(it.id, { status: 'open' })}>Rouvrir</Button>
         )}
-        <ActionButton icon={StickyNote} label="Note" onClick={() => setNoteOpen((v) => !v)} />
+        <Button variant="neutral" icon={StickyNote} onClick={() => setNoteOpen((v) => !v)}>Note</Button>
         <span className="flex-1" />
-        <ActionButton icon={Copy} label="Copier" onClick={() => onCopy(it)} />
-        <ActionButton icon={Trash2} label="Supprimer" danger onClick={() => onDelete(it.id)} />
+        <Button variant="neutral" icon={Copy} onClick={() => onCopy(it)}>Copier</Button>
+        <Button variant="danger" icon={Trash2} onClick={() => onDelete(it.id)}>Supprimer</Button>
       </div>
     </div>
   );
@@ -207,15 +192,16 @@ export default function Issues() {
     <div className="h-full flex flex-col">
       <Toast toast={toast} />
       <PageHeader title="Remontées plateforme" icon={MessageSquareWarning}>
-        <button
-          type="button"
+        <Button
+          variant="neutral"
+          size="sm"
+          icon={ClipboardList}
           onClick={copyAll}
           disabled={!filtered.length}
-          className="text-xs px-2.5 py-1.5 rounded-sm border border-gray-700/50 text-gray-300 hover:bg-gray-700/40 flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
           title="Copie les rapports du filtre courant en markdown"
         >
-          <ClipboardList className="w-3.5 h-3.5" /> Copier tout ({filtered.length})
-        </button>
+          Copier tout ({filtered.length})
+        </Button>
       </PageHeader>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">

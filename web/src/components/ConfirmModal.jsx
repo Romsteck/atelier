@@ -53,8 +53,8 @@ function ConfirmModal({
           <p className="text-gray-400 text-center text-sm">{message}</p>
         </div>
         <div className="flex gap-3 p-4 bg-gray-900/50 border-t border-gray-700">
-          <Button onClick={onClose} variant="secondary" disabled={loading} className="flex-1 justify-center">{cancelText}</Button>
-          <Button onClick={onConfirm} variant={variant} loading={loading} className="flex-1 justify-center">{confirmText}</Button>
+          <Button onClick={onClose} variant="secondary" size="md" disabled={loading} className="flex-1">{cancelText}</Button>
+          <Button onClick={onConfirm} variant={variant} size="md" loading={loading} className="flex-1">{confirmText}</Button>
         </div>
       </div>
     </div>

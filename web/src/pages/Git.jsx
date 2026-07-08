@@ -317,8 +317,8 @@ function Git() {
               ) : (
                 <div className="flex items-center gap-3">
                   <span className="text-sm text-gray-500">Aucune cle generee</span>
-                  <Button onClick={handleGenerateKey} loading={generatingKey} className="text-xs px-3 py-1.5">
-                    <Key className="w-3.5 h-3.5" /> Generer
+                  <Button variant="primary" size="sm" icon={Key} onClick={handleGenerateKey} loading={generatingKey}>
+                    Generer
                   </Button>
                 </div>
               )}
@@ -355,8 +355,8 @@ function Git() {
                   placeholder="Organisation GitHub"
                   className="bg-gray-800 border border-gray-700 text-gray-300 text-sm px-3 py-2 w-full sm:w-48 focus:outline-hidden focus:border-blue-500"
                 />
-                <Button onClick={handleSaveConfig} loading={savingConfig} className="text-xs px-3 py-1.5">
-                  <Save className="w-3.5 h-3.5" /> Sauvegarder
+                <Button variant="primary" size="sm" icon={Save} onClick={handleSaveConfig} loading={savingConfig}>
+                  Sauvegarder
                 </Button>
               </div>
               <a
@@ -446,12 +446,12 @@ function Git() {
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Barre mobile (<lg) : ouvre les tiroirs latéraux */}
           <div className="lg:hidden flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-700 bg-gray-900/60 shrink-0">
-            <button onClick={() => setReposOpen(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-xs text-gray-300 bg-gray-800 hover:bg-gray-700">
-              <GitBranch className="w-4 h-4" /> Dépôts ({repos.length})
-            </button>
-            <button onClick={() => setActivityOpen(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-xs text-gray-300 bg-gray-800 hover:bg-gray-700">
-              <Activity className="w-4 h-4" /> Activité
-            </button>
+            <Button variant="neutral" size="sm" icon={GitBranch} onClick={() => setReposOpen(true)}>
+              Dépôts ({repos.length})
+            </Button>
+            <Button variant="neutral" size="sm" icon={Activity} onClick={() => setActivityOpen(true)}>
+              Activité
+            </Button>
           </div>
           {!selectedRepo ? (
             <div className="flex-1 flex items-center justify-center">
@@ -513,22 +513,25 @@ function Git() {
                   <div className="flex items-center gap-2">
                     {orgInput && config?.github_token && (
                       <Button
-                        variant="secondary"
+                        variant="neutral"
+                        size="sm"
+                        icon={RefreshCw}
                         onClick={() => handleSync(selectedRepo)}
                         loading={syncing[selectedRepo]}
-                        className="text-xs px-3 py-1.5"
                       >
-                        <RefreshCw className="w-3.5 h-3.5" /> Sync GitHub
+                        Sync GitHub
                       </Button>
                     )}
                     {!activeSlugs.has(selectedRepo) && (
-                      <button
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        icon={Trash2}
                         onClick={() => setConfirmDelete(selectedRepo)}
                         title="Supprimer ce dépôt"
-                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 text-red-600 dark:text-red-400 border border-red-900/50 bg-red-900/10 hover:bg-red-900/30 hover:text-red-700 dark:hover:text-red-300 transition-colors"
                       >
-                        <Trash2 className="w-3.5 h-3.5" /> Supprimer
-                      </button>
+                        Supprimer
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -724,21 +727,23 @@ function Git() {
               </p>
             </div>
             <div className="px-5 py-3 border-t border-gray-700 flex items-center justify-end gap-2">
-              <button
+              <Button
+                variant="neutral"
+                size="sm"
                 onClick={() => setConfirmDelete(null)}
                 disabled={deletingRepo}
-                className="text-xs px-3 py-1.5 text-gray-300 border border-gray-700 hover:bg-gray-800 transition-colors disabled:opacity-50"
               >
                 Annuler
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                icon={Trash2}
+                loading={deletingRepo}
                 onClick={() => handleDeleteRepo(confirmDelete)}
-                disabled={deletingRepo}
-                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 text-red-100 bg-red-700 hover:bg-red-600 transition-colors disabled:opacity-50"
               >
-                {deletingRepo ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 Supprimer
-              </button>
+              </Button>
             </div>
           </div>
         </div>

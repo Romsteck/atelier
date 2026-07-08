@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
+import Button from './Button';
 
 /**
  * Garde-fou global : une exception de rendu dans une page ne doit pas blanchir
@@ -35,12 +36,15 @@ export default class ErrorBoundary extends Component {
           <p className="mt-1 text-sm text-gray-400">
             Recharge la page pour reprendre là où tu en étais.
           </p>
-          <button
+          <Button
             onClick={() => window.location.reload()}
-            className="mt-4 inline-flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-sm text-white hover:bg-blue-600 border-none cursor-pointer"
+            variant="primary"
+            size="md"
+            icon={RefreshCw}
+            className="mt-4"
           >
-            <RefreshCw className="h-4 w-4" /> Recharger
-          </button>
+            Recharger
+          </Button>
           <details className="mt-4 text-left">
             <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-400">
               Détail technique

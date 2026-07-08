@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { Plus, MessageSquarePlus, X, FileCode2, GitCommit, FileDiff } from 'lucide-react';
 import AgentPanel from '../AgentPanel';
+import Button from '../Button';
 import FileViewerPanel from './FileViewerPanel';
 import CommitViewerPanel from './CommitViewerPanel';
 import WorkingDiffPanel from './WorkingDiffPanel';
@@ -55,10 +56,9 @@ export default function ConversationsSplit() {
       <div ref={ref} className="h-full min-h-0 flex flex-col items-center justify-center bg-gray-900 text-center px-4">
         <MessageSquarePlus className="w-10 h-10 text-gray-700 mb-3" />
         <div className="text-[13px] text-gray-500 mb-3">Aucune conversation ouverte.</div>
-        <button onClick={newConversation}
-          className="px-3 py-1.5 rounded-md text-[13px] bg-blue-500 text-white hover:bg-blue-600 flex items-center gap-1.5">
-          <Plus className="w-4 h-4" /> Nouvelle conversation
-        </button>
+        <Button variant="primary" size="sm" icon={Plus} onClick={newConversation}>
+          Nouvelle conversation
+        </Button>
       </div>
     );
   }

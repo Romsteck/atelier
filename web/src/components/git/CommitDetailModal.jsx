@@ -141,7 +141,7 @@ export default function CommitDetailModal({ slug, sha, org, onClose }) {
 
         {/* Footer */}
         <div className="shrink-0 border-t border-gray-700 px-4 py-3 flex justify-end bg-gray-900/50">
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="neutral" size="md" onClick={onClose}>
             Fermer
           </Button>
         </div>
