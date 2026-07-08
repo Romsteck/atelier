@@ -25,10 +25,11 @@ function ThinkingCount({ chars }) {
 const TOOL_CHIP = 'shrink-0 text-[10px] uppercase tracking-wider text-gray-400 bg-gray-700/40 px-1.5 py-0.5 rounded-sm';
 
 // Bande « live » : barre PLEINE LARGEUR flush en bas du chat (aucune marge), fond bleu LÉGER,
-// bord supérieur de séparation, texte gros et gras. Couleur de texte THEME-AWARE : seul le gris
-// est mirroré par le thème clair (cf. index.css), donc le bleu doit l'être à la main via `dark:`
-// — bleu foncé en clair, bleu très clair en sombre — sinon illisible en thème clair.
-const LIVE_BAND = 'flex items-center gap-2 shrink-0 px-3 py-2 border-t border-blue-500/30 bg-blue-500/10 text-[15px] font-semibold text-blue-800 dark:text-blue-50';
+// bord supérieur de séparation, balayée par un sheen lent (index.css). Couleur de texte
+// THEME-AWARE : seul le gris est mirroré par le thème clair (cf. index.css), donc le bleu doit
+// l'être à la main via `dark:` — bleu foncé en clair, bleu très clair en sombre — sinon
+// illisible en thème clair. Deux rangées empilées : agrégats (si groupe live) puis action.
+const LIVE_BAND = 'shrink-0 px-3 py-2 border-t border-blue-500/30 bg-blue-500/10 text-blue-800 dark:text-blue-50 active-line-sheen';
 
 // Chemin : basename en clair, dossier atténué, chemin complet en title.
 function PathLabel({ path, className = '' }) {
@@ -181,33 +182,57 @@ function ActivityGroup({ entries }) {
 }
 
 // Barre LIVE persistante, TOUJOURS en bas du chat (flush, hors flux scrollé) tant que l'agent
-// travaille : reflète l'activité courante — réflexion en cours (compteur de tokens animé),
-// outil en cours / dernier outil, sinon générique « agent travaille… ».
-function LiveBand({ activity }) {
+// travaille : reflète l'activité courante — réflexion en cours, outil en cours / dernier outil,
+// sinon générique « agent travaille… ». Quand la queue du fil est un groupe d'activité EN COURS
+// (`group`), ses agrégats (« N actions · 🧠 X tokens ») vivent ICI, à droite dans la bande
+// (l'entête ActivityGroup ne réapparaît dans le flux qu'à la clôture de la suite) — avec UN
+// SEUL compteur de tokens (le cumul du groupe inclut la réflexion en cours), au lieu de
+// l'ancien duo entête agrégée + compteur live. Balayée par un sheen lent (index.css).
+function LiveBand({ activity, group }) {
   const thinkingLive = activity.kind === 'thinking';
-  const thinkShown = useSmoothCount(charsToTokens(thinkingLive ? activity.chars : 0), thinkingLive);
+  const tokTarget = group ? group.reflectionTokens : charsToTokens(thinkingLive ? activity.chars : 0);
+  const thinkShown = useSmoothCount(tokTarget, thinkingLive || !!group);
   const desc = activity.kind === 'tool' ? describeTool(activity.name, activity.input) : null;
   const Icon = desc ? TOOL_ICONS[desc.iconKey] || Wrench : null;
   const accent = 'text-blue-600 dark:text-blue-200';
   return (
     <div className={LIVE_BAND}>
-      <Loader2 className={`w-4 h-4 shrink-0 animate-spin ${accent}`} />
-      {thinkingLive ? (
-        <>
-          <Brain className={`w-4 h-4 shrink-0 ${accent}`} />
-          <span className="tabular-nums shrink-0" title="réflexion en cours (≈ caractères / 4)">{formatTokens(thinkShown)} tokens</span>
-          <span className="text-blue-600/60 dark:text-blue-200/60 shrink-0">…</span>
-        </>
-      ) : desc ? (
-        <>
-          <Icon className={`w-4 h-4 shrink-0 ${accent}`} />
-          <span className="shrink-0">{desc.verb}</span>
-          <span className="truncate font-mono text-blue-700/90 dark:text-blue-100/90 min-w-0">{toolTarget(desc)}</span>
-          <span className="text-blue-600/60 dark:text-blue-200/60 shrink-0">…</span>
-        </>
-      ) : (
-        <span>agent travaille…</span>
+      {group && (
+        <div className="flex items-center gap-2 mb-1 text-[12px] font-medium text-blue-700/90 dark:text-blue-200/90">
+          {group.nTools > 0 && <span className="shrink-0">{group.nTools} action{group.nTools > 1 ? 's' : ''}</span>}
+          {group.reflectionTokens > 0 && (
+            <span className="flex items-center gap-1 shrink-0" title="réflexion cumulée de la suite en cours (≈ caractères / 4)">
+              {group.nTools > 0 && <span className="text-blue-600/50 dark:text-blue-200/50">·</span>}
+              <Brain className="w-3.5 h-3.5 shrink-0" />
+              <span className="tabular-nums">{formatTokens(thinkShown)} tokens</span>
+            </span>
+          )}
+          {group.anyError && <span className="text-red-400 shrink-0" title="une action a échoué">●</span>}
+        </div>
       )}
+      <div className="flex items-center gap-2 text-[15px] font-semibold min-w-0">
+        <Loader2 className={`w-4 h-4 shrink-0 animate-spin ${accent}`} />
+        {thinkingLive ? (
+          <>
+            <Brain className={`w-4 h-4 shrink-0 ${accent}`} />
+            {group ? (
+              <span className="shrink-0">réflexion</span>
+            ) : (
+              <span className="tabular-nums shrink-0" title="réflexion en cours (≈ caractères / 4)">{formatTokens(thinkShown)} tokens</span>
+            )}
+            <span className="text-blue-600/60 dark:text-blue-200/60 shrink-0">…</span>
+          </>
+        ) : desc ? (
+          <>
+            <Icon className={`w-4 h-4 shrink-0 ${accent}`} />
+            <span className="shrink-0">{desc.verb}</span>
+            <span className="truncate font-mono text-blue-700/90 dark:text-blue-100/90 min-w-0">{toolTarget(desc)}</span>
+            <span className="text-blue-600/60 dark:text-blue-200/60 shrink-0">…</span>
+          </>
+        ) : (
+          <span>agent travaille…</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -571,6 +596,31 @@ export default function AgentPanel({ panelKey }) {
     return { kind: 'generic' };
   }, [items, running]);
 
+  // Suite d'activité EN COURS en queue de fil (WHY) : tant qu'elle grandit, son entête
+  // agrégée (« N actions · 🧠 X tokens ») est retirée du flux et rendue DANS la LiveBand
+  // (un seul compteur de tokens — le cumul du groupe inclut la réflexion live). Idem pour
+  // le bloc de réflexion SEUL en cours (sinon double compteur flux + bande). Le nœud
+  // réapparaît dans le flux dès que la suite se clôt (prose/fin de tour/dialogue).
+  const bandLive = running && !awaitingUser;
+  const lastNode = renderNodes[renderNodes.length - 1];
+  const liveGroupNode =
+    bandLive && lastNode?.kind === 'activity' && lastNode.endIdx === items.length - 1 ? lastNode : null;
+  const liveThinkTail =
+    bandLive && !liveGroupNode && lastNode?.kind === 'thinkitem' &&
+    items[items.length - 1]?.type === 'thinking';
+  const flowNodes = liveGroupNode || liveThinkTail ? renderNodes.slice(0, -1) : renderNodes;
+  const liveGroupStats = useMemo(() => {
+    if (!liveGroupNode) return null;
+    const tools = liveGroupNode.entries.filter((e) => e.kind === 'tool');
+    return {
+      nTools: tools.length,
+      anyError: tools.some((e) => e.result?.isError),
+      reflectionTokens: charsToTokens(
+        liveGroupNode.entries.filter((e) => e.kind === 'thinking').reduce((s, e) => s + (e.chars || 0), 0),
+      ),
+    };
+  }, [liveGroupNode]);
+
   // Auto-scroll bas SEULEMENT si l'utilisateur est collé en bas. S'il a scrollé pour lire,
   // on préserve sa position et on signale « Nouveaux messages » à la place. Exception : son
   // propre message vient d'être posté (type 'user') → on re-colle toujours en bas.
@@ -766,7 +816,7 @@ export default function AgentPanel({ panelKey }) {
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {convo.error}
           </div>
         )}
-        {renderNodes.map((node) =>
+        {flowNodes.map((node) =>
           node.kind === 'activity' ? (
             <ActivityGroup key={node.key} entries={node.entries} />
           ) : node.kind === 'thinkitem' ? (
@@ -793,7 +843,7 @@ export default function AgentPanel({ panelKey }) {
 
       {/* Barre LIVE TOUJOURS en bas du chat (hors flux scrollé, flush) tant que l'agent
           travaille — sauf en attente d'une réponse (carte question/plan affichée à la place). */}
-      {running && !awaitingUser && liveActivity && <LiveBand activity={liveActivity} />}
+      {running && !awaitingUser && liveActivity && <LiveBand activity={liveActivity} group={liveGroupStats} />}
 
       {/* Sélecteurs. Modèle + mode sont modifiables EN COURS de session (setModel /
           setPermissionMode à chaud). L'effort est figé côté SDK au démarrage : le changer

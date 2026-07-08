@@ -55,6 +55,42 @@ body {
   @apply bg-gray-900 text-gray-100;
 }
 
+/*
+  Lueur lente balayant la ligne/bande active (LiveBand du chat agent, étape de
+  scan en cours). Balayage gauche→droite : bande lumineuse LARGE et douce
+  (dégradé étalé sur 40 % de l'image), lent (7 s), avec une courte pause entre
+  deux passes (positions hors cadre + no-repeat). Se superpose au bg-blue-500/10
+  Tailwind (background-color et background-image coexistent). La teinte de la
+  lumière suit le thème : claire sur fond sombre, bleu profond sur fond clair
+  (une lumière claire y serait invisible).
+*/
+@keyframes active-line-sheen {
+  0% { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
+}
+.active-line-sheen {
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in oklab, var(--color-blue-200) 14%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: active-line-sheen 7s linear infinite;
+}
+[data-theme="light"] .active-line-sheen {
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in oklab, var(--color-blue-500) 12%, transparent) 50%,
+    transparent 70%
+  );
+}
+@media (prefers-reduced-motion: reduce) {
+  .active-line-sheen { animation: none; background-image: none; }
+}
+
 /* Custom scrollbar — theme-aware via le mirror gris */
 ::-webkit-scrollbar {
   width: 8px;
