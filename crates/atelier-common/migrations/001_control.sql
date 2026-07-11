@@ -301,3 +301,79 @@ INSERT INTO app_claude_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 -- existantes ; la sync per-app `agent_open_tabs` ci-dessus est conservée.
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS studio_state;
+
+-- ===========================================================================
+-- Statistiques d'utilisation (page /stats du panneau de contrôle). Trois tables
+-- alimentées par des instrumentations légères, séparées du reste du control-plane
+-- pour être débrayables sans impact. Toutes no-op si Postgres est down (le store
+-- UsageStatsStore dégrade en silencieux). Store : atelier_common::usage_stats.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- app_traffic_daily — compteurs de trafic HTTP/WS par app agrégés PAR JOUR.
+-- WHY par jour (et non une ligne par requête) : le path-proxy voit chaque hit ;
+-- écrire en base à chaque requête serait un coût par-requête inacceptable. Un
+-- compteur mémoire (ProxyStats) est flushé périodiquement en UPSERT incrémental
+-- (`hits = hits + EXCLUDED.hits`, …), coût amorti quasi nul. latency_ms_sum/_n
+-- permettent une latence moyenne (time-to-headers upstream) sans stocker chaque
+-- valeur. Rétention ~400 j (couvre une heatmap annuelle ; lignes minuscules).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_traffic_daily (
+    slug            TEXT         NOT NULL,
+    day             DATE         NOT NULL,
+    hits            BIGINT       NOT NULL DEFAULT 0,
+    errors_5xx      BIGINT       NOT NULL DEFAULT 0,
+    ws_upgrades     BIGINT       NOT NULL DEFAULT 0,
+    latency_ms_sum  BIGINT       NOT NULL DEFAULT 0,
+    latency_n       BIGINT       NOT NULL DEFAULT 0,
+    PRIMARY KEY (slug, day)
+);
+
+-- ---------------------------------------------------------------------------
+-- agent_turn_usage — tokens/coût/durée de CHAQUE tour de l'agent Studio. WHY :
+-- le scan de surveillance persiste déjà ses tokens dans `surveillance_runs`,
+-- mais l'agent interactif ne le faisait PAS (l'event `result` du runner était
+-- seulement streamé). Cette table capte le même signal côté Studio → conso
+-- Claude par app comparable aux scans. Rétention ~365 j (coût annuel).
+--   cache_read / cache_creation = tokens de cache prompt (facturés différemment)
+--   is_error                    = tour terminé en erreur (SDK)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_turn_usage (
+    id              BIGSERIAL    PRIMARY KEY,
+    slug            TEXT         NOT NULL,
+    session_id      TEXT,
+    ts              TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    model           TEXT,
+    tokens_in       BIGINT,
+    tokens_out      BIGINT,
+    cache_read      BIGINT,
+    cache_creation  BIGINT,
+    cost_usd        DOUBLE PRECISION,
+    num_turns       INTEGER,
+    duration_ms     BIGINT,
+    is_error        BOOLEAN      NOT NULL DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS agent_turn_usage_slug_ts_idx ON agent_turn_usage (slug, ts DESC);
+CREATE INDEX IF NOT EXISTS agent_turn_usage_ts_idx      ON agent_turn_usage (ts DESC);
+
+-- ---------------------------------------------------------------------------
+-- app_build_runs — historique des builds/ships des apps. WHY : les AppBuildEvent
+-- étaient un broadcast WS ÉPHÉMÈRE (badge live du Studio), rien n'était persisté
+-- → aucune fréquence de déploiement observable. Un subscriber central du canal
+-- `app_build` matérialise ici started→finished/error (kind déduit de la phase :
+-- `ship` si phase="ship", sinon `build`). Réconciliation au boot (running →
+-- interrupted, cf. un run tué par un restart d'Atelier). Rétention ~90 j.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_build_runs (
+    id            UUID         PRIMARY KEY,
+    slug          TEXT         NOT NULL,
+    kind          TEXT         NOT NULL DEFAULT 'build',   -- build | ship
+    started_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    finished_at   TIMESTAMPTZ,
+    status        TEXT         NOT NULL DEFAULT 'running', -- running | success | error | interrupted
+    duration_ms   BIGINT,
+    error         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS app_build_runs_slug_idx ON app_build_runs (slug, started_at DESC);

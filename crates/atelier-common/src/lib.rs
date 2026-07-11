@@ -11,5 +11,6 @@ pub mod logging;
 pub mod notification_store;
 pub mod task_store;
 pub mod tasks;
+pub mod usage_stats;
 
 pub use identity::Identity;

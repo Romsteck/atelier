@@ -14,6 +14,8 @@ use atelier_common::events::EventBus;
 use atelier_common::issue_store::PlatformIssueStore;
 use atelier_common::notification_store::NotificationStore;
 use atelier_common::task_store::TaskStore;
+use atelier_common::usage_stats::UsageStatsStore;
+use crate::routes::stats::{ProxyStats, StatsCache};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -106,6 +108,20 @@ pub struct ApiState {
     /// `/api/homeroute/*` ; renvoie 503 si le control-plane Postgres est absent.
     pub homeroute: crate::clients::homeroute_service::HomerouteService,
 
+    /// Statistiques d'utilisation (page `/stats`) : store des tables
+    /// `app_traffic_daily` / `agent_turn_usage` / `app_build_runs` dans
+    /// `atelier_meta` + agrégations. No-op/vide quand Postgres est down.
+    pub usage_stats: UsageStatsStore,
+
+    /// Compteur mémoire de trafic HTTP/WS par app, alimenté par le path-proxy
+    /// (zéro écriture SQL par requête) et flushé périodiquement vers
+    /// `usage_stats`. Partagé (Arc) : le proxy écrit, la boucle de flush lit.
+    pub proxy_stats: Arc<ProxyStats>,
+
+    /// Cache TTL en mémoire des endpoints `/stats` coûteux (dataverse, disque,
+    /// git). Partagé par tous les handlers.
+    pub stats_cache: Arc<StatsCache>,
+
     /// Slugs whose `/apps/{slug}` path prefix must be PRESERVED (no-strip) when
     /// proxying to the app — required by Next.js apps whose `basePath`/`assetPrefix`
     /// expect the prefix on every request. SPA (Vite) / Axum apps want the prefix
@@ -140,6 +156,7 @@ impl ApiState {
         surveillance: SurveillanceService,
         backup: BackupService,
         homeroute: crate::clients::homeroute_service::HomerouteService,
+        usage_stats: UsageStatsStore,
     ) -> Self {
         Self {
             docs_dir,
@@ -166,6 +183,9 @@ impl ApiState {
             surveillance,
             backup,
             homeroute,
+            usage_stats,
+            proxy_stats: Arc::new(ProxyStats::new()),
+            stats_cache: Arc::new(StatsCache::new()),
             preserve_prefix_slugs: parse_preserve_prefix_slugs(),
         }
     }

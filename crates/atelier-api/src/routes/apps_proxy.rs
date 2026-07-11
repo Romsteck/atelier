@@ -185,10 +185,19 @@ async fn forward(slug: String, upstream_path: String, state: ApiState, req: Requ
     if is_websocket_upgrade(req.headers()) {
         // Hand the head to the WebSocketUpgrade extractor; the body is empty
         // for a valid WS handshake so we drop it.
+        state.proxy_stats.record_ws(&slug);
         let (parts, _body) = req.into_parts();
         return ws_forward(slug, upstream_path, port, parts).await;
     }
-    http_forward(slug, upstream_path, port, req).await
+    // Compteur de trafic (page /stats) : hit + status + latence time-to-headers.
+    // Point unique qui voit à la fois le slug et le status HTTP final ; coût nul
+    // par requête (incrément mémoire, flush périodique en base).
+    let t0 = std::time::Instant::now();
+    let resp = http_forward(slug.clone(), upstream_path, port, req).await;
+    state
+        .proxy_stats
+        .record_http(&slug, resp.status().as_u16(), t0.elapsed().as_millis() as u64);
+    resp
 }
 
 // ─── HTTP path ────────────────────────────────────────────────────────────────

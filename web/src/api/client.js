@@ -86,6 +86,20 @@ export const getBackupRuns = (limit = 50, offset = 0) =>
   api.get('/backup/runs', { params: { limit, offset } });
 export const getBackupRunDetail = (id) => api.get(`/backup/runs/${id}`);
 
+// ========== Statistiques d'utilisation (page /stats) ==========
+// Toutes enveloppées {success, data} → utiliser unwrapApi côté page.
+export const getStatsOverview = () => api.get('/stats/overview');
+export const getStatsApps = () => api.get('/stats/apps');
+export const getStatsDataverse = (refresh = false) =>
+  api.get('/stats/dataverse', { params: refresh ? { refresh: 1 } : {} });
+export const getStatsDisk = (refresh = false) =>
+  api.get('/stats/disk', { params: refresh ? { refresh: 1 } : {} });
+export const getStatsGitActivity = (days = 365) =>
+  api.get('/stats/git/activity', { params: { days } });
+export const getStatsPerf = () => api.get('/stats/perf');
+// Stats de logs (base atelier_logs) — struct LogStats brute (pas d'enveloppe).
+export const getLogsStats = (params = {}) => api.get('/logs/stats', { params });
+
 // ========== Apps ==========
 export const listApps = () => api.get('/apps');
 export const getApp = (slug) => api.get(`/apps/${slug}`);

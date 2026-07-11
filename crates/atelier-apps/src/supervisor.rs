@@ -743,6 +743,14 @@ async fn systemd_run_app(app: &Application) -> Result<()> {
     cmd.arg("--collect");
     cmd.arg("--quiet");
     cmd.arg("--no-block");
+    // Comptabilité de ressources par unité pour la page /stats (module perfs,
+    // endpoint /api/stats/perf). CPU/mémoire sont normalement déjà comptés en
+    // cgroup v2, mais on force explicitement ; IPAccounting est OFF par défaut →
+    // sans lui IPIngressBytes/IPEgressBytes restent absents. Effet au prochain
+    // (re)démarrage de l'app (les unités déjà lancées gardent l'ancien réglage).
+    cmd.arg("--property=IPAccounting=yes");
+    cmd.arg("--property=CPUAccounting=yes");
+    cmd.arg("--property=MemoryAccounting=yes");
     cmd.arg(format!("--working-directory={}", src_dir.display()));
     cmd.arg(format!("--description=Atelier app {}", app.slug));
     // PORT first (belt-and-suspenders: the rendered `.env` also carries it as a

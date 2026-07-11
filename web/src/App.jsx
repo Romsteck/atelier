@@ -18,6 +18,7 @@ import Surveillance from './pages/Surveillance';
 import Backup from './pages/Backup';
 import Settings from './pages/Settings';
 import Issues from './pages/Issues';
+import Stats from './pages/Stats';
 
 // Le Studio est désormais une app Vite SÉPARÉE servie sous `/studio/<slug>` (cf.
 // crates/atelier-api/src/lib.rs). La homepage (cette SPA) ne contient plus le
@@ -55,6 +56,7 @@ function App() {
             <Route path="/git" element={<Git />} />
             <Route path="/surveillance" element={<Surveillance />} />
             <Route path="/issues" element={<Issues />} />
+            <Route path="/stats" element={<Stats />} />
             <Route path="/backup" element={<Backup />} />
             <Route path="/settings" element={<Settings />} />
 

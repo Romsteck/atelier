@@ -229,6 +229,28 @@ impl DataverseEngine {
         Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 
+    /// Taille disque totale de la base `app_{slug}` (octets). Pour la page
+    /// `/stats`. Aucun input utilisateur → requête statique sûre.
+    pub async fn database_size_bytes(&self) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as("SELECT pg_database_size(current_database())::bigint")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(n)
+    }
+
+    /// Estimation du nombre de lignes vivantes sur les tables utilisateur
+    /// (`pg_stat_user_tables.n_live_tup`, exclut les tables système `_dv_*`).
+    /// Estimation (pas un COUNT exact) — bien moins coûteux pour une vue globale.
+    pub async fn live_row_estimate(&self) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as(
+            "SELECT COALESCE(sum(n_live_tup),0)::bigint FROM pg_stat_user_tables \
+              WHERE relname NOT LIKE '\\_dv\\_%'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
+
     /// Read the current `schema_version` from `_dv_meta`.
     pub async fn schema_version(&self) -> Result<u64> {
         let row: Option<(String,)> =

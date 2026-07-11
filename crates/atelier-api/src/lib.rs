@@ -129,6 +129,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/agent", routes::agent::global_router())
         .nest("/backup", routes::backup::router())
         .nest("/homeroute", routes::homeroute::router())
+        .nest("/stats", routes::stats::router())
         .merge(routes::ws::router())
         .fallback(api_404)
 }

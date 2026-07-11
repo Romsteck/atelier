@@ -126,6 +126,12 @@ async fn main() -> Result<()> {
     // séparé du token runner/scan ci-dessus. No-op quand Postgres est down.
     let app_claude_auth =
         atelier_common::app_claude_auth::AppClaudeAuthStore::new(meta_pool.clone());
+    // Statistiques d'utilisation (page /stats) : store des tables app_traffic_daily
+    // / agent_turn_usage / app_build_runs. Purge de rétention + réconciliation des
+    // builds laissés `running` par un restart d'Atelier, au boot. No-op sans pool.
+    let usage_stats = atelier_common::usage_stats::UsageStatsStore::new(meta_pool.clone());
+    usage_stats.prune_old().await;
+    usage_stats.reconcile_interrupted_builds().await;
     let docs_index = open_docs_index(&meta_pool, &docs_dir).await;
 
     // Apps supervisor wiring. The registries (apps + ports) live in the shared
@@ -281,11 +287,88 @@ async fn main() -> Result<()> {
         surveillance,
         backup,
         homeroute,
+        usage_stats,
     );
     info!(
         slugs = ?state.preserve_prefix_slugs,
         "apps_proxy: prefix-preserving (no-strip) slugs"
     );
+
+    // Flush périodique du compteur de trafic proxy → `app_traffic_daily` (page
+    // /stats). Toutes les 60 s : drain mémoire + UPSERT incrémental ; en cas
+    // d'échec SQL, ré-injection des compteurs (aucune perte tant qu'Atelier vit).
+    {
+        let proxy_stats = state.proxy_stats.clone();
+        let usage = state.usage_stats.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let rows = proxy_stats.drain();
+                if rows.is_empty() {
+                    continue;
+                }
+                if let Err(e) = usage.flush_traffic(&rows).await {
+                    warn!(error = %e, "stats: flush trafic échoué — ré-injection des compteurs");
+                    proxy_stats.merge_back(rows);
+                }
+            }
+        });
+    }
+
+    // Historique builds/ships (page /stats) : subscriber central du canal
+    // `app_build`. Zéro modif des émetteurs — `started` → INSERT (kind déduit de
+    // la phase : `ship` si phase="ship", sinon `build`), `finished`/`error` →
+    // clôture. Un run laissé ouvert (crash) est réconcilié au boot suivant.
+    {
+        let usage = state.usage_stats.clone();
+        let mut rx = state.events.app_build.subscribe();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            let mut inflight: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => match ev.status.as_str() {
+                        "started" => {
+                            // Un `started` préexistant pour ce slug n'a jamais reçu son
+                            // terminal (build.sh tué, curl terminal perdu) : le clôturer
+                            // en `interrupted` avant d'en ouvrir un nouveau, sinon il
+                            // resterait `running` jusqu'au prochain boot-reconcile.
+                            if let Some(orphan) = inflight.remove(&ev.slug) {
+                                usage
+                                    .build_finished(&orphan, "interrupted", Some("remplacé par un nouveau build (terminal manquant)"))
+                                    .await;
+                            }
+                            let kind = if ev.phase.as_deref() == Some("ship") {
+                                "ship"
+                            } else {
+                                "build"
+                            };
+                            if let Some(id) = usage.build_started(&ev.slug, kind).await {
+                                inflight.insert(ev.slug.clone(), id);
+                            }
+                        }
+                        "finished" => {
+                            if let Some(id) = inflight.remove(&ev.slug) {
+                                usage.build_finished(&id, "success", None).await;
+                            }
+                        }
+                        "error" => {
+                            if let Some(id) = inflight.remove(&ev.slug) {
+                                usage.build_finished(&id, "error", ev.error.as_deref()).await;
+                            }
+                        }
+                        _ => {} // "step" et autres : ignorés
+                    },
+                    Err(RecvError::Lagged(n)) => {
+                        warn!(dropped = n, "stats: build subscriber lagged");
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 
     // Heartbeat Homeroute : enregistre CET environnement auprès de Homeroute au
     // boot puis toutes les ~5 min, pour qu'il apparaisse « en ligne » dans la page

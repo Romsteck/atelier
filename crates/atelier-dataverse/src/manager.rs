@@ -206,6 +206,22 @@ impl DataverseManager {
     pub fn config(&self) -> &ProvisioningConfig { &self.config }
     pub fn secrets_path(&self) -> Option<&Path> { self.secrets_path.as_deref() }
 
+    /// Tailles disque (octets) de toutes les bases gérées : les bases app
+    /// (`app_*`) + le control-plane (`atelier_meta`) + les logs (`atelier_logs`).
+    /// Une seule requête sur le pool admin, pour la page `/stats`.
+    pub async fn database_sizes(&self) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> = crate::sqlx::query_as(
+            "SELECT datname::text, pg_database_size(datname)::bigint \
+               FROM pg_database \
+              WHERE datname LIKE 'app\\_%' ESCAPE '\\' \
+                 OR datname IN ('atelier_meta', 'atelier_logs') \
+              ORDER BY 2 DESC",
+        )
+        .fetch_all(&self.admin_pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Manually register a DSN for a slug (useful in tests, or to load from
     /// a non-default secret store at boot).
     pub async fn set_dsn_override(&self, slug: impl Into<String>, dsn: impl Into<String>) {

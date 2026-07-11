@@ -32,6 +32,7 @@ use tracing::{error, info, instrument, warn};
 
 use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::{AgentEvent, AgentOpenTabsEvent, StudioTabEvent};
+use atelier_common::usage_stats::{TurnUsage, UsageStatsStore};
 
 use crate::state::ApiState;
 
@@ -636,6 +637,7 @@ async fn query(
     let meta = state.conversation_meta.clone();
     let notifications = state.notifications.clone();
     let agent_auth = state.agent_auth.clone();
+    let usage_stats = state.usage_stats.clone();
     let run_id_task = run_id.clone();
     let slug_task = slug.clone();
     tokio::spawn(async move {
@@ -650,6 +652,7 @@ async fn query(
             meta,
             notifications,
             agent_auth,
+            usage_stats,
         )
         .await;
         // run_agent nettoie RUNS / SID_RUN en fin de run (graceful → session persistée).
@@ -1200,6 +1203,7 @@ async fn run_agent(
     meta: ConversationMetaStore,
     notifications: atelier_common::notification_store::NotificationStore,
     agent_auth: atelier_common::agent_auth::AgentAuthStore,
+    usage_stats: UsageStatsStore,
 ) {
     let mut seq: u64 = 0;
     // Clé stable de la conversation : inconnue jusqu'à la 1re ligne `system` du runner.
@@ -1456,6 +1460,27 @@ async fn run_agent(
                                         tokio::spawn(async move { meta.set_mode(&slug, &sid, &mode).await });
                                     }
                                 }
+                            }
+                            // Fin de tour → persiste tokens/coût/durée (page /stats), hors du
+                            // chemin de relay (spawn). Modèle = celui demandé au spawn (RunState),
+                            // None = défaut abonnement. `obj` est encore possédé (publish suit).
+                            if t == "result" {
+                                let usage = obj.get("usage");
+                                let turn = TurnUsage {
+                                    slug: slug.clone(),
+                                    session_id: session_id.clone(),
+                                    model: RUNS.lock().get(&run_id).and_then(|r| r.model.clone()),
+                                    tokens_in: usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_i64()),
+                                    tokens_out: usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_i64()),
+                                    cache_read: usage.and_then(|u| u.get("cache_read_input_tokens")).and_then(|v| v.as_i64()),
+                                    cache_creation: usage.and_then(|u| u.get("cache_creation_input_tokens")).and_then(|v| v.as_i64()),
+                                    cost_usd: obj.get("total_cost_usd").and_then(|v| v.as_f64()),
+                                    num_turns: obj.get("num_turns").and_then(|v| v.as_i64()),
+                                    duration_ms: obj.get("duration_ms").and_then(|v| v.as_i64()),
+                                    is_error: obj.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false),
+                                };
+                                let usage_stats = usage_stats.clone();
+                                tokio::spawn(async move { usage_stats.insert_turn(turn).await });
                             }
                             publish(&events, &run_id, session_id.as_deref(), &slug, &mut seq, &t, obj);
                         }
