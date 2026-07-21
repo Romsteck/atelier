@@ -259,6 +259,9 @@ function reducer(state, a) {
       if (a.autoSend) c.autoSend = a.autoSend;
       if (a.scanKind) c.scanKind = a.scanKind;
       if (a.effort) c.effort = a.effort;
+      // Modèle (donc moteur) choisi à la création via le menu du « + » : graine du
+      // sélecteur du panneau, qui retomberait sinon sur la préférence localStorage.
+      if (a.modelId) c.seedModelId = a.modelId;
       // Mode imposé au lancement (ex. plan depuis « Résoudre tout ») : seedé ici pour que
       // le sélecteur du panneau l'affiche immédiatement (sans lui, il retombait sur la
       // préférence localStorage — potentiellement « bypass » — alors que le run part en plan).
@@ -801,8 +804,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     return () => document.removeEventListener('visibilitychange', clear);
   }, [state.active]);
 
-  const newConversation = useCallback(() => {
-    dispatch({ type: 'NEW_PANEL', key: newKey() });
+  // `modelId` (optionnel) = modèle pré-sélectionné, donc MOTEUR pré-sélectionné : posé
+  // par le menu du bouton « + » (NewConversationButton). Simple graine du sélecteur du
+  // panneau — rien n'est figé tant qu'aucun tour n'est parti.
+  const newConversation = useCallback((opts) => {
+    dispatch({ type: 'NEW_PANEL', key: newKey(), modelId: opts?.modelId });
   }, []);
 
   // `engine` vient de l'entrée d'historique (chaque conversation listée porte son moteur).

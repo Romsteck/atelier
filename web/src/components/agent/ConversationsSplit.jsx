@@ -1,10 +1,10 @@
 import { useRef, useState, useEffect } from 'react';
-import { Plus, MessageSquarePlus, X, FileCode2, GitCommit, FileDiff } from 'lucide-react';
+import { MessageSquarePlus, X, FileCode2, GitCommit, FileDiff } from 'lucide-react';
 import AgentPanel from '../AgentPanel';
-import Button from '../Button';
 import FileViewerPanel from './FileViewerPanel';
 import CommitViewerPanel from './CommitViewerPanel';
 import WorkingDiffPanel from './WorkingDiffPanel';
+import NewConversationButton from './NewConversationButton';
 import { useAgentConversations } from '../../context/AgentConversationsContext';
 import { useIsNarrow } from '../../hooks/useMediaQuery';
 
@@ -18,7 +18,7 @@ const MAX_SPLIT = 3;
 export default function ConversationsSplit() {
   // `active`/`setActive` sont désormais propriétés du provider (état synchronisé
   // cross-PC) : la restauration + la validité de l'actif sont gérées là-bas.
-  const { order, convos, active, unread, setActive, convName, newConversation, closeConversation, focusReq } = useAgentConversations();
+  const { order, convos, active, unread, setActive, convName, closeConversation, focusReq } = useAgentConversations();
   const ref = useRef(null);
   const [width, setWidth] = useState(0);
   const narrow = useIsNarrow(); // < lg : jamais de grille multi-volets (chat mono-panneau)
@@ -56,9 +56,7 @@ export default function ConversationsSplit() {
       <div ref={ref} className="h-full min-h-0 flex flex-col items-center justify-center bg-gray-900 text-center px-4">
         <MessageSquarePlus className="w-10 h-10 text-gray-700 mb-3" />
         <div className="text-[13px] text-gray-500 mb-3">Aucune conversation ouverte.</div>
-        <Button variant="primary" size="sm" icon={Plus} onClick={newConversation}>
-          Nouvelle conversation
-        </Button>
+        <NewConversationButton variant="wide" />
       </div>
     );
   }
@@ -101,10 +99,7 @@ export default function ConversationsSplit() {
         ) : (
           <div className="flex-1" />
         )}
-        <button onClick={newConversation} title="Nouvelle conversation"
-          className="px-2.5 shrink-0 text-gray-500 hover:text-gray-200 hover:bg-gray-800">
-          <Plus className="w-4 h-4" />
-        </button>
+        <NewConversationButton className="px-2.5 h-full text-gray-500 hover:text-gray-200 hover:bg-gray-800" />
       </div>
 
       {tabbed ? (

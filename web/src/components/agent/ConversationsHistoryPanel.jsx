@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Pencil, Check, X } from 'lucide-react';
+import { Trash2, Pencil, Check, X } from 'lucide-react';
 import { useAgentConversations } from '../../context/AgentConversationsContext';
 import { ENGINES } from '../../lib/agentModels';
 import ConfirmModal from '../ConfirmModal';
+import NewConversationButton from './NewConversationButton';
 
 // Pastille du moteur d'une conversation. Une entrée sans `engine` date d'avant le
 // second moteur → Claude. Teintée par moteur pour distinguer les deux d'un coup d'œil.
@@ -36,7 +37,7 @@ function ago(ms) {
 // Panneau latéral listant TOUTES les conversations de l'app (sessions SDK). Ouvrir =
 // (re)mettre dans le split ; les conversations fermées sont ré-ouvrables ici.
 export default function ConversationsHistoryPanel({ active }) {
-  const { allConvos, unavailableEngines, order, convos, refreshAll, openConversation, newConversation, renameBySid, removeBySid } =
+  const { allConvos, unavailableEngines, order, convos, refreshAll, openConversation, renameBySid, removeBySid } =
     useAgentConversations();
   const [editing, setEditing] = useState(null); // sid en cours de renommage
   const [editTitle, setEditTitle] = useState('');
@@ -59,10 +60,7 @@ export default function ConversationsHistoryPanel({ active }) {
     <div className="h-full min-h-0 flex flex-col bg-gray-900">
       <div className="flex items-center justify-between px-3 h-9 shrink-0 border-b border-gray-800">
         <span className="text-[12px] text-gray-400">Conversations</span>
-        <button onClick={newConversation} title="Nouvelle conversation"
-          className="p-1 rounded-sm text-gray-500 hover:text-gray-200 hover:bg-gray-800">
-          <Plus className="w-4 h-4" />
-        </button>
+        <NewConversationButton />
       </div>
 
       {/* Historique partiel : un moteur n'a pas répondu au dernier refresh. Les entrées

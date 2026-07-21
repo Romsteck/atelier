@@ -421,7 +421,11 @@ export default function AgentPanel({ panelKey }) {
   const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, changeEffort, closeConversation } = useAgentConversations();
   const convo = convos[panelKey];
 
-  const [modelId, setModelId] = useState(() => resolveModelId(localStorage.getItem('agent:model')));
+  // `seedModelId` = moteur/modèle choisi au « + » (menu de création) ; il prime sur la
+  // préférence globale, qui reste le défaut d'une conversation ouverte autrement.
+  const [modelId, setModelId] = useState(() =>
+    resolveModelId(convo?.seedModelId || localStorage.getItem('agent:model')),
+  );
   // Effort de CE panneau : l'effort imposé au lancement (ex. 'max' depuis « Résoudre »)
   // prime sur la préférence stockée. Ne persiste PAS un effort synchronisé depuis la
   // conversation (sinon « Résoudre » polluerait la préférence globale) — seul un clic
