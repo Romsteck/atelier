@@ -10,7 +10,9 @@ import { apiErr } from '../utils/apiErr';
 import { useAgentConversations } from '../context/AgentConversationsContext';
 import { describeTool, splitPath, charsToTokens, formatTokens, toolTarget } from '../lib/toolDisplay';
 import { TOOL_ICONS, useSmoothCount } from '../lib/toolPresentation';
-import { MODELS, MODES, buildSettings, resolveModelId, modelIdFromApi } from '../lib/agentModels';
+import {
+  MODELS, MODES, ENGINES, buildSettings, resolveModelId, modelIdFromApi, modelsForEngine, engineOfModelId, effortFor,
+} from '../lib/agentModels';
 
 // Réflexion = compteur SEUL (jamais le texte). Le front ne reçoit que `chars` (le serveur
 // n'envoie aucun détail), affiché en tokens (≈ chars/4). Non interactif, rien à déplier.
@@ -456,14 +458,34 @@ export default function AgentPanel({ panelKey }) {
   // ci-dessous (settings serveur, activeMode/activeModel, effort imposé par
   // « Résoudre tout ») qui écraseraient la préférence de l'utilisateur.
 
+  // Moteur de la conversation. Une conversation LIÉE (sid acquis) l'a FIGÉ au binding :
+  // le sélecteur de modèle est alors restreint à ce moteur (un thread Codex ne peut pas
+  // être repris par Claude). Une conversation sans `engine` connu mais déjà liée est une
+  // conversation Claude d'avant l'ajout du second moteur. Sur un BROUILLON, le moteur
+  // découle du modèle choisi (libre).
+  // WHY le verrou suit `sid` SEUL : un moteur mémorisé à l'émission du 1er message (avant
+  // toute session) verrouillait le brouillon même quand ce tour échouait (auth Codex morte)
+  // — l'utilisateur ne pouvait plus revenir à Claude. Tant qu'il n'y a pas de binding réel,
+  // le sélecteur reste libre (la pastille optimiste, elle, peut afficher `convo.engine`).
+  const boundEngine = convo?.sid ? (convo.engine || convo.settings?.engine || 'claude') : null;
+  const engine = boundEngine || engineOfModelId(modelId);
+  const engineLocked = !!boundEngine;
+
+  // Verrou d'engine : si la préférence locale pointe un modèle d'un AUTRE moteur que
+  // celui de la session, on retombe sur le modèle par défaut du moteur de la session.
+  useEffect(() => {
+    if (!boundEngine) return;
+    setModelId((id) => (engineOfModelId(id) === boundEngine ? id : resolveModelId(null, boundEngine)));
+  }, [boundEngine]);
+
   // Vérité session → sélecteur MODÈLE : priorité au modèle RÉSOLU annoncé live
   // (activeModel, events system/model), sinon au modèle demandé persisté serveur
   // (settings.model — null = défaut Opus explicite). `undefined` = aucune info
   // (brouillon neuf / conversation legacy sans meta) → préférence locale conservée.
   const serverModel = convo?.activeModel ?? (convo?.settings ? (convo.settings.model ?? null) : undefined);
   useEffect(() => {
-    if (serverModel !== undefined) setModelId(modelIdFromApi(serverModel));
-  }, [serverModel]);
+    if (serverModel !== undefined) setModelId(modelIdFromApi(serverModel, engine));
+  }, [serverModel, engine]);
 
   // Reflète l'effort de la conversation (settings serveur au chargement, ou effort
   // imposé au lancement ex. 'max' depuis « Résoudre ») dès qu'il est connu.
@@ -643,12 +665,20 @@ export default function AgentPanel({ panelKey }) {
   }, [convo?.activeMode]);
 
   const selModel = MODELS.find((m) => m.id === modelId) || MODELS[0];
+  // Effort AFFICHÉ : la préférence globale peut porter un niveau que ce modèle n'a pas
+  // (ex. 'max' hérité de Claude sur un modèle Codex) → palier équivalent s'il existe
+  // (max→xhigh), sinon défaut du modèle — sans écraser la préférence (même règle que
+  // buildSettings, d'où le helper partagé `effortFor`).
+  const effEff = effortFor(selModel, effort);
   const onChangeModel = (id) => {
+    const m = MODELS.find((x) => x.id === id);
+    // Garde-fou : jamais un modèle d'un autre moteur que celui de la session (le
+    // sélecteur ne les propose pas, mais un état stale ne doit pas passer au backend).
+    if (!m || (engineLocked && m.engine !== boundEngine)) return;
     setModelId(id);
     localStorage.setItem('agent:model', id); // choix délibéré → préférence globale
-    const m = MODELS.find((x) => x.id === id);
-    if (m && m.efforts.length && !m.efforts.includes(effort)) chooseEffort(m.efforts[m.efforts.length - 1]);
-    if (live) changeModel(panelKey, m?.model || null); // session vivante → setModel à chaud
+    if (m.efforts.length && !m.efforts.includes(effort)) chooseEffort(effortFor(m, effort));
+    if (live) changeModel(panelKey, m.model || null); // session vivante → setModel à chaud
   };
   const onChangeMode = (id) => {
     setMode(id);
@@ -660,8 +690,8 @@ export default function AgentPanel({ panelKey }) {
   // de la frappe : taper ne re-render que le Composer.
   const onSend = useCallback((text, images) => {
     if (running) return;
-    sendMessage(panelKey, text, buildSettings({ modelId, effort, mode }), images);
-  }, [running, mode, modelId, effort, panelKey, sendMessage]);
+    sendMessage(panelKey, text, buildSettings({ modelId, effort: effEff, mode }), images);
+  }, [running, mode, modelId, effEff, panelKey, sendMessage]);
 
   const stop = useCallback(() => cancel(panelKey), [cancel, panelKey]);
   const submitAnswer = useCallback((request_id, payload) => answer(panelKey, request_id, payload), [answer, panelKey]);
@@ -769,6 +799,10 @@ export default function AgentPanel({ panelKey }) {
         <span className="text-gray-500 truncate max-w-[120px]" title={`modèle : ${convo.activeModel || selModel.label}`}>
           {convo.activeModel || selModel.label}
         </span>
+        {/* Badge discret du moteur (même traitement que les chips d'outils). */}
+        <span className={TOOL_CHIP} title={`moteur : ${ENGINES[engine]?.label || engine}`}>
+          {ENGINES[engine]?.label || engine}
+        </span>
         {convo.loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-600" />}
         <div className="ml-auto flex items-center gap-2">
           {sdkMsg && (
@@ -777,7 +811,9 @@ export default function AgentPanel({ panelKey }) {
               {sdkMsg.text}
             </span>
           )}
-          {sdk?.update_available && (
+          {/* MAJ du Claude Agent SDK : hors sujet sur une conversation Codex (son SDK a
+              son propre bandeau dans Paramètres → Codex). */}
+          {sdk?.update_available && engine === 'claude' && (
             <Button variant="warning" size="xs" onClick={onUpdateSdk} loading={updatingSdk}
               title={`MAJ Agent SDK : ${sdk.installed} → ${sdk.latest}`}>
               {updatingSdk ? 'MAJ…' : `MAJ ${sdk.latest}`}
@@ -848,11 +884,20 @@ export default function AgentPanel({ panelKey }) {
           Les valeurs affichées se resynchronisent sur les settings serveur de la
           conversation (agent_conversation_meta) — cohérentes entre PCs. */}
       <div className="flex items-center flex-wrap gap-x-3 gap-y-1.5 px-3 py-1.5 border-t border-gray-800 bg-gray-950/40 shrink-0">
+        {/* Brouillon : choix libre du moteur (groupes) — c'est le SEUL moment où il se
+            décide. Conversation liée : uniquement les modèles de SON moteur (verrou). */}
         <label className="flex items-center gap-1.5 w-full sm:w-auto">
           <span className="text-[10px] uppercase tracking-wider text-gray-500">Modèle</span>
           <select value={modelId} onChange={(e) => onChangeModel(e.target.value)}
+            title={engineLocked ? `Moteur ${ENGINES[engine]?.label || engine} figé pour cette conversation` : undefined}
             className="flex-1 sm:flex-none h-[29px] rounded-md border border-gray-700/80 bg-gray-800/60 text-[11px] text-gray-200 px-1.5 focus:outline-none focus:border-blue-500">
-            {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            {engineLocked
+              ? modelsForEngine(engine).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)
+              : Object.values(ENGINES).map((en) => (
+                  <optgroup key={en.id} label={en.label}>
+                    {modelsForEngine(en.id).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </optgroup>
+                ))}
           </select>
         </label>
         <div className="flex items-center gap-1.5">
@@ -868,8 +913,8 @@ export default function AgentPanel({ panelKey }) {
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] uppercase tracking-wider text-gray-500">Effort</span>
             <Segmented
-              options={selModel.efforts.map((e) => ({ id: e, label: e }))}
-              value={effort}
+              options={selModel.efforts.map((e) => ({ id: e, label: selModel.effortLabels?.[e] || e }))}
+              value={effEff}
               onChange={chooseEffort}
               disabled={running}
               title={

@@ -238,6 +238,13 @@ CREATE TABLE IF NOT EXISTS agent_conversation_meta (
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (slug, session_id)
 );
+-- engine — moteur d'agent de la conversation ('claude' | 'codex'), FIGÉ au binding
+-- de session. WHY une colonne plutôt qu'une déduction : les deux moteurs stockent
+-- leurs transcripts dans des espaces disjoints (sessions SDK Claude vs threads
+-- Codex) — sans cet axe, l'API ne saurait pas à quel runner adresser un
+-- resume/list/delete pour un sessionId donné. DEFAULT 'claude' : tout le legacy
+-- est Claude, les lignes existantes se qualifient donc correctement d'office.
+ALTER TABLE agent_conversation_meta ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'claude';
 
 -- ---------------------------------------------------------------------------
 -- agent_auth — singleton : token OAuth abonnement LONGUE DURÉE du runner/scan
@@ -292,6 +299,36 @@ CREATE TABLE IF NOT EXISTS app_claude_auth (
     CONSTRAINT app_claude_auth_single CHECK (id = 1)
 );
 INSERT INTO app_claude_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- codex_auth — singleton : authentification du moteur Codex (OAuth abonnement
+-- ChatGPT UNIQUEMENT, jamais de clé API) + télémétrie d'auth.
+-- WHY ce store ne fait PAS autorité, contrairement à agent_auth : la vérité
+-- runtime de Codex est le fichier $CODEX_HOME/auth.json, que le CLI relit ET
+-- réécrit seul (rotation du refresh token à chaque tour). Ce que porte la table,
+-- c'est le SEED de ce fichier — le contenu d'auth.json collé depuis Paramètres,
+-- gardé ici pour (1) restaurer le fichier après une perte de /var/lib, (2) servir
+-- le statut à l'UI, (3) dédupliquer les notifications d'expiration. Le flow
+-- device-login, lui, écrit auth.json DIRECTEMENT via le CLI et ne passe pas par
+-- PG : `configured=false` avec un auth.json présent est donc un état NORMAL, pas
+-- une incohérence. En clair (base root-only, même exposition qu'agent_auth).
+--   token            = seed auth.json collé (NULL = jamais collé)
+--   last_ok_at       = dernier tour/smoke-test authentifié OK
+--   last_error_at    = dernière panne d'auth observée
+--   last_notified_at = watermark de dédup des notifications (claim atomique)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS codex_auth (
+    id               INTEGER      PRIMARY KEY DEFAULT 1,
+    token            TEXT,
+    updated_at       TIMESTAMPTZ,
+    last_ok_at       TIMESTAMPTZ,
+    last_error_at    TIMESTAMPTZ,
+    last_error_msg   TEXT,
+    last_notified_at TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT codex_auth_single CHECK (id = 1)
+);
+INSERT INTO codex_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- studio_state — RETIRÉE (2026-06-21). Le singleton « app ouverte » n'a plus de

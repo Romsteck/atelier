@@ -197,10 +197,15 @@ export const cancelSurveillanceSweep = () => api.post('/surveillance/sweep/cance
 export const getSweepSchedule = () => api.get('/surveillance/sweep/schedule');
 export const putSweepSchedule = (body) => api.put('/surveillance/sweep/schedule', body);
 
-// ========== Agent (Claude Agent SDK chat — session streaming) ==========
+// ========== Agent (chat multi-moteurs : Claude Agent SDK / Codex SDK) ==========
+// `engine` ('claude' par défaut, ou 'codex') est FIGÉ au binding de session : il part
+// dans le body au 1er tour, puis en query-string pour retrouver la conversation (les
+// deux moteurs ont des stores de sessions distincts).
+const engineParams = (engine) => (engine && engine !== 'claude' ? { engine } : {});
+
 // Démarre une SESSION (1er tour) : renvoie { run_id }. Le flux arrive ensuite par
 // WebSocket (type "agent:event", filtré par run_id côté UI).
-// body: { prompt, effort?, images?: [{media_type, data(base64)}], ... }.
+// body: { prompt, engine?, effort?, images?: [{media_type, data(base64)}], ... }.
 export const startAgentQuery = (slug, body) =>
   api.post(`/apps/${slug}/agent/query`, body);
 // Tour utilisateur suivant dans la MÊME session (mémoire conservée).
@@ -227,23 +232,26 @@ export const setAgentModel = (slug, runId, model) =>
   api.post(`/apps/${slug}/agent/runs/${runId}/set_model`, { model });
 // Reprend une conversation FERMÉE (session sur disque) : nouveau process, même
 // session_id, mémoire complète. = startAgentQuery avec body.resume = session_id.
+// Le body porte `engine` (moteur figé de la conversation) comme le 1er tour.
 export const resumeAgentQuery = (slug, sid, body) =>
   api.post(`/apps/${slug}/agent/query`, { ...body, resume: sid });
-// Conversations = sessions SDK persistées. La clé stable est le session_id.
+// Conversations = sessions SDK persistées (les DEUX moteurs, chaque item porte son
+// `engine`). La clé stable est le session_id.
 export const listConversations = (slug) =>
   api.get(`/apps/${slug}/agent/conversations`);
-// Snapshot d'une conversation : { items, live, run_id }. items = transcript normalisé.
-export const getConversation = (slug, sid) =>
-  api.get(`/apps/${slug}/agent/conversations/${sid}`);
-export const renameConversation = (slug, sid, title) =>
-  api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title });
+// Snapshot d'une conversation : { items, live, run_id, settings }. items = transcript
+// normalisé ; settings.engine = moteur figé de la session.
+export const getConversation = (slug, sid, engine) =>
+  api.get(`/apps/${slug}/agent/conversations/${sid}`, { params: engineParams(engine) });
+export const renameConversation = (slug, sid, title, engine) =>
+  api.patch(`/apps/${slug}/agent/conversations/${sid}`, { title }, { params: engineParams(engine) });
 // Persiste l'effort choisi pour la conversation (agent_conversation_meta). L'effort
 // SDK étant figé au démarrage, le vrai changement passe par un recycle de session
 // (cancel → resume) — cet appel fixe l'INTENTION pour les snapshots/autres PCs.
-export const setConversationEffort = (slug, sid, effort) =>
-  api.patch(`/apps/${slug}/agent/conversations/${sid}/settings`, { effort });
-export const deleteConversation = (slug, sid) =>
-  api.delete(`/apps/${slug}/agent/conversations/${sid}`);
+export const setConversationEffort = (slug, sid, effort, engine) =>
+  api.patch(`/apps/${slug}/agent/conversations/${sid}/settings`, { effort }, { params: engineParams(engine) });
+export const deleteConversation = (slug, sid, engine) =>
+  api.delete(`/apps/${slug}/agent/conversations/${sid}`, { params: engineParams(engine) });
 // État d'UI des onglets ouverts (sync cross-PC) : { tabs, active }. Autoritaire
 // côté serveur ; le PUT déclenche un broadcast WS `agent:open-tabs`.
 export const getAgentOpenTabs = (slug) =>
@@ -282,6 +290,30 @@ export const probeAppsClaudeToken = () =>
 export const setAppsClaudeToken = (token) =>
   api.post('/agent/apps-token', { token }, { timeout: 120000 });
 export const clearAppsClaudeToken = () => api.delete('/agent/apps-token');
+
+// ========== Moteur Codex (OpenAI Codex SDK) ==========
+// Version du SDK Codex installée vs dernière (npm) + MAJ in-place du runner —
+// même contrat que le SDK Claude ci-dessus.
+export const getCodexSdkVersion = () => api.get('/agent/codex/sdk/version');
+export const updateCodexSdk = (version) =>
+  api.post('/agent/codex/sdk/update', version ? { version } : {}, { timeout: 200000 });
+
+// Authentification Codex = OAuth abonnement ChatGPT UNIQUEMENT (jamais de clé API).
+// Vue REDACTÉE : { configured, available, auth_file, last_ok_at, last_error_at, ... }.
+// `probe` = statut + smoke-test live (vrai tour d'inférence) → timeout long.
+export const getCodexAuth = (probe = false) =>
+  api.get('/agent/codex/auth', probe ? { params: { probe: 1 }, timeout: 120000 } : undefined);
+// Colle un `~/.codex/auth.json` généré sur un poste : validé par un vrai tour AVANT
+// persistance (timeout long, round-trip modèle).
+export const setCodexAuth = (auth_json) =>
+  api.post('/agent/codex/auth', { auth_json }, { timeout: 120000 });
+export const clearCodexAuth = () => api.delete('/agent/codex/auth');
+
+// Flow « device auth » headless : démarre (202 {status:'pending', url, code}, 409 si
+// déjà en cours), consulte l'avancement, annule (kill du process `codex login`).
+export const startCodexDeviceLogin = () => api.post('/agent/codex/auth/device-login');
+export const getCodexDeviceLogin = () => api.get('/agent/codex/auth/device-login');
+export const cancelCodexDeviceLogin = () => api.delete('/agent/codex/auth/device-login');
 
 // ========== Source (explorateur fichiers + git du working tree — Studio) ==========
 // Lit l'arbre de travail réel `…/{slug}/src` (≠ /git/repos qui sert les bare repos).

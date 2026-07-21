@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Settings2, RefreshCw, Globe, Link2, Plug, CheckCircle2, XCircle,
   AlertTriangle, ExternalLink, Power, Trash2, RotateCw, Server, KeyRound, ShieldCheck,
+  Bot, Smartphone, Loader2, HelpCircle,
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
@@ -12,6 +13,8 @@ import {
   getHomerouteAppRoutes, assignHomerouteRoute, removeHomerouteRoute, toggleHomerouteRoute,
   getAgentAuth, probeAgentAuth, setAgentAuth, clearAgentAuth, getSdkVersion, updateSdk,
   getAppsClaudeToken, probeAppsClaudeToken, setAppsClaudeToken, clearAppsClaudeToken,
+  getCodexAuth, setCodexAuth, clearCodexAuth, getCodexSdkVersion, updateCodexSdk,
+  startCodexDeviceLogin, getCodexDeviceLogin, cancelCodexDeviceLogin,
 } from '../api/client';
 import { apiErr } from '../utils/apiErr';
 import { useToast } from '../hooks/useToast';
@@ -23,9 +26,17 @@ const CARD = 'rounded-xl border border-gray-700/70 bg-gray-800/50 p-5';
 // Onglets de la page. L'ordre = ordre d'affichage ; `id` = valeur de `?tab=`.
 const TABS = [
   { id: 'auth', label: 'Authentification', icon: ShieldCheck },
+  { id: 'codex', label: 'Moteur Codex', icon: Bot },
   { id: 'homeroute', label: 'Liaison Homeroute', icon: Server },
   { id: 'hostnames', label: 'Hostnames', icon: Globe },
 ];
+
+// Cadence de consultation du flow device-login. WHY du polling ici (alors que la
+// plateforme proscrit le polling au profit du WebSocket) : ce flow est PONCTUEL,
+// déclenché par un clic, borné dans le temps (code valable 15 min) et piloté par un
+// process externe `codex login` — pas un flux d'état live à diffuser.
+const DEVICE_POLL_MS = 2000;
+const DEVICE_POLL_MAX = Math.ceil((16 * 60 * 1000) / DEVICE_POLL_MS); // garde-fou : ~16 min
 
 function fmtTime(iso) {
   if (!iso) return null;
@@ -84,17 +95,157 @@ export default function Settings() {
   const [probingAppsTok, setProbingAppsTok] = useState(false);
   const [appsTokProbe, setAppsTokProbe] = useState(null);
 
+  // ── Moteur Codex (OAuth abonnement ChatGPT — jamais de clé API) ────────
+  const [codexAuth, setCodexAuthState] = useState(null); // statut masqué
+  const [codexSdk, setCodexSdk] = useState(null);        // { installed, latest, update_available }
+  const [codexJson, setCodexJson] = useState('');        // saisie auth.json (write-only)
+  const [revealCodexJson, setRevealCodexJson] = useState(false);
+  const [savingCodex, setSavingCodex] = useState(false);
+  const [probingCodex, setProbingCodex] = useState(false);
+  const [codexProbe, setCodexProbe] = useState(null);
+  const [updatingCodexSdk, setUpdatingCodexSdk] = useState(false);
+  // Flow device-login : { status:'idle'|'pending'|'ok'|'error', url?, code?, error? }
+  const [device, setDevice] = useState({ status: 'idle' });
+  const [startingDevice, setStartingDevice] = useState(false);
+
   const loadAuth = useCallback(async () => {
-    const [a, v, t] = await Promise.all([
+    const [a, v, t, cx, cv] = await Promise.all([
       getAgentAuth().catch(() => null),
       getSdkVersion().catch(() => null),
       getAppsClaudeToken().catch(() => null),
+      getCodexAuth().catch(() => null),
+      getCodexSdkVersion().catch(() => null),
     ]);
     if (a?.data) setSdkAuth(a.data);
     if (v?.data) setSdk(v.data);
     if (t?.data) setAppsTok(t.data);
+    if (cx?.data) setCodexAuthState(cx.data);
+    if (cv?.data) setCodexSdk(cv.data);
   }, []);
   useEffect(() => { loadAuth(); }, [loadAuth]);
+
+  // Reprend l'affichage d'un flow déjà en cours (démarré depuis un autre onglet/PC).
+  useEffect(() => {
+    let cancelled = false;
+    getCodexDeviceLogin()
+      .then((r) => { if (!cancelled && r.data?.status === 'pending') setDevice(r.data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Consultation bornée du flow tant qu'il est `pending` ; s'arrête sur ok/error, à
+  // l'annulation, au démontage, et au plafond (code expiré côté OpenAI).
+  const refreshCodexAuth = useCallback(async () => {
+    const r = await getCodexAuth().catch(() => null);
+    if (r?.data) setCodexAuthState(r.data);
+  }, []);
+  useEffect(() => {
+    if (device.status !== 'pending') return undefined;
+    let stopped = false;
+    let ticks = 0;
+    const id = setInterval(async () => {
+      if (stopped) return;
+      if (++ticks > DEVICE_POLL_MAX) {
+        setDevice({ status: 'error', error: 'Code expiré — relance la connexion.' });
+        return;
+      }
+      try {
+        const r = await getCodexDeviceLogin();
+        const d = r.data || {};
+        if (stopped) return;
+        if (d.status === 'pending') {
+          // L'URL/le code peuvent arriver après le 202 (lecture du stdout de `codex login`).
+          setDevice((prev) => ({ ...prev, ...d, status: 'pending' }));
+          return;
+        }
+        setDevice(d.status ? d : { status: 'idle' });
+        if (d.status === 'ok') {
+          flash('ok', 'Connexion ChatGPT réussie — le moteur Codex est authentifié.');
+          refreshCodexAuth();
+        } else if (d.status === 'error') {
+          flash('error', d.error || 'Connexion par code d’appareil échouée.');
+        }
+      } catch {
+        /* transitoire (API qui redémarre) : on retente au tick suivant */
+      }
+    }, DEVICE_POLL_MS);
+    return () => { stopped = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device.status, refreshCodexAuth]);
+
+  const onStartDevice = async () => {
+    setStartingDevice(true);
+    setCodexProbe(null);
+    try {
+      const r = await startCodexDeviceLogin();
+      setDevice({ status: 'pending', ...(r.data || {}) });
+    } catch (e) {
+      // 409 = un flow tourne déjà (autre onglet) → on l'affiche au lieu d'échouer.
+      if (e.response?.status === 409) {
+        const cur = await getCodexDeviceLogin().catch(() => null);
+        if (cur?.data) setDevice(cur.data);
+        else flash('error', 'Une connexion est déjà en cours.');
+      } else {
+        flash('error', apiErr(e, 'impossible de démarrer la connexion'));
+      }
+    } finally { setStartingDevice(false); }
+  };
+
+  const onCancelDevice = async () => {
+    try {
+      await cancelCodexDeviceLogin();
+    } catch {
+      /* déjà terminé */
+    }
+    setDevice({ status: 'idle' });
+  };
+
+  const onSaveCodexJson = async () => {
+    const json = codexJson.trim();
+    if (!json) return;
+    setSavingCodex(true); setCodexProbe(null);
+    try {
+      const r = await setCodexAuth(json);
+      setCodexAuthState(r.data);
+      setCodexJson('');
+      flash('ok', 'auth.json validé et enregistré — le moteur Codex est prêt.');
+    } catch (e) {
+      flash('error', apiErr(e, 'échec de validation de l’auth.json'));
+    } finally { setSavingCodex(false); }
+  };
+
+  const onVerifyCodex = async () => {
+    setProbingCodex(true); setCodexProbe(null);
+    try {
+      const r = await getCodexAuth(true);
+      setCodexAuthState(r.data);
+      setCodexProbe(r.data?.probe || null);
+    } catch (e) {
+      setCodexProbe({ ok: false, error: apiErr(e, 'échec') });
+    } finally { setProbingCodex(false); }
+  };
+
+  const onClearCodex = async () => {
+    try {
+      const r = await clearCodexAuth();
+      setCodexAuthState(r.data);
+      setCodexProbe(null);
+      flash('ok', 'Authentification Codex retirée.');
+    } catch (e) {
+      flash('error', apiErr(e, 'échec du retrait'));
+    }
+  };
+
+  const onUpdateCodexSdk = async () => {
+    setUpdatingCodexSdk(true);
+    try {
+      const r = await updateCodexSdk();
+      setCodexSdk((s) => ({ ...s, installed: r.data?.installed, update_available: false }));
+      flash('ok', `SDK Codex mis à jour (${r.data?.installed || '?'}).`);
+    } catch (e) {
+      flash('error', apiErr(e, 'MAJ SDK Codex échouée'));
+    } finally { setUpdatingCodexSdk(false); }
+  };
 
   const onSaveAppsTok = async () => {
     const tok = appsTokInput.trim();
@@ -313,15 +464,35 @@ export default function Settings() {
   // pilote le badge d'alerte sur chaque onglet.
   const authSt = authState(sdkAuth);
   const appsTokSt = authState(appsTok);
-  const copyCmd = (cmd) => {
-    navigator.clipboard?.writeText(cmd).then(
-      () => flash('ok', 'Commande copiée.'),
+  // WHY : côté Codex, la PREUVE d'authentification est le fichier `~/.codex/auth.json`
+  // (écrit directement par le CLI lors du device-login) ; le seed en base n'est qu'une
+  // sauvegarde et n'est JAMAIS écrit par ce flow. Sans ce mapping, un device-login réussi
+  // resterait affiché « non authentifié » pour toujours (bandeau + badge d'onglet).
+  // `auth_file` a TROIS états : true (présent), false (absent), null/absent (INCONNU —
+  // la sonde de présence a échoué). Un inconnu n'est PAS un « non authentifié » : sans
+  // cette distinction, un serveur qui ne répond pas ferait accuser l'auth à tort.
+  const codexAuthFile = typeof codexAuth?.auth_file === 'boolean' ? codexAuth.auth_file : null;
+  const codexRaw = authState(codexAuthFile ? { ...codexAuth, configured: true } : codexAuth);
+  // Une erreur d'auth datée reste prioritaire (signal réel) ; seul le « rien de connu »
+  // devient `unknown` quand la présence du fichier n'a pas pu être établie.
+  const codexSt = codexRaw === 'unconfigured' && codexAuthFile === null ? 'unknown' : codexRaw;
+  // Il n'y a vraiment rien à vérifier/retirer QUE si l'absence est établie (false) et
+  // qu'aucun seed n'existe en base. En état inconnu on garde les actions ouvertes : le
+  // bouton « Vérifier » est justement ce qui lève le doute.
+  const codexNothingKnown = codexAuthFile === false && !codexAuth?.configured;
+  const copyValue = (value, msg = 'Copié.') => {
+    navigator.clipboard?.writeText(value).then(
+      () => flash('ok', msg),
       () => flash('error', 'Copie impossible.'),
     );
   };
+  const copyCmd = (cmd) => copyValue(cmd, 'Commande copiée.');
   const anyHostIssue = sortedApps.some((a) => a.assigned && (a.drift || a.require_auth === false));
   const tabHealth = {
     auth: authSt === 'error' ? 'error' : authSt === 'unconfigured' ? 'warn' : 'ok',
+    // `unknown` (présence du fichier indéterminée) ne porte AUCUN badge : on n'alerte pas
+    // sur une information qu'on n'a pas — seul un échec avéré ou une absence avérée le fait.
+    codex: codexSt === 'error' ? 'error' : codexSt === 'unconfigured' ? 'warn' : 'ok',
     homeroute:
       (configured && !reachable) || (testResult && !testResult.reachable)
         ? 'error'
@@ -568,6 +739,217 @@ export default function Settings() {
           )}
         </div>
       </section>
+      )}
+
+      {/* ── Onglet Moteur Codex (OAuth abonnement ChatGPT uniquement) ───── */}
+      {activeTab === 'codex' && (
+      <>
+      <section className={CARD}>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
+          <Smartphone className="h-4 w-4 text-blue-400" /> Connexion abonnement ChatGPT (recommandé)
+        </h2>
+        <p className="mb-4 text-xs text-gray-500">
+          Le moteur Codex s&apos;authentifie avec ton <strong>abonnement ChatGPT</strong> — jamais avec
+          une clé API. Le serveur étant headless, la connexion passe par un <em>code d&apos;appareil</em> :
+          Atelier lance <code>codex login</code>, affiche le lien et le code, tu valides depuis
+          n&apos;importe quel navigateur connecté, et l&apos;<code>auth.json</code> est écrit sur le serveur.
+        </p>
+
+        {/* Bandeau de statut (même source que le badge d'onglet : authState) */}
+        <div className="mb-4 text-sm">
+          {codexSt === 'error' ? (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-red-700 dark:text-red-300">
+              <XCircle className="h-4 w-4" /> Authentification en échec — reconnecte-toi
+              {codexAuth?.last_error_msg && <span className="text-gray-500">· {codexAuth.last_error_msg}</span>}
+            </span>
+          ) : codexSt === 'unconfigured' ? (
+            <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="h-4 w-4" /> Non authentifié — le moteur Codex est indisponible
+              tant qu&apos;aucun <code className="mx-1">auth.json</code> n&apos;est présent.
+            </span>
+          ) : codexSt === 'unknown' ? (
+            // Ton NEUTRE volontaire : on ne sait pas si l'auth.json est là (sonde en échec),
+            // ce n'est ni un succès ni un échec d'authentification.
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-gray-400">
+              <HelpCircle className="h-4 w-4" /> État indéterminé — la présence de
+              <code className="mx-1">auth.json</code> n&apos;a pas pu être vérifiée ; relance la vérification.
+            </span>
+          ) : (
+            <span className="inline-flex flex-wrap items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-4 w-4" /> Authentifié (abonnement ChatGPT)
+              {codexAuth?.last_ok_at && <span className="text-gray-500">· vérifié {fmtTime(codexAuth.last_ok_at)}</span>}
+            </span>
+          )}
+        </div>
+
+        {device.status === 'pending' ? (
+          <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4">
+            <div className="mb-3 inline-flex items-center gap-2 text-sm text-blue-700 dark:text-blue-200">
+              <Loader2 className="h-4 w-4 animate-spin" /> En attente de ton approbation…
+            </div>
+
+            <div className="mb-3">
+              <div className={LBL}>1. Ouvre ce lien</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={device.url || 'https://auth.openai.com/codex/device'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 break-all font-mono text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                >
+                  {device.url || 'https://auth.openai.com/codex/device'} <ExternalLink className="h-3 w-3 shrink-0" />
+                </a>
+                <Button variant="neutral" size="sm"
+                  onClick={() => copyValue(device.url || 'https://auth.openai.com/codex/device', 'Lien copié.')}>
+                  Copier le lien
+                </Button>
+              </div>
+            </div>
+
+            <div className="mb-3">
+              <div className={LBL}>2. Saisis ce code (valable 15 minutes)</div>
+              <div className="flex flex-wrap items-center gap-3">
+                <code className="rounded-lg border border-gray-700 bg-gray-900/60 px-4 py-2 font-mono text-2xl tracking-[0.2em] text-gray-100">
+                  {device.code || '…'}
+                </code>
+                <Button variant="neutral" size="md" disabled={!device.code}
+                  onClick={() => copyValue(device.code, 'Code copié.')}>
+                  Copier le code
+                </Button>
+              </div>
+            </div>
+
+            <Button variant="neutral" size="md" icon={XCircle} onClick={onCancelDevice}>
+              Annuler
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={onStartDevice} variant="primary" size="md" icon={Smartphone} loading={startingDevice}>
+              Connexion par code d&apos;appareil
+            </Button>
+            <Button onClick={onVerifyCodex} variant="neutral" size="md" icon={RotateCw} loading={probingCodex}
+              disabled={codexNothingKnown}>
+              Vérifier l&apos;auth actuelle
+            </Button>
+            {!codexNothingKnown && (
+              <Button onClick={onClearCodex} variant="neutral" size="md" icon={Trash2}>
+                Retirer
+              </Button>
+            )}
+            {device.status === 'error' && (
+              <span className="inline-flex items-center gap-1.5 text-sm text-red-700 dark:text-red-300">
+                <XCircle className="h-4 w-4" /> {device.error || 'connexion échouée'}
+              </span>
+            )}
+            {codexProbe && (
+              codexProbe.ok ? (
+                <span className="inline-flex items-center gap-1.5 text-sm text-emerald-700 dark:text-emerald-300">
+                  <CheckCircle2 className="h-4 w-4" /> Auth OK (inférence réussie)
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-sm text-red-700 dark:text-red-300">
+                  <XCircle className="h-4 w-4" /> {codexProbe.error || 'authentification échouée'}
+                </span>
+              )
+            )}
+          </div>
+        )}
+
+        <p className="mt-4 text-xs text-gray-500">
+          Si la validation est refusée, active l&apos;autorisation par appareil dans les
+          paramètres de sécurité de ton compte ChatGPT, puis relance la connexion.
+        </p>
+      </section>
+
+      {/* ── Alternative : coller un auth.json généré sur un poste ────────── */}
+      <section className={`${CARD} mt-5`}>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
+          <KeyRound className="h-4 w-4 text-blue-400" /> Coller un auth.json (alternative)
+        </h2>
+        <p className="mb-3 text-xs text-gray-500">
+          Si le code d&apos;appareil n&apos;aboutit pas : connecte-toi sur <strong>ton poste</strong>,
+          puis colle le contenu du fichier ci-dessous. Il est validé par un vrai tour d&apos;inférence
+          avant d&apos;être écrit côté serveur.
+        </p>
+
+        <div className="mb-4 space-y-2">
+          {['codex login', 'cat ~/.codex/auth.json'].map((cmd) => (
+            <div key={cmd} className="flex items-center gap-2">
+              <code className="flex-1 rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 font-mono text-sm text-gray-200">
+                {cmd}
+              </code>
+              <Button variant="neutral" size="md" onClick={() => copyCmd(cmd)}>Copier</Button>
+            </div>
+          ))}
+        </div>
+
+        <div>
+          <label className={LBL}>
+            Contenu de <code>~/.codex/auth.json</code>
+            <button
+              type="button"
+              onClick={() => setRevealCodexJson((v) => !v)}
+              className="ml-2 text-[10px] text-gray-400 hover:text-gray-200"
+            >
+              {revealCodexJson ? 'masquer' : 'afficher'}
+            </button>
+          </label>
+          <textarea
+            className={`${FIELD} h-24 font-mono ${revealCodexJson ? '' : '[-webkit-text-security:disc]'}`}
+            value={codexJson}
+            onChange={(e) => setCodexJson(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={'{"OPENAI_API_KEY":null,"tokens":{…}}'}
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button onClick={onSaveCodexJson} variant="primary" size="md" icon={KeyRound}
+            loading={savingCodex} disabled={!codexJson.trim()}>
+            Enregistrer
+          </Button>
+          <Button onClick={onVerifyCodex} variant="neutral" size="md" icon={RotateCw} loading={probingCodex}
+            disabled={codexNothingKnown}>
+            Vérifier
+          </Button>
+          {!codexNothingKnown && (
+            <Button onClick={onClearCodex} variant="neutral" size="md" icon={Trash2}>
+              Retirer
+            </Button>
+          )}
+        </div>
+      </section>
+
+      {/* ── SDK Codex (même pattern que le SDK Claude) ───────────────────── */}
+      <section className={`${CARD} mt-5`}>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-100">
+          <Bot className="h-4 w-4 text-blue-400" /> SDK Codex
+        </h2>
+        <p className="mb-3 text-xs text-gray-500">
+          Version de <code>@openai/codex-sdk</code> embarquée par le runner (avec le binaire CLI
+          <code className="mx-1">codex</code> correspondant). La MAJ est appliquée au runner déployé.
+        </p>
+        {codexSdk ? (
+          <div className="text-xs text-gray-500">
+            SDK Codex <code>{codexSdk.installed || '?'}</code>
+            {codexSdk.update_available ? (
+              <>
+                {' → '}<code>{codexSdk.latest}</code> disponible.{' '}
+                <Button onClick={onUpdateCodexSdk} variant="warning" size="xs" loading={updatingCodexSdk}>
+                  Mettre à jour
+                </Button>
+              </>
+            ) : (
+              <span> · à jour</span>
+            )}
+          </div>
+        ) : (
+          <div className="text-xs text-gray-500">Version indisponible.</div>
+        )}
+      </section>
+      </>
       )}
 
       {/* ── Onglet Liaison Homeroute (identité + connexion) ─────────────── */}

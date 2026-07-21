@@ -2,7 +2,7 @@
 
 ## Statut migration (2026-06-15)
 
-> ✅ **Plateforme stabilisée sur Medion** — 5 apps live (`www:3005`, `home:3007`, `trader:3008`, `wallet:3009`, `myfrigo:3010`), l'app `files` décommissionnée (2026-05-31). Atelier tourne en `atelier.service` (4100) : supervisor + apps API + frontend + passerelle dataverse + agent Claude (Studio) + surveillance IA (Claude Agent SDK) + backup restic.
+> ✅ **Plateforme stabilisée sur Medion** — 5 apps live (`www:3005`, `home:3007`, `trader:3008`, `wallet:3009`, `myfrigo:3010`), l'app `files` décommissionnée (2026-05-31). Atelier tourne en `atelier.service` (4100) : supervisor + apps API + frontend + passerelle dataverse + agents Studio (Claude + Codex) + surveillance IA (Claude Agent SDK) + backup restic.
 >
 > ✅ **Path-routing interne LIVE** — les apps sont servies via le proxy même-origine `/apps/{slug}/` (`crates/atelier-api/src/routes/apps_proxy.rs`). Les sous-domaines `{slug}.mynetwk.biz` sont **morts** (404 hr-edge) et `app.mynetwk.biz` n'a **plus de route hr-edge**. Hostname externe fonctionnel = **`atelier.mynetwk.biz`** ; accès direct sans auth en local = `http://127.0.0.1:4100/apps/{slug}/`.
 >
@@ -71,7 +71,7 @@ Plateforme applicative autonome (sur Medion, port 4100). Contient :
 - **Apps** : supervisor Tokio des apps locales (lifecycle, ports, logs, adoption d'unités orphelines) — services `atelier-app-{slug}.service` (slice `atelier-apps.slice`).
 - **Dataverse** : moteur Postgres avec schéma dynamique, passerelle REST gateway-only, dvexpr.
 - **Path-proxy** : sert les apps en même-origine sous `/apps/{slug}/` (strip ou no-strip).
-- **Studio** : **UI custom d'édition** (`AgentWorkspace` : explorateur/diffs/commits + panneau git) + **agent Claude natif** (Agent SDK Node : chat/raisonnement/planification/approbation).
+- **Studio** : **UI custom d'édition** (`AgentWorkspace` : explorateur/diffs/commits + panneau git) + **agents natifs** (chat/raisonnement/planification/approbation) — **Claude** (Agent SDK Node) et **Codex** (OpenAI, GPT 5.6), au choix par conversation.
 - **Surveillance IA** : 3 scans Claude Agent SDK (lecture seule, headless) par app (sécurité, qualité, business) + *sweep* automatique (manuel ou planifié) — crate `atelier-watcher`.
 - **Backup** : restic + rclone vers SMB (incrémental, chiffré, dédupliqué) — crate `atelier-backup`.
 - **Docs** : système de documentation per-app (index de recherche désormais en Postgres `doc_entries`).
@@ -180,9 +180,9 @@ Une app peut être publiée sur `{sub}.mynetwk.biz` via la page **Paramètres** 
 
 > Le supervisor **adopte les unités systemd orphelines** au démarrage (commit `b6cc47f`) même si l'état persisté a divergé.
 
-## Studio — agent Claude natif
+## Studio — agents natifs (Claude + Codex)
 
-Le Studio inclut une **UI custom d'édition** (`AgentWorkspace` : explorateur de fichiers, diffs, commits, panneau git — cf. [Frontend](#frontend--control-panel-web-react--vite)) ET un **agent Claude** (chat, raisonnement, plan, approbation interactive). L'agent est un shim Node (`runner/src/runner.js`) piloté par `routes/agent.rs` et le **Claude Agent SDK** (binaire natif linux-x64). _(L'éditeur code-server `atelier-studio.service`/:8443 a été décommissionné le 2026-06-17.)_
+Le Studio inclut une **UI custom d'édition** (`AgentWorkspace` : explorateur de fichiers, diffs, commits, panneau git — cf. [Frontend](#frontend--control-panel-web-react--vite)) ET un **agent** (chat, raisonnement, plan, approbation interactive). Depuis le 2026-07-21 il y a **deux moteurs** : **Claude** (shim `runner/src/runner.js` + Claude Agent SDK) et **Codex** (shim `runner/src/codex.js` + `@openai/codex-sdk`), tous deux pilotés par `routes/agent.rs`. _(L'éditeur code-server `atelier-studio.service`/:8443 a été décommissionné le 2026-06-17.)_
 
 > Depuis le 2026-06-21, cette UI Studio est une **app Vite séparée** (entrée `studio.html`, base `/studio/`) servie sous `/studio/{slug}`, ouverte en **onglet navigateur dédié** par app (cf. [Frontend](#frontend--control-panel-web-react--vite)) — elle n'est plus montée inline dans la homepage. Le backend agent (`routes/agent.rs`, runner) est inchangé.
 
@@ -207,6 +207,41 @@ Le runner/scan tournent en `hr-studio` avec l'**OAuth abonnement** (`/var/lib/hr
 - **Token longue durée** : Romain génère un token sur son poste (`claude setup-token` → OAuth ~1 an, inference-only), le colle dans **Paramètres → Authentification Claude Agent SDK**. Stocké dans `atelier_meta.agent_auth` (singleton, store [crates/atelier-common/src/agent_auth.rs](crates/atelier-common/src/agent_auth.rs), clair root-only comme les autres secrets), relu **frais** à chaque run et injecté par **stdin** (`oauthToken` → `process.env.CLAUDE_CODE_OAUTH_TOKEN`, jamais argv/env — anti-leak journald, comme MCP_TOKEN). Une ré-auth s'applique **sans restart**. `assertOAuthOnly` ([runner/src/common.js](runner/src/common.js)) accepte désormais le token OU un `.credentials.json` (refuse toujours `ANTHROPIC_API_KEY`).
 - **Détection + remontée** : runner ET scan émettent un event typé `{t:'error', code:'sdk_auth_failed'}` (helper `makeSdkAuthReporter`, regex `SDK_AUTH_RE` + enum `SDK_AUTH_ERRORS` sur `assistant.error`/`api_retry`/`result.errors`/exception). Côté Rust (agent.rs boucle NDJSON + watcher `service.rs`) → **une** notification plateforme rouge « Authentification Claude expirée » (dédup **atomique** en base : claim `agent_auth.last_notified_at`, car un token mort touche chaque scan du sweep + l'agent ; `record_ok` réarme au retour d'un token valide). Intervalle `ATELIER_AGENT_AUTH_NOTIFY_INTERVAL_SECS` (défaut 6 h).
 - **Endpoints** ([routes/agent.rs](crates/atelier-api/src/routes/agent.rs) `global_router`) : `GET /api/agent/sdk/auth` (statut **masqué** ; `?probe=1` = smoke-test live), `POST` (valide le token candidat par un **vrai tour d'inférence** `op:auth_check` AVANT de persister — `op:list` ne validerait PAS l'auth, il est disque-only), `DELETE`. Single-flight `AUTH_PROBING`.
+
+### Moteur Codex (OpenAI GPT 5.6, 2026-07-21)
+
+Le moteur se choisit **dans le sélecteur de modèle** (groupé Claude / Codex) à la création d'une conversation, et se **fige au binding de session** (colonne `engine` d'`agent_conversation_meta`, jamais mise à jour ensuite : les deux moteurs stockent leurs transcripts dans des espaces disjoints, un thread Codex n'est pas reprenable par Claude).
+
+| | **Claude** | **Codex** |
+|---|---|---|
+| SDK | `@anthropic-ai/claude-agent-sdk` | `@openai/codex-sdk` (wrappe le CLI `@openai/codex`) |
+| Shim | `runner/src/runner.js` | `runner/src/codex.js` |
+| Modèles | Opus 4.8, Fable 5 | **`gpt-5.6-sol`** seul (libellé UI « GPT 5.6 ») |
+| Efforts | low→max | **Fast** (`low`) / Medium / High / XHigh — `max` → alias `xhigh` |
+| Auth | setup-token OAuth (stdin) | `$CODEX_HOME/auth.json` (abonnement ChatGPT) |
+| Contexte | `CLAUDE.md` | `AGENTS.md` (symlink généré → `CLAUDE.md`) |
+| MCP studio | oui | **non (v1)** — donc ni `ship`, ni `notify_user`, ni docs tools |
+| Dialogues | AskUserQuestion + gate de plan | non supportés (ignorés avec un diag) |
+
+- ⚠️ **Le slug `gpt-5.6` NU N'EXISTE PAS** côté CLI (seuls les tiers `sol`/`terra`/`luna`) : un run répond `Model metadata for gpt-5.6 not found. Defaulting to fallback metadata` et **dégrade silencieusement**. Toujours un slug de tier.
+- **Même protocole NDJSON** que `runner.js` → la boucle de `run_agent`, le coalescing des deltas, le fold du transcript, l'EventBus et le rendu front sont partagés **sans branche**. Invariant : **exactement un `result` + un `turn_done` par tour**, sur TOUS les chemins (succès, `turn.failed`, exception de sortie non-zéro, interrupt) — sinon `turn_active` reste vrai et l'idle ne se réarme pas. Le CLI émettant `turn.failed` **puis** un exit ≠ 0, le shim ignore l'exception post-verdict.
+- **Modes** : plan → `sandboxMode:'read-only'` ; bypass → `workspace-write` + `networkAccessEnabled`. `approvalPolicy:'never'`. Le sandbox du CLI est l'autorité (pas de `canUseTool` côté Codex).
+- **Multi-tour** : un même objet `Thread` sert tous les tours (chaque tour = un `codex exec … resume <id>` frais). Muter l'objet `threadOptions` change modèle/effort/sandbox **au tour suivant** — mécanisme de `set_model`/`set_mode`.
+- **Persistance « sidecar »** : les rollouts internes du CLI ne sont PAS parsés (format instable). Le shim tient `$CODEX_HOME/atelier/index.json` (méta filtrées par `cwd`, `summary` posé **une seule fois** — `thread.started` est ré-émis à chaque tour) et `atelier/transcripts/{id}.ndjson` (items normalisés) : c'est ce qui sert `op:list`/`op:messages`.
+- **`list_conversations` interroge les deux runners en parallèle** (`tokio::join!`) et tague chaque entrée d'un `engine` ; un moteur en échec sort dans `unavailable` (200 + liste partielle) et le front **conserve** alors les entrées connues de ce moteur (sinon une panne d'un moteur effacerait l'historique à l'écran).
+- **Fin de session forcée** : si le tour se solde par un échec d'auth FATAL (verdict du tour, pas un retry transitoire), le shim ferme la session au lieu de rester pendu jusqu'au reaper d'inactivité (1800 s). Un Stop utilisateur ne déclenche jamais cette garde.
+
+#### Authentification Codex — abonnement ChatGPT UNIQUEMENT
+
+Aucune clé API n'est acceptée (garde symétrique d'`assertOAuthOnly`, sur `CODEX_API_KEY`/`OPENAI_API_KEY`/`CODEX_ACCESS_TOKEN`/`CODEX_AUTH`). ⚠️ Le format `auth.json` porte un champ **`OPENAI_API_KEY` au premier niveau** : la validation est donc **positive** (exige `tokens.access_token` + `tokens.refresh_token`, refuse `auth_mode != chatgpt` et tout champ de clé non vide), appliquée aux **trois** portes (route Rust, `op:set_auth_json`, `op:auth_check`).
+
+1. **Device code (recommandé)** — `POST /api/agent/codex/auth/device-login` lance `codex login --device-auth` en `hr-studio` ; l'UI affiche l'URL + le code (parsés sur stdout, ANSI strippé), Romain approuve sur chatgpt.com, le CLI écrit `auth.json` lui-même. **Aucun secret ne transite par l'UI.**
+2. **Collage d'`auth.json`** — `codex login` sur le poste puis `cat ~/.codex/auth.json` ; validé par un **vrai tour isolé** (`CODEX_HOME` temporaire — sinon un `auth.json` réel masquerait un candidat invalide) avant écriture en 0600 par le runner.
+
+> ⚠️ **La vérité runtime est le FICHIER** `/var/lib/hr-studio/.codex/auth.json`, que le CLI rafraîchit seul. `atelier_meta.codex_auth` n'en porte qu'un **seed** (+ statut + dédup de notif) : `configured=false` avec un `auth.json` présent (cas device-login) est **normal** — l'UI dérive donc l'état d'`auth_file`, pas de `configured`. La restauration du seed ne se déclenche que sur `auth_file == Some(false)` : l'état **indéterminé** (`null`, op injoignable) ne restaure RIEN, sinon un seed périmé écraserait un token vivant (→ erreur terrain « refresh token was already used »).
+> `$CODEX_HOME` **doit exister** avant tout spawn (le CLI refuse de démarrer sinon).
+
+**MAJ des SDK** : `GET/POST /api/agent/{sdk,codex/sdk}/{version,update}` — même mécanique paramétrée par un descripteur d'engine (snapshot → `npm install --save-exact --omit=dev` → vérif version + binaire → smoke-test `op:list` → rollback → re-pin du `package.json` **source**). `@openai/codex-sdk` dépend **en dur** de `@openai/codex` : un seul spec d'install, trois dossiers snapshotés ensemble. Le CLI vendorisé (`@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex`) pèse **336 Mo** → le `node_modules` du runner passe de ~260 Mo à ~595 Mo, rsyncé tel quel par `make deploy`.
 
 ## Surveillance IA (3 scans/app, Claude Agent SDK)
 

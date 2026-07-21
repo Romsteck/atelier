@@ -8,6 +8,13 @@
 //! `model = NULL` means "subscription default" (Opus [1m]) — an explicit state,
 //! distinct from "no row" (legacy conversation, frontend keeps its local prefs).
 //!
+//! La ligne porte aussi l'`engine` de la conversation (`claude` | `codex`), FIGÉ
+//! au binding de session : les deux moteurs stockent leurs transcripts dans des
+//! espaces disjoints, donc c'est cette colonne qui dit à quel runner adresser un
+//! resume/list/delete pour un `session_id` donné. Toutes les écritures qui peuvent
+//! CRÉER une ligne prennent donc un `engine` explicite (cf. commentaire WHY sur
+//! [`ConversationMetaStore::set_model`]) ; aucune ne le met à jour.
+//!
 //! Written by the agent relay (session binding + live set_model/set_mode), read
 //! by the conversation snapshot. Mutations are best-effort (logged, never
 //! propagated) and the whole store degrades to a no-op when the pool is absent —
@@ -29,11 +36,16 @@ impl ConversationMetaStore {
     }
 
     /// Full upsert at session binding (query/resume) — the requested settings of
-    /// the run that (re)opened the conversation.
+    /// the run that (re)opened the conversation. `engine` (`claude` | `codex`) is
+    /// written at CREATION only: WHY it is absent from the `DO UPDATE` list — the
+    /// engine of a conversation is frozen at binding, a later run can change the
+    /// model/effort/mode but never migrate a transcript from one engine to the
+    /// other.
     pub async fn upsert(
         &self,
         slug: &str,
         sid: &str,
+        engine: &str,
         model: Option<&str>,
         effort: Option<&str>,
         mode: &str,
@@ -41,8 +53,8 @@ impl ConversationMetaStore {
         let Some(pool) = self.pool.as_ref() else { return };
         if let Err(e) = query(
             r#"
-            INSERT INTO agent_conversation_meta (slug, session_id, model, effort, mode, updated_at)
-            VALUES ($1, $2, $3, $4, $5, now())
+            INSERT INTO agent_conversation_meta (slug, session_id, engine, model, effort, mode, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, now())
             ON CONFLICT (slug, session_id) DO UPDATE SET
                 model      = EXCLUDED.model,
                 effort     = EXCLUDED.effort,
@@ -52,24 +64,33 @@ impl ConversationMetaStore {
         )
         .bind(slug)
         .bind(sid)
+        .bind(engine)
         .bind(model)
         .bind(effort)
         .bind(mode)
         .execute(pool)
         .await
         {
-            error!(slug, sid, error = %e, "conversation_meta upsert failed");
+            error!(slug, sid, engine, error = %e, "conversation_meta upsert failed");
         }
     }
 
     /// Update ONLY the model (live `set_model`). `None` = back to the
     /// subscription default — stored as an explicit NULL.
-    pub async fn set_model(&self, slug: &str, sid: &str, model: Option<&str>) {
+    ///
+    /// WHY an explicit `engine` on a "partial" setter: this statement is an
+    /// UPSERT, not an UPDATE — it CREATES the row when none exists (a live
+    /// `set_model`/`set_effort` can land before the binding upsert, e.g. the
+    /// settings PATCH on a conversation that has never been resumed). Relying on
+    /// the column DEFAULT there would silently mint a `claude` row for a Codex
+    /// conversation, and the engine being frozen, nothing would ever fix it. All
+    /// callers know their engine, so they pass it.
+    pub async fn set_model(&self, slug: &str, sid: &str, engine: &str, model: Option<&str>) {
         let Some(pool) = self.pool.as_ref() else { return };
         if let Err(e) = query(
             r#"
-            INSERT INTO agent_conversation_meta (slug, session_id, model, updated_at)
-            VALUES ($1, $2, $3, now())
+            INSERT INTO agent_conversation_meta (slug, session_id, engine, model, updated_at)
+            VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (slug, session_id) DO UPDATE SET
                 model      = EXCLUDED.model,
                 updated_at = now()
@@ -77,11 +98,12 @@ impl ConversationMetaStore {
         )
         .bind(slug)
         .bind(sid)
+        .bind(engine)
         .bind(model)
         .execute(pool)
         .await
         {
-            error!(slug, sid, error = %e, "conversation_meta set_model failed");
+            error!(slug, sid, engine, error = %e, "conversation_meta set_model failed");
         }
     }
 
@@ -89,12 +111,13 @@ impl ConversationMetaStore {
     /// at session start) — changing it recycles the session (cancel → resume at next
     /// send). Persisting the INTENT here at click time keeps snapshots/other PCs from
     /// reverting the selector to the old effort before that resume happens.
-    pub async fn set_effort(&self, slug: &str, sid: &str, effort: &str) {
+    /// (`engine` : cf. WHY sur [`Self::set_model`] — création possible.)
+    pub async fn set_effort(&self, slug: &str, sid: &str, engine: &str, effort: &str) {
         let Some(pool) = self.pool.as_ref() else { return };
         if let Err(e) = query(
             r#"
-            INSERT INTO agent_conversation_meta (slug, session_id, effort, updated_at)
-            VALUES ($1, $2, $3, now())
+            INSERT INTO agent_conversation_meta (slug, session_id, engine, effort, updated_at)
+            VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (slug, session_id) DO UPDATE SET
                 effort     = EXCLUDED.effort,
                 updated_at = now()
@@ -102,21 +125,23 @@ impl ConversationMetaStore {
         )
         .bind(slug)
         .bind(sid)
+        .bind(engine)
         .bind(effort)
         .execute(pool)
         .await
         {
-            error!(slug, sid, error = %e, "conversation_meta set_effort failed");
+            error!(slug, sid, engine, error = %e, "conversation_meta set_effort failed");
         }
     }
 
     /// Update ONLY the mode (`permission_mode` event: /set_mode, plan approval).
-    pub async fn set_mode(&self, slug: &str, sid: &str, mode: &str) {
+    /// (`engine` : cf. WHY sur [`Self::set_model`] — création possible.)
+    pub async fn set_mode(&self, slug: &str, sid: &str, engine: &str, mode: &str) {
         let Some(pool) = self.pool.as_ref() else { return };
         if let Err(e) = query(
             r#"
-            INSERT INTO agent_conversation_meta (slug, session_id, mode, updated_at)
-            VALUES ($1, $2, $3, now())
+            INSERT INTO agent_conversation_meta (slug, session_id, engine, mode, updated_at)
+            VALUES ($1, $2, $3, $4, now())
             ON CONFLICT (slug, session_id) DO UPDATE SET
                 mode       = EXCLUDED.mode,
                 updated_at = now()
@@ -124,30 +149,34 @@ impl ConversationMetaStore {
         )
         .bind(slug)
         .bind(sid)
+        .bind(engine)
         .bind(mode)
         .execute(pool)
         .await
         {
-            error!(slug, sid, error = %e, "conversation_meta set_mode failed");
+            error!(slug, sid, engine, error = %e, "conversation_meta set_mode failed");
         }
     }
 
-    /// `Some({model, effort, mode})` when a row exists, `None` otherwise (legacy
-    /// conversation, pool down, or query error) — the caller surfaces `None` as
-    /// `settings: null` and the frontend keeps its local defaults.
+    /// `Some({engine, model, effort, mode})` when a row exists, `None` otherwise
+    /// (legacy conversation, pool down, or query error) — the caller surfaces
+    /// `None` as `settings: null` and the frontend keeps its local defaults.
     pub async fn get(&self, slug: &str, sid: &str) -> Option<Value> {
         let pool = self.pool.as_ref()?;
-        match query("SELECT model, effort, mode FROM agent_conversation_meta WHERE slug = $1 AND session_id = $2")
+        match query("SELECT engine, model, effort, mode FROM agent_conversation_meta WHERE slug = $1 AND session_id = $2")
             .bind(slug)
             .bind(sid)
             .fetch_optional(pool)
             .await
         {
             Ok(Some(row)) => {
+                // `engine` est NOT NULL DEFAULT 'claude' : le fallback ne couvre
+                // qu'une erreur de décodage, jamais un état métier.
+                let engine: String = row.try_get("engine").unwrap_or_else(|_| "claude".to_string());
                 let model: Option<String> = row.try_get("model").ok().flatten();
                 let effort: Option<String> = row.try_get("effort").ok().flatten();
                 let mode: Option<String> = row.try_get("mode").ok().flatten();
-                Some(json!({ "model": model, "effort": effort, "mode": mode }))
+                Some(json!({ "engine": engine, "model": model, "effort": effort, "mode": mode }))
             }
             Ok(None) => None,
             Err(e) => {

@@ -92,7 +92,9 @@ function canonTabs(descriptors) {
     if (t.t === 'f') out.push({ t: 'f', path: t.path, name: t.name });
     else if (t.t === 'g') out.push({ t: 'g', sha: t.sha, short: t.short, subject: t.subject });
     else if (t.t === 'd') out.push({ t: 'd', path: t.path, status: t.status });
-    else if (t.t === 'c') out.push({ t: 'c', sid: t.sid, ...(t.sk ? { sk: t.sk } : {}), ...(t.eff ? { eff: t.eff } : {}) });
+    // `en` = moteur figé de la conversation ('codex'). Absent = 'claude' (rétro-compat
+    // des descripteurs persistés avant l'ajout du second moteur).
+    else if (t.t === 'c') out.push({ t: 'c', sid: t.sid, ...(t.sk ? { sk: t.sk } : {}), ...(t.eff ? { eff: t.eff } : {}), ...(t.en ? { en: t.en } : {}) });
   }
   return out;
 }
@@ -102,7 +104,11 @@ function canonTabs(descriptors) {
 // modèle/effort par défaut (Opus) ET écraserait le meta serveur au re-binding.
 function convoSettings(c) {
   const effort = c?.settings?.effort || c?.effort;
+  const engine = c?.engine || c?.settings?.engine;
   return {
+    // Le moteur est figé au binding : un resume DOIT repartir sur le même (les stores
+    // de sessions Claude et Codex sont distincts).
+    ...(engine ? { engine } : {}),
     ...(c?.settings?.model ? { model: c.settings.model } : {}),
     ...(effort ? { effort } : {}),
   };
@@ -137,7 +143,8 @@ const emptyConvo = (key, sid) => ({
   autoSend: null, // {prompt, settings} à envoyer une fois le panneau commit (lancement depuis surveillance)
   scanKind: null, // si lancée par « Résoudre tout » : kind du scan (gate le bouton tant que l'onglet est ouvert)
   effort: null, // effort imposé au lancement (ex. 'max' depuis « Résoudre tout ») — reflété par le sélecteur du panneau
-  settings: null, // {model, effort, mode} persistés côté serveur (agent_conversation_meta) — null = legacy/brouillon
+  settings: null, // {engine, model, effort, mode} persistés côté serveur (agent_conversation_meta) — null = legacy/brouillon
+  engine: null, // moteur FIGÉ au binding de session ('claude'|'codex') — null = brouillon pas encore lié
 });
 
 function reducer(state, a) {
@@ -155,6 +162,7 @@ function reducer(state, a) {
           c.loading = true;
           if (t.sk) c.scanKind = t.sk; // restaure le lien scan↔conversation
           if (t.eff) c.effort = t.eff; // restaure l'effort imposé (ex. 'max' depuis « Résoudre tout »)
+          c.engine = t.en || 'claude'; // descripteur sans `en` = conversation Claude (legacy)
         } else if (t.t === 'f' && t.path) {
           key = `file:${t.path}`;
           c = { key, type: 'file', path: t.path, name: t.name };
@@ -210,6 +218,7 @@ function reducer(state, a) {
           c.loading = true;
           if (t.sk) c.scanKind = t.sk;
           if (t.eff) c.effort = t.eff;
+          c.engine = t.en || 'claude';
           return c;
         });
       };
@@ -262,6 +271,7 @@ function reducer(state, a) {
       if (state.convos[a.key]) return { ...state, active: a.key };
       const c = emptyConvo(a.key, a.sid);
       c.loading = true;
+      c.engine = a.engine || 'claude'; // moteur connu dès l'ouverture (liste des conversations)
       return { ...state, order: [...state.order, a.key], convos: { ...state.convos, [a.key]: c }, active: a.key };
     }
     case 'CLOSE_PANEL': {
@@ -330,6 +340,9 @@ function reducer(state, a) {
             // resynchronise via ses effets convo.effort / convo.settings.
             settings: a.settings || c.settings,
             effort: a.settings?.effort || c.effort,
+            // Moteur figé de la session (autoritaire côté serveur) ; à défaut on garde
+            // celui déjà connu (descripteur d'onglet / liste), sinon 'claude' (legacy).
+            engine: a.settings?.engine || c.engine || 'claude',
           },
         },
       };
@@ -352,6 +365,13 @@ function reducer(state, a) {
       const c = state.convos[a.key];
       if (!c) return state;
       return { ...state, convos: { ...state.convos, [a.key]: { ...c, runId: a.runId } } };
+    }
+    // Moteur du dernier envoi (pastille). Le VERROU, lui, tient au binding réel (`sid`) :
+    // tant qu'aucune session n'existe, un nouvel envoi peut changer ce moteur.
+    case 'SET_ENGINE': {
+      const c = state.convos[a.key];
+      if (!c || c.engine === a.engine) return state;
+      return { ...state, convos: { ...state.convos, [a.key]: { ...c, engine: a.engine } } };
     }
     case 'SET_STOPPED': {
       const c = state.convos[a.key];
@@ -477,6 +497,10 @@ function reducer(state, a) {
 export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, children }) {
   const [state, dispatch] = useReducer(reducer, { order: [], convos: {}, active: null });
   const [allConvos, setAllConvos] = useState([]);
+  // Moteurs dont le `op:list` a échoué au dernier refresh (champ `unavailable` du serveur).
+  // Non vide ⇒ l'historique affiché est PARTIEL : on l'annonce au lieu de le laisser
+  // passer pour un historique vide (cf. refreshAll).
+  const [unavailableEngines, setUnavailableEngines] = useState([]);
   // Demande de mise au premier plan d'un onglet (ouverture de fichier) : {key, n}.
   // ConversationsSplit l'observe pour activer l'onglet (utile en mode replié/onglets).
   const [focusReq, setFocusReq] = useState(null);
@@ -492,9 +516,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   // pastille PWA. Effacé quand la conversation devient active ET visible.
   const [unread, setUnread] = useState(() => new Set());
 
-  // Re-fetch du snapshot d'une conversation (helper partagé restore/sync).
-  const fetchSnapshot = useCallback((sid) => {
-    getConversation(slug, sid)
+  // Re-fetch du snapshot d'une conversation (helper partagé restore/sync). `engine` doit
+  // être fourni pour une conversation Codex : les deux moteurs ont des stores distincts,
+  // un GET sans moteur chercherait le sid côté Claude (404).
+  const fetchSnapshot = useCallback((sid, engine) => {
+    getConversation(slug, sid, engine)
       .then((r) => dispatch({ type: 'SNAPSHOT_OK', key: sid, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running, settings: r.data?.settings || null }))
       .catch((e) => {
         if (e.response?.status === 404) dispatch({ type: 'CLOSE_PANEL', key: sid });
@@ -507,12 +533,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   // `resync` (subscriber laggé) : dans les deux cas des events ont été perdus.
   const resyncAllSnapshots = useCallback(() => {
     const st = stateRef.current;
-    const sids = st.order
+    const targets = st.order
       .filter((k) => { const c = st.convos[k]; return c && c.sid && k === c.sid; })
       .map((k) => st.convos[k])
-      .sort((a, b) => Number(b.running) - Number(a.running))
-      .map((c) => c.sid);
-    for (const sid of sids) fetchSnapshot(sid);
+      .sort((a, b) => Number(b.running) - Number(a.running));
+    for (const c of targets) fetchSnapshot(c.sid, c.engine);
   }, [fetchSnapshot]);
 
   // UN seul WebSocket pour tout le workspace : events de run (routés par session_id/
@@ -535,7 +560,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       dispatch({ type: 'SYNC_TABS', data: d });
       // Snapshot des conversations nouvellement ouvertes par ce sync.
       for (const t of d.tabs || []) {
-        if (t.t === 'c' && t.sid && !beforeSids.has(t.sid)) fetchSnapshot(t.sid);
+        if (t.t === 'c' && t.sid && !beforeSids.has(t.sid)) fetchSnapshot(t.sid, t.en);
       }
     },
   });
@@ -577,7 +602,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       loadedRef.current = true;
       if (seed) setAgentOpenTabs(slug, canonical).catch(() => {});
       for (const t of tabs) {
-        if (t.t === 'c' && t.sid) fetchSnapshot(t.sid);
+        if (t.t === 'c' && t.sid) fetchSnapshot(t.sid, t.en);
       }
     };
 
@@ -611,7 +636,17 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if (c.type === 'file') return { t: 'f', path: c.path, name: c.name };
       if (c.type === 'commit') return { t: 'g', sha: c.sha, short: c.short, subject: c.subject };
       if (c.type === 'diff') return { t: 'd', path: c.path, status: c.status };
-      return c.sid ? { t: 'c', sid: c.sid, ...(c.scanKind ? { sk: c.scanKind } : {}), ...(c.effort ? { eff: c.effort } : {}) } : null;
+      // `en` n'est émis QUE pour un moteur non-défaut : un descripteur sans `en` vaut
+      // 'claude', donc l'omettre garde les payloads legacy identiques (pas de PUT à vide).
+      return c.sid
+        ? {
+            t: 'c',
+            sid: c.sid,
+            ...(c.scanKind ? { sk: c.scanKind } : {}),
+            ...(c.effort ? { eff: c.effort } : {}),
+            ...(c.engine && c.engine !== 'claude' ? { en: c.engine } : {}),
+          }
+        : null;
     })
     .filter(Boolean);
   // Actif persistable = identité cross-PC : le `sid` pour une conversation (sa clé peut
@@ -675,7 +710,28 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
 
   const refreshAll = useCallback(() => {
     listConversations(slug)
-      .then((r) => setAllConvos(r.data?.conversations || []))
+      .then((r) => {
+        const list = Array.isArray(r.data?.conversations) ? r.data.conversations : [];
+        const un = Array.isArray(r.data?.unavailable) ? r.data.unavailable : [];
+        setUnavailableEngines(un);
+        if (un.length === 0) { setAllConvos(list); return; }
+        // WHY : quand un moteur ne répond pas (op:list en échec/timeout), le serveur
+        // renvoie 200 + liste PARTIELLE + `unavailable`. Écraser l'état avec cette liste
+        // EFFACERAIT à l'écran l'historique du moteur en panne (une panne du moteur par
+        // défaut ne laissait que les conversations Codex, vides en pratique). Pas d'info
+        // fraîche ⇒ on ne jette rien : on conserve les entrées connues de ces moteurs.
+        setAllConvos((prev) => {
+          const fresh = new Set(list.map((c) => c.sessionId));
+          const kept = prev.filter(
+            (c) => un.includes(c.engine || 'claude') && !fresh.has(c.sessionId),
+          );
+          // Re-tri global : les entrées conservées doivent se replacer chronologiquement
+          // parmi les fraîches (le serveur trie la liste fusionnée, pas nous par moitiés).
+          return [...list, ...kept].sort(
+            (a, b) => (b.lastModified || b.createdAt || 0) - (a.lastModified || a.createdAt || 0),
+          );
+        });
+      })
       // Liste best-effort (les en-têtes retombent sur les ids) — mais on trace l'échec,
       // sinon une API en erreur est indistinguable d'un historique vide.
       .catch((e) => console.warn('[agent] listConversations a échoué :', apiErr(e)));
@@ -749,13 +805,14 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     dispatch({ type: 'NEW_PANEL', key: newKey() });
   }, []);
 
+  // `engine` vient de l'entrée d'historique (chaque conversation listée porte son moteur).
   const openConversation = useCallback(
-    (sid) => {
+    (sid, engine) => {
       const st = stateRef.current;
       if (st.order.some((k) => st.convos[k]?.sid === sid)) return; // déjà ouverte
       const key = sid;
-      dispatch({ type: 'OPEN_PANEL', key, sid });
-      getConversation(slug, sid)
+      dispatch({ type: 'OPEN_PANEL', key, sid, engine });
+      getConversation(slug, sid, engine)
         .then((r) =>
           dispatch({ type: 'SNAPSHOT_OK', key, items: r.data?.items || [], live: !!r.data?.live, runId: r.data?.run_id || null, mode: r.data?.mode, running: r.data?.running, settings: r.data?.settings || null }),
         )
@@ -809,6 +866,15 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if ((!t && !imgs.length) || c.running) return;
       const apiImages = imgs.length ? imgs.map(({ media_type, data }) => ({ media_type, data })) : undefined;
       dispatch({ type: 'OPTIMISTIC_USER', key, text: t, images: imgs.map((i) => i.url).filter(Boolean) });
+      // Le moteur d'une conversation LIÉE (sid acquis) prime sur le sélecteur (verrou
+      // d'engine). WHY tant qu'il n'y a PAS de `sid` : le sélecteur prime, même si un 1er
+      // message a déjà posé un engine optimiste — sinon un 1er tour Codex échoué (auth
+      // morte) figerait le brouillon sur Codex sans retour possible vers Claude.
+      const engine = (c.sid ? c.engine : null) || settings.engine || c.engine || 'claude';
+      const withEngine = { ...settings, engine };
+      // Pastille optimiste : reflète le moteur RÉELLEMENT envoyé (donc réévaluée tant que
+      // la conversation n'est pas liée) ; le reducer no-op si la valeur est inchangée.
+      if (c.engine !== engine) dispatch({ type: 'SET_ENGINE', key, engine });
       try {
         let runId = c.runId;
         if (c.runId) {
@@ -819,17 +885,17 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
             // après un deploy qui a coupé la session). On retombe sur la reprise de la session
             // sur disque → la conversation se relance au lieu de renvoyer une erreur 404.
             if (e.response?.status === 404 && c.sid) {
-              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...settings });
+              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...withEngine });
               runId = r.data?.run_id;
             } else {
               throw e;
             }
           }
         } else if (c.sid) {
-          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...settings }); // reprise
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...withEngine }); // reprise
           runId = r.data?.run_id;
         } else {
-          const r = await startAgentQuery(slug, { prompt: t, images: apiImages, ...settings }); // session neuve
+          const r = await startAgentQuery(slug, { prompt: t, images: apiImages, ...withEngine }); // session neuve
           runId = r.data?.run_id;
         }
         if (runId && runId !== c.runId) dispatch({ type: 'SET_RUN', key, runId });
@@ -848,7 +914,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     if (!launch || launch.nonce === launchNonce.current) return;
     launchNonce.current = launch.nonce;
     const settings = buildSettings({
-      modelId: resolveModelId(localStorage.getItem('agent:model')),
+      // WHY moteur épinglé à Claude : ce flux (résolution de findings de surveillance) a
+      // besoin des tools MCP `studio` (findings_*, docs_*) que le moteur Codex n'a pas. La
+      // préférence globale `agent:model` peut pointer un modèle Codex → on la contraint au
+      // moteur Claude (2e argument de resolveModelId) au lieu de la suivre aveuglément.
+      modelId: resolveModelId(localStorage.getItem('agent:model'), launch.engine || 'claude'),
       // launch.effort (ex. 'max' depuis « Résoudre tout ») prime sur la préférence agent stockée.
       effort: launch.effort || localStorage.getItem('agent:effort') || 'max',
       mode: launch.mode || 'plan',
@@ -1018,7 +1088,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       if ((!c?.sid && !c?.runId) || c?.running) return; // brouillon (localStorage suffit) / tour en vol
       dispatch({ type: 'SET_CONVO_EFFORT', key, effort });
       try {
-        if (c.sid) await setConversationEffort(slug, c.sid, effort);
+        if (c.sid) await setConversationEffort(slug, c.sid, effort, c.engine);
         if (c.runId) await cancelAgentRun(slug, c.runId);
       } catch {
         /* best-effort : le resume du prochain send porte l'effort de toute façon */
@@ -1027,34 +1097,47 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     [slug],
   );
 
+  // Moteur d'une conversation depuis le sid : onglet ouvert d'abord, sinon l'entrée de
+  // l'historique (les mutations rename/delete sont scopées par moteur côté serveur).
+  const allConvosRef = useRef(allConvos);
+  allConvosRef.current = allConvos;
+  const engineOfSid = useCallback((sid, hint) => {
+    if (hint) return hint;
+    const st = stateRef.current;
+    const key = st.order.find((k) => st.convos[k]?.sid === sid);
+    return st.convos[key]?.engine || allConvosRef.current.find((c) => c.sessionId === sid)?.engine || undefined;
+  }, []);
+
   const renameBySid = useCallback(
-    async (sid, title) => {
+    async (sid, title, engine) => {
       const st = stateRef.current;
       const key = st.order.find((k) => st.convos[k]?.sid === sid);
+      const eng = engineOfSid(sid, engine);
       if (key) dispatch({ type: 'SET_TITLE', key, title });
       setAllConvos((prev) => prev.map((x) => (x.sessionId === sid ? { ...x, customTitle: title, summary: title } : x)));
       try {
-        await renameConversation(slug, sid, title);
+        await renameConversation(slug, sid, title, eng);
       } catch {
         /* ignore */
       }
     },
-    [slug],
+    [slug, engineOfSid],
   );
 
   const removeBySid = useCallback(
-    async (sid) => {
+    async (sid, engine) => {
       const st = stateRef.current;
       const key = st.order.find((k) => st.convos[k]?.sid === sid);
+      const eng = engineOfSid(sid, engine);
       if (key) dispatch({ type: 'CLOSE_PANEL', key });
       setAllConvos((prev) => prev.filter((x) => x.sessionId !== sid));
       try {
-        await deleteConversation(slug, sid);
+        await deleteConversation(slug, sid, eng);
       } catch {
         /* ignore */
       }
     },
-    [slug],
+    [slug, engineOfSid],
   );
 
   const value = {
@@ -1065,6 +1148,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     unread,
     setActive,
     allConvos,
+    unavailableEngines,
     convName,
     refreshAll,
     newConversation,

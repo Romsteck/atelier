@@ -381,7 +381,9 @@ export default function StudioShell({ slug }) {
     if (!prompt) return;
     const scanKind = typeof arg === 'string' ? undefined : arg?.scanKind;
     const effort = typeof arg === 'string' ? undefined : arg?.effort;
-    setAgentLaunch({ prompt, scanKind, effort, mode: 'plan', nonce: ++nonceRef.current });
+    // `engine: 'claude'` explicite : la résolution de findings s'appuie sur les tools MCP
+    // studio, absents du moteur Codex → ce flux ne doit JAMAIS suivre la préférence globale.
+    setAgentLaunch({ prompt, scanKind, effort, mode: 'plan', engine: 'claude', nonce: ++nonceRef.current });
     if (effectiveMode === 'tabs' && activeTab !== 'code') handleSelectTab('code');
   }
 

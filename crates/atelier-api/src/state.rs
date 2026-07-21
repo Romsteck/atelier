@@ -9,6 +9,7 @@ use atelier_apps::context::ContextGenerator;
 use atelier_common::agent_auth::AgentAuthStore;
 use atelier_common::app_claude_auth::AppClaudeAuthStore;
 use atelier_common::agent_ui_state::OpenTabsStore;
+use atelier_common::codex_auth::CodexAuthStore;
 use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::EventBus;
 use atelier_common::issue_store::PlatformIssueStore;
@@ -71,6 +72,13 @@ pub struct ApiState {
     /// le hack `CLAUDE_CONFIG_DIR` → dossier hr-studio (iss-d10ef97b). No-op quand
     /// Postgres est down.
     pub app_claude_auth: AppClaudeAuthStore,
+
+    /// Authentification du moteur **Codex** (OAuth abonnement ChatGPT uniquement)
+    /// dans `atelier_meta.codex_auth` ; endpoints `/api/agent/codex/auth*`. Ne
+    /// porte qu'un SEED d'`auth.json` + la télémétrie : la vérité runtime est le
+    /// fichier `$CODEX_HOME/auth.json` que le CLI rafraîchit seul (un device-login
+    /// écrit le fichier sans passer par PG). No-op quand Postgres est down.
+    pub codex_auth: CodexAuthStore,
 
     // Dataverse
     pub dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
@@ -145,6 +153,7 @@ impl ApiState {
         notifications: NotificationStore,
         agent_auth: AgentAuthStore,
         app_claude_auth: AppClaudeAuthStore,
+        codex_auth: CodexAuthStore,
         apps_src_root: PathBuf,
         apps_runtime_root: PathBuf,
         events: Arc<EventBus>,
@@ -172,6 +181,7 @@ impl ApiState {
             notifications,
             agent_auth,
             app_claude_auth,
+            codex_auth,
             dv,
             events,
             app_registry,

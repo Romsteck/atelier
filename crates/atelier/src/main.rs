@@ -126,6 +126,9 @@ async fn main() -> Result<()> {
     // séparé du token runner/scan ci-dessus. No-op quand Postgres est down.
     let app_claude_auth =
         atelier_common::app_claude_auth::AppClaudeAuthStore::new(meta_pool.clone());
+    // Authentification du moteur Codex (seed auth.json + télémétrie ; la vérité
+    // runtime est le fichier $CODEX_HOME/auth.json). No-op quand Postgres est down.
+    let codex_auth = atelier_common::codex_auth::CodexAuthStore::new(meta_pool.clone());
     // Statistiques d'utilisation (page /stats) : store des tables app_traffic_daily
     // / agent_turn_usage / app_build_runs. Purge de rétention + réconciliation des
     // builds laissés `running` par un restart d'Atelier, au boot. No-op sans pool.
@@ -276,6 +279,7 @@ async fn main() -> Result<()> {
         notifications,
         agent_auth,
         app_claude_auth,
+        codex_auth,
         apps_src_root,
         apps_runtime_root,
         events,

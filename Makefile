@@ -25,6 +25,7 @@ SHIPPER_CRATE_LOCAL := crates/atelier-logging-shipper
 # node_modules embarque le binaire natif linux-x64 du SDK → on le ship tel quel.
 RUNNER_LOCAL        := runner
 RUNNER_SDK_NATIVE   := runner/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64
+RUNNER_CODEX_BIN    := runner/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
 
 PREFIX       ?= /opt/atelier
 BIN_DST      := $(PREFIX)/bin/atelier
@@ -80,6 +81,8 @@ runner: runner-deps
 	@test -f runner/src/runner.js || { echo "error: runner/src/runner.js missing — aborting" >&2; exit 1; }
 	@test -f runner/src/scan.js || { echo "error: runner/src/scan.js missing (surveillance scan runner) — aborting" >&2; exit 1; }
 	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — le binaire natif est une optional-dep : relancer 'npm ci --omit=dev' SANS --omit=optional" >&2; exit 1; }
+	@test -f runner/src/codex.js || { echo "error: runner/src/codex.js missing (moteur Codex du Studio) — aborting" >&2; exit 1; }
+	@test -x $(RUNNER_CODEX_BIN) || { echo "error: $(RUNNER_CODEX_BIN) missing/non-exécutable — le CLI Codex est une optional-dep : relancer 'npm ci --omit=dev' SANS --omit=optional" >&2; exit 1; }
 
 deploy:
 ifeq ($(IS_MEDION),yes)

@@ -243,7 +243,10 @@ impl ContextGenerator {
             info!(slug = %app.slug, file = %claude_md_path.display(), "CLAUDE.md skeleton created");
         }
 
-        // Step 9 — `.gitignore` : soustrait les fichiers générés au suivi git
+        // Step 9 — `AGENTS.md` : pointeur vers `CLAUDE.md` pour l'agent Codex.
+        ensure_agents_md_pointer(src_dir, &app.slug);
+
+        // Step 10 — `.gitignore` : soustrait les fichiers générés au suivi git
         // (churn à chaque évolution de template + `.mcp.json` porte le MCP_TOKEN).
         ensure_atelier_gitignore(src_dir, &app.slug);
 
@@ -1458,6 +1461,36 @@ fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Crée `src/AGENTS.md` comme **symlink relatif** vers `CLAUDE.md`.
+///
+/// WHY : le Studio a deux moteurs d'agent. Claude charge `CLAUDE.md`, Codex ne
+/// lit QUE `AGENTS.md` — sans ce pointeur, l'agent Codex travaille sans le
+/// carnet de bord du projet. Un symlink (plutôt qu'une copie) garde une source
+/// unique : ce que l'agent écrit dans `CLAUDE.md` est vu par les deux moteurs.
+///
+/// Ne touche JAMAIS un `AGENTS.md` existant (une app peut légitimement avoir le
+/// sien, fichier régulier ou lien vers autre chose) : le test se fait avec
+/// `symlink_metadata` pour ne PAS suivre le lien — un symlink cassé compte comme
+/// existant, sinon on tenterait de le recréer à chaque boot.
+fn ensure_agents_md_pointer(src_dir: &Path, slug: &str) {
+    let path = src_dir.join("AGENTS.md");
+    if fs::symlink_metadata(&path).is_ok() {
+        return;
+    }
+    match std::os::unix::fs::symlink("CLAUDE.md", &path) {
+        Ok(()) => info!(slug = %slug, file = %path.display(), "AGENTS.md symlink créé (→ CLAUDE.md, agent Codex)"),
+        Err(e) => warn!(slug = %slug, error = %e, "AGENTS.md symlink failed"),
+    }
+}
+
+/// `true` si `src/AGENTS.md` est le pointeur généré par la plateforme (symlink),
+/// et non un `AGENTS.md` que l'app possède vraiment (qu'il ne faut pas ignorer).
+fn agents_md_is_generated_pointer(src_dir: &Path) -> bool {
+    fs::symlink_metadata(src_dir.join("AGENTS.md"))
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 // Marqueurs du bloc `.gitignore` managé par Atelier (cf. `atelier_gitignore_block`).
 const GITIGNORE_BEGIN: &str = "# >>> atelier-generated (ne pas éditer — géré par Atelier) >>>";
 const GITIGNORE_END: &str = "# <<< atelier-generated <<<";
@@ -1474,7 +1507,7 @@ const GITIGNORE_END: &str = "# <<< atelier-generated <<<";
 ///
 /// Ne PAS ignorer `CLAUDE.md` (carnet agent-owned, write-once) ni les règles /
 /// skills que l'agent écrit lui-même (nommées autrement que `0-*`).
-fn atelier_gitignore_block() -> String {
+fn atelier_gitignore_block(include_agents_md: bool) -> String {
     // NB: garder synchro avec les writes de `generate_for_app` (Steps 3–6).
     let entries = [
         "/.mcp.json",
@@ -1499,6 +1532,11 @@ fn atelier_gitignore_block() -> String {
         b.push_str(e);
         b.push('\n');
     }
+    // `AGENTS.md` n'est ignoré que quand c'est NOTRE pointeur généré (symlink
+    // vers `CLAUDE.md`) : un vrai `AGENTS.md` écrit par l'agent reste suivi.
+    if include_agents_md {
+        b.push_str("/AGENTS.md\n");
+    }
     b.push_str(GITIGNORE_END);
     b.push('\n');
     b
@@ -1509,7 +1547,7 @@ fn atelier_gitignore_block() -> String {
 /// Idempotent : remplace le bloc entre marqueurs s'il existe, sinon l'ajoute.
 fn ensure_atelier_gitignore(src_dir: &Path, slug: &str) {
     let path = src_dir.join(".gitignore");
-    let block = atelier_gitignore_block();
+    let block = atelier_gitignore_block(agents_md_is_generated_pointer(src_dir));
     let existing = fs::read_to_string(&path).unwrap_or_default();
 
     let merged = if let Some(start) = existing.find(GITIGNORE_BEGIN) {
@@ -2218,6 +2256,43 @@ mod tests {
         let fresh = fs::read_to_string(tmp2.join(".gitignore")).unwrap();
         assert!(fresh.starts_with(GITIGNORE_BEGIN));
         assert!(fresh.contains("/.mcp.json"));
+
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(&tmp2);
+    }
+
+    #[test]
+    fn agents_md_pointer_is_idempotent_and_never_clobbers() {
+        let tmp = std::env::temp_dir().join("atelier-apps-context-agents-md");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("CLAUDE.md"), "# carnet\n").unwrap();
+
+        ensure_agents_md_pointer(&tmp, "codexy");
+        let meta = fs::symlink_metadata(tmp.join("AGENTS.md")).unwrap();
+        assert!(meta.file_type().is_symlink(), "AGENTS.md doit être un symlink");
+        assert_eq!(
+            fs::read_link(tmp.join("AGENTS.md")).unwrap(),
+            Path::new("CLAUDE.md"),
+            "lien relatif vers CLAUDE.md"
+        );
+        assert_eq!(fs::read_to_string(tmp.join("AGENTS.md")).unwrap(), "# carnet\n");
+        // Idempotent.
+        ensure_agents_md_pointer(&tmp, "codexy");
+        assert!(fs::symlink_metadata(tmp.join("AGENTS.md")).unwrap().file_type().is_symlink());
+        // Pointeur généré → ignoré par git.
+        ensure_atelier_gitignore(&tmp, "codexy");
+        assert!(fs::read_to_string(tmp.join(".gitignore")).unwrap().contains("/AGENTS.md"));
+
+        // AGENTS.md possédé par l'app : jamais écrasé, jamais ignoré.
+        let tmp2 = std::env::temp_dir().join("atelier-apps-context-agents-md-own");
+        let _ = fs::remove_dir_all(&tmp2);
+        fs::create_dir_all(&tmp2).unwrap();
+        fs::write(tmp2.join("AGENTS.md"), "# à moi\n").unwrap();
+        ensure_agents_md_pointer(&tmp2, "own");
+        assert_eq!(fs::read_to_string(tmp2.join("AGENTS.md")).unwrap(), "# à moi\n");
+        ensure_atelier_gitignore(&tmp2, "own");
+        assert!(!fs::read_to_string(tmp2.join(".gitignore")).unwrap().contains("/AGENTS.md"));
 
         let _ = fs::remove_dir_all(&tmp);
         let _ = fs::remove_dir_all(&tmp2);
