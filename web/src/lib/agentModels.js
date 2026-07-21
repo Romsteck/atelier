@@ -13,9 +13,9 @@ export const ENGINES = {
 // model → le CLI résout le défaut de l'abonnement, soit `claude-opus-4-8[1m]` (contexte 1M).
 // `efforts` = niveaux supportés ; `defaultEffort` = effort d'une NOUVELLE conversation ;
 // `effortAlias` = palier équivalent quand un niveau demandé n'existe pas ici (repli ciblé,
-// à ne pas confondre avec `defaultEffort`). `effortLabels` renomme un niveau à l'affichage
-// sans changer le wire (Codex : `low` s'appelle « Fast »). Sonnet/Haiku retirés du sélecteur
-// (2026-07-02), Opus 4.7 (2026-07-07).
+// à ne pas confondre avec `defaultEffort`). `fastModel` = tier rapide de la même famille,
+// activé par la bascule « Fast » (axe INDÉPENDANT de l'effort). Sonnet/Haiku retirés du
+// sélecteur (2026-07-02), Opus 4.7 (2026-07-07).
 export const MODELS = [
   { id: 'opus-4-8', engine: 'claude', label: 'Opus 4.8', model: null, efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'max' },
   { id: 'fable-5', engine: 'claude', label: 'Fable 5', model: 'claude-fable-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'max' },
@@ -31,7 +31,9 @@ export const MODELS = [
     label: 'GPT 5.6',
     model: 'gpt-5.6-sol',
     efforts: ['low', 'medium', 'high', 'xhigh'],
-    effortLabels: { low: 'Fast' },
+    // Tier RAPIDE de la même famille, activé par la bascule « Fast » (cf. wireModel).
+    // `luna` est le tier le plus rapide de GPT 5.6 ; l'effort reste réglable par-dessus.
+    fastModel: 'gpt-5.6-luna',
     // WHY : un `max` explicitement demandé (ex. « Résoudre tout ») vaut le palier le plus
     // haut de Codex, pas un repli sur le défaut `medium` — le shim clampe déjà max → xhigh.
     effortAlias: { max: 'xhigh' },
@@ -100,12 +102,36 @@ export function effortFor(m, effort) {
 
 // Construit le payload `settings` envoyé à /agent/query (engine + permission_mode +
 // model + effort). Opus 4.8 (model:null) → on omet `model` pour conserver le défaut [1m].
-export function buildSettings({ modelId, effort, mode }) {
+export function buildSettings({ modelId, effort, mode, fast }) {
   const m = MODELS.find((x) => x.id === modelId) || MODELS[0];
   const permission_mode = MODES.find((x) => x.id === mode)?.pm || 'plan';
   const settings = { engine: m.engine, permission_mode };
-  if (m.model) settings.model = m.model;
+  const wire = wireModel(m, fast);
+  if (wire) settings.model = wire;
   const eff = effortFor(m, effort);
   if (eff) settings.effort = eff;
   return settings;
+}
+
+// Modèle réellement envoyé au backend : le tier RAPIDE quand « Fast » est actif et que
+// le modèle en a un. WHY un axe séparé de l'effort : Fast et effort répondaient au même
+// réglage (Fast = effort bas), donc les choisir tous les deux était impossible — alors
+// que ce sont deux questions distinctes (quelle vitesse de service, quelle profondeur
+// de raisonnement). Côté Codex il n'existe AUCUN interrupteur de vitesse indépendant
+// (les « service tiers » du CLI sont des métadonnées de catalogue, pas un réglage) : le
+// seul vrai levier orthogonal est le tier de modèle, `gpt-5.6-luna` étant le tier rapide
+// de la MÊME famille GPT 5.6. L'effort reste donc entièrement libre par-dessus.
+export function wireModel(m, fast) {
+  return (fast && m?.fastModel) || m?.model || null;
+}
+
+// Vrai si le modèle renvoyé par le serveur est le tier rapide de cette entrée (sert à
+// restaurer la bascule « Fast » à la reprise d'une conversation).
+export function isFastWire(m, serverModel) {
+  return !!(m?.fastModel && serverModel && serverModel.includes(m.fastModel));
+}
+
+// Le modèle a-t-il un tier rapide (⇒ afficher la bascule « Fast ») ?
+export function hasFast(m) {
+  return !!m?.fastModel;
 }

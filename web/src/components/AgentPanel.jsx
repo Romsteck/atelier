@@ -12,6 +12,7 @@ import { describeTool, splitPath, charsToTokens, formatTokens, toolTarget } from
 import { TOOL_ICONS, useSmoothCount } from '../lib/toolPresentation';
 import {
   MODELS, MODES, ENGINES, buildSettings, resolveModelId, modelIdFromApi, modelsForEngine, engineOfModelId, effortFor,
+  wireModel, isFastWire, hasFast,
 } from '../lib/agentModels';
 
 // Réflexion = compteur SEUL (jamais le texte). Le front ne reçoit que `chars` (le serveur
@@ -432,6 +433,9 @@ export default function AgentPanel({ panelKey }) {
   // délibéré sur le sélecteur l'enregistre (cf. chooseEffort).
   const [effort, setEffort] = useState(() => convo?.effort || localStorage.getItem('agent:effort') || 'max');
   const [mode, setMode] = useState(() => localStorage.getItem('agent:mode') || 'plan');
+  // « Fast » = tier RAPIDE du modèle (axe indépendant de l'effort, cf. wireModel).
+  // N'a de sens que pour un modèle qui en a un ; ignoré sinon.
+  const [fast, setFast] = useState(() => localStorage.getItem('agent:fast') === '1');
   const [sdk, setSdk] = useState(null);
   const [updatingSdk, setUpdatingSdk] = useState(false);
   const [sdkMsg, setSdkMsg] = useState(null); // { ok: bool, text } — retour de la MAJ SDK
@@ -489,6 +493,12 @@ export default function AgentPanel({ panelKey }) {
   const serverModel = convo?.activeModel ?? (convo?.settings ? (convo.settings.model ?? null) : undefined);
   useEffect(() => {
     if (serverModel !== undefined) setModelId(modelIdFromApi(serverModel, engine));
+  }, [serverModel, engine]);
+
+  // Bascule « Fast » restaurée depuis le modèle SERVEUR : c'est lui qui porte le tier
+  // réellement utilisé (`gpt-5.6-luna`), l'id du sélecteur restant celui de la famille.
+  useEffect(() => {
+    if (serverModel) setFast(isFastWire(MODELS.find((x) => x.id === modelIdFromApi(serverModel, engine)), serverModel));
   }, [serverModel, engine]);
 
   // Reflète l'effort de la conversation (settings serveur au chargement, ou effort
@@ -682,7 +692,15 @@ export default function AgentPanel({ panelKey }) {
     setModelId(id);
     localStorage.setItem('agent:model', id); // choix délibéré → préférence globale
     if (m.efforts.length && !m.efforts.includes(effort)) chooseEffort(effortFor(m, effort));
-    if (live) changeModel(panelKey, m.model || null); // session vivante → setModel à chaud
+    if (live) changeModel(panelKey, wireModel(m, fast)); // session vivante → setModel à chaud
+  };
+  // Bascule Fast : change le MODÈLE envoyé (tier rapide), pas l'effort — les deux
+  // réglages restent donc combinables. Sur une session vivante, `setModel` à chaud.
+  const onToggleFast = () => {
+    const next = !fast;
+    setFast(next);
+    localStorage.setItem('agent:fast', next ? '1' : '0');
+    if (live) changeModel(panelKey, wireModel(selModel, next));
   };
   const onChangeMode = (id) => {
     setMode(id);
@@ -694,8 +712,8 @@ export default function AgentPanel({ panelKey }) {
   // de la frappe : taper ne re-render que le Composer.
   const onSend = useCallback((text, images) => {
     if (running) return;
-    sendMessage(panelKey, text, buildSettings({ modelId, effort: effEff, mode }), images);
-  }, [running, mode, modelId, effEff, panelKey, sendMessage]);
+    sendMessage(panelKey, text, buildSettings({ modelId, effort: effEff, mode, fast }), images);
+  }, [running, mode, modelId, effEff, fast, panelKey, sendMessage]);
 
   const stop = useCallback(() => cancel(panelKey), [cancel, panelKey]);
   const submitAnswer = useCallback((request_id, payload) => answer(panelKey, request_id, payload), [answer, panelKey]);
@@ -913,6 +931,26 @@ export default function AgentPanel({ panelKey }) {
             accent={(id) => (id === 'bypass' ? 'amber' : 'blue')}
           />
         </div>
+        {/* Fast = tier RAPIDE du modèle. Axe distinct de l'effort (on peut vouloir un
+            modèle rapide QUI réfléchit longtemps, ou l'inverse) — d'où une bascule à
+            part et non un palier d'effort. Affiché seulement si le modèle a un tier rapide. */}
+        {hasFast(selModel) && (
+          <button
+            onClick={onToggleFast}
+            title={
+              fast
+                ? `Tier rapide actif (${selModel.fastModel}) — réponses plus rapides. L'effort reste réglable.`
+                : `Passer au tier rapide de ${selModel.label} — réponses plus rapides, capacité un peu moindre.`
+            }
+            className={`h-[22px] px-2 rounded-md border text-[11px] ${
+              fast
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                : 'border-gray-700/80 bg-gray-800/60 text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            Fast
+          </button>
+        )}
         {selModel.efforts.length > 0 && (
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] uppercase tracking-wider text-gray-500">Effort</span>
