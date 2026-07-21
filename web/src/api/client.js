@@ -237,8 +237,8 @@ export const resumeAgentQuery = (slug, sid, body) =>
   api.post(`/apps/${slug}/agent/query`, { ...body, resume: sid });
 // Conversations = sessions SDK persistées (les DEUX moteurs, chaque item porte son
 // `engine`). La clé stable est le session_id.
-export const listConversations = (slug) =>
-  api.get(`/apps/${slug}/agent/conversations`);
+export const listConversations = (slug, profile = 'dev') =>
+  api.get(`/apps/${slug}/agent/conversations`, { params: { profile } });
 // Snapshot d'une conversation : { items, live, run_id, settings }. items = transcript
 // normalisé ; settings.engine = moteur figé de la session.
 export const getConversation = (slug, sid, engine) =>
@@ -250,6 +250,8 @@ export const renameConversation = (slug, sid, title, engine) =>
 // (cancel → resume) — cet appel fixe l'INTENTION pour les snapshots/autres PCs.
 export const setConversationEffort = (slug, sid, effort, engine) =>
   api.patch(`/apps/${slug}/agent/conversations/${sid}/settings`, { effort }, { params: engineParams(engine) });
+export const setConversationPmMode = (slug, sid, pm_mode) =>
+  api.patch(`/apps/${slug}/agent/conversations/${sid}/settings`, { pm_mode }, { params: engineParams('claude') });
 export const deleteConversation = (slug, sid, engine) =>
   api.delete(`/apps/${slug}/agent/conversations/${sid}`, { params: engineParams(engine) });
 // État d'UI des onglets ouverts (sync cross-PC) : { tabs, active }. Autoritaire
@@ -355,3 +357,21 @@ export const patchIssue = (id, body) =>
   api.patch(`/issues/${id}`, body);
 export const deleteIssue = (id) =>
   api.delete(`/issues/${id}`);
+
+// ========== Pilote : backlog projet + exécutions autonomes ==========
+export const getPilotState = () => api.get('/pilot/state');
+export const getPilotBacklog = (params = {}) => api.get('/pilot/backlog', { params });
+export const createPilotItem = (body) => api.post('/pilot/backlog', body);
+export const getPilotItem = (id) => api.get(`/pilot/backlog/${id}`);
+export const patchPilotItem = (id, body) => api.patch(`/pilot/backlog/${id}`, body);
+export const deletePilotItem = (id) => api.delete(`/pilot/backlog/${id}`);
+export const movePilotItem = (id, body) => api.post(`/pilot/backlog/${id}/move`, body);
+export const getPilotItemRuns = (id) => api.get(`/pilot/backlog/${id}/runs`);
+export const runPilotItem = (id, confirm = false) => api.post(`/pilot/backlog/${id}/run`, { confirm });
+export const cancelPilotRun = (id) => api.post(`/pilot/runs/${id}/cancel`);
+export const getPilotTranscript = (id) => api.get(`/pilot/runs/${id}/transcript`);
+export const getPilotSchedule = () => api.get('/pilot/schedule');
+export const setPilotSchedule = (body) => api.put('/pilot/schedule', body);
+export const getPilotNight = () => api.get('/pilot/night');
+export const startPilotNight = () => api.post('/pilot/night');
+export const cancelPilotNight = () => api.post('/pilot/night/cancel');

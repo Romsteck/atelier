@@ -4,6 +4,7 @@ use std::sync::Arc;
 use atelier_backup::BackupService;
 use atelier_logging::LogIngestService;
 use atelier_watcher::SurveillanceService;
+use atelier_pilot::PilotService;
 use atelier_apps::{AppRegistry, AppSupervisor, PortRegistry};
 use atelier_apps::context::ContextGenerator;
 use atelier_common::agent_auth::AgentAuthStore;
@@ -111,6 +112,10 @@ pub struct ApiState {
     /// `/api/backup/*` ; renvoie 503 en mode noop (Postgres injoignable au boot).
     pub backup: BackupService,
 
+    /// Backlog projet + exécutions autonomes manuelles/nocturnes. Le service
+    /// reste présent en mode dégradé et renvoie 503 si atelier_meta est absent.
+    pub pilot: PilotService,
+
     /// Intégration reverse-proxy Homeroute : appelle l'API hr-api existante pour
     /// créer/retirer des routes hostname pour les apps. Endpoints sous
     /// `/api/homeroute/*` ; renvoie 503 si le control-plane Postgres est absent.
@@ -164,6 +169,7 @@ impl ApiState {
         logs: LogIngestService,
         surveillance: SurveillanceService,
         backup: BackupService,
+        pilot: PilotService,
         homeroute: crate::clients::homeroute_service::HomerouteService,
         usage_stats: UsageStatsStore,
     ) -> Self {
@@ -192,6 +198,7 @@ impl ApiState {
             logs,
             surveillance,
             backup,
+            pilot,
             homeroute,
             usage_stats,
             proxy_stats: Arc::new(ProxyStats::new()),

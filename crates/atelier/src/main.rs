@@ -7,6 +7,7 @@ use atelier_api::state::ApiState;
 use atelier_logging::{LogIngestConfig, LogIngestService, LoggingLayer};
 use atelier_backup::{BackupService, BackupServiceConfig, SourcePaths};
 use atelier_watcher::{SurveillanceConfig, SurveillanceService};
+use atelier_pilot::{ClaudeWorkerEngine, CodexWorkerEngine, PilotConfig, PilotHooks, PilotService};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -129,6 +130,19 @@ async fn main() -> Result<()> {
     // Authentification du moteur Codex (seed auth.json + télémétrie ; la vérité
     // runtime est le fichier $CODEX_HOME/auth.json). No-op quand Postgres est down.
     let codex_auth = atelier_common::codex_auth::CodexAuthStore::new(meta_pool.clone());
+    // Le PM global tourne comme `romain`, mais dans un espace Claude distinct de
+    // ~/.claude. `install -d` est idempotent et fixe aussi les permissions après
+    // une restauration ou un déploiement ancien.
+    let pilot_claude_dir = std::env::var("ATELIER_PILOT_CLAUDE_CONFIG_DIR")
+        .unwrap_or_else(|_| "/var/lib/atelier/pilot/.claude".into());
+    match std::process::Command::new("install")
+        .args(["-d", "-m", "0700", "-o", "romain", "-g", "romain", &pilot_claude_dir])
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => warn!(%status, path = %pilot_claude_dir, "pilot Claude config directory setup failed"),
+        Err(err) => warn!(%err, path = %pilot_claude_dir, "cannot run install for pilot Claude config directory"),
+    }
     // Statistiques d'utilisation (page /stats) : store des tables app_traffic_daily
     // / agent_turn_usage / app_build_runs. Purge de rétention + réconciliation des
     // builds laissés `running` par un restart d'Atelier, au boot. No-op sans pool.
@@ -185,6 +199,61 @@ async fn main() -> Result<()> {
     // le même `Arc<EventBus>` que celui passé à `ApiState::new` ci-dessous.
     source_watcher::spawn_source_watcher(events.clone(), apps_src_root.clone());
 
+    // Racine du dépôt source d'Atelier — partagée par le Pilote (worker atelier)
+    // et le git_watcher (clôture d'items backlog scope 'atelier' par commit).
+    let atelier_source_root = PathBuf::from(
+        std::env::var("ATELIER_SOURCE_ROOT").unwrap_or_else(|_| "/home/romain/atelier".into()),
+    );
+
+    // Pilote partage le pool atelier_meta du control-plane : migrations
+    // idempotentes, backlog disponible même si les hooks runtime sont câblés
+    // plus bas après construction d'ApiState. Construit AVANT la surveillance
+    // pour que le git_watcher puisse republier les items backlog clos par commit.
+    let pilot_timeout = std::env::var("ATELIER_PILOT_TIMEOUT_SECS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(3600u64);
+    let pilot_runner = std::env::var("ATELIER_PILOT_RUNNER")
+        .unwrap_or_else(|_| "/opt/atelier/runner/src/worker.js".to_string());
+    let pilot_engine = ClaudeWorkerEngine {
+        node_bin: std::env::var("ATELIER_AGENT_NODE_BIN").unwrap_or_else(|_| "/usr/bin/node".into()),
+        script: PathBuf::from(pilot_runner),
+        run_as_user: std::env::var("ATELIER_AGENT_USER").unwrap_or_else(|_| "hr-studio".into()),
+        config_dir: PathBuf::from(std::env::var("ATELIER_AGENT_CLAUDE_CONFIG_DIR").unwrap_or_else(|_| "/var/lib/hr-studio/.claude".into())),
+        // Le service ajoute scope=pilot-worker + project=<slug> au moment du run.
+        mcp_endpoint: Some(mcp_endpoint.clone()),
+        mcp_token: std::env::var("MCP_TOKEN").ok(),
+        model: std::env::var("ATELIER_PILOT_MODEL").unwrap_or_else(|_| "claude-opus-4-8[1m]".into()),
+        effort: std::env::var("ATELIER_PILOT_EFFORT").unwrap_or_else(|_| "xhigh".into()),
+        timeout: Duration::from_secs(pilot_timeout),
+    };
+    let codex_worker_script = PathBuf::from(std::env::var("ATELIER_PILOT_CODEX_RUNNER")
+        .unwrap_or_else(|_| "/opt/atelier/runner/src/codex_worker.js".into()));
+    let codex_home = PathBuf::from(std::env::var("ATELIER_AGENT_CODEX_HOME")
+        .unwrap_or_else(|_| "/var/lib/hr-studio/.codex".into()));
+    let codex_worker = if codex_worker_script.is_file() && codex_home.join("auth.json").is_file() {
+        Some(CodexWorkerEngine {
+            node_bin: std::env::var("ATELIER_AGENT_NODE_BIN").unwrap_or_else(|_| "/usr/bin/node".into()),
+            script: codex_worker_script,
+            run_as_user: std::env::var("ATELIER_AGENT_USER").unwrap_or_else(|_| "hr-studio".into()),
+            codex_home,
+            model: "gpt-5.6-sol".into(),
+            effort: "xhigh".into(),
+            timeout: Duration::from_secs(pilot_timeout),
+        })
+    } else {
+        None
+    };
+    let pilot = PilotService::start(meta_pool.clone(), PilotConfig {
+        apps_src_root: apps_src_root.clone(),
+        atelier_root: atelier_source_root.clone(),
+        app_user: std::env::var("ATELIER_AGENT_USER").unwrap_or_else(|_| "hr-studio".into()),
+        atelier_user: std::env::var("ATELIER_PILOT_ATELIER_USER").unwrap_or_else(|_| "romain".into()),
+        model: pilot_engine.model.clone(),
+        effort: pilot_engine.effort.clone(),
+        timeout: pilot_engine.timeout,
+        engine: pilot_engine,
+        codex_engine: codex_worker,
+    }).await;
+
     // Câblage d'auth SDK pour le watcher (closures plutôt qu'une dép du watcher vers
     // atelier-common) : (1) provider de token frais injecté au stdin de chaque scan
     // (ré-auth sans restart) ; (2) sink de panne — dédup atomique (claim agent_auth)
@@ -226,6 +295,22 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Republication live des items backlog clos par un commit `fix(backlog:<id>)`
+    // détecté par le git_watcher : le SQL du watcher contourne le store Pilote
+    // (aucun event `pilot:backlog`), le sink comble ce trou pour le kanban.
+    // Spawn : le sink est appelé depuis la boucle sync du watcher.
+    let on_backlog_settled: atelier_watcher::BacklogSettledSink = {
+        let pilot = pilot.clone();
+        std::sync::Arc::new(move |item_id: i64| {
+            let pilot = pilot.clone();
+            tokio::spawn(async move {
+                if let Some(backlog) = pilot.backlog() {
+                    backlog.republish(item_id).await;
+                }
+            });
+        })
+    };
+
     // Surveillance IA (sécurité + code_review + business). Migrate schema, spawn
     // git_watcher + sweep scheduler loops. Runs manuels, sweep automatique
     // (manuel ou planifié). Le scan-agent est le Claude Agent SDK (runner
@@ -233,9 +318,11 @@ async fn main() -> Result<()> {
     let surveillance = init_surveillance(
         &app_registry,
         &apps_src_root,
+        &atelier_source_root,
         &mcp_endpoint,
         Some(token_provider),
         Some(on_auth_failure),
+        Some(on_backlog_settled),
     )
     .await;
 
@@ -290,9 +377,134 @@ async fn main() -> Result<()> {
         logs,
         surveillance,
         backup,
+        pilot,
         homeroute,
         usage_stats,
     );
+
+    // Runtime hooks kept outside atelier-pilot so the crate remains independent
+    // from API/app/watcher internals. Build/ship are the exact shared platform
+    // pipelines; health is polled through Atelier's path proxy.
+    {
+        let apps_ctx = atelier_api::mcp::apps_ops::AppsContext::from_api_state(&state);
+        let build_ctx = apps_ctx.clone();
+        let ship_ctx = apps_ctx.clone();
+        let token_store = state.agent_auth.clone();
+        let notifications = state.notifications.clone();
+        let auth_store = state.agent_auth.clone();
+        let auth_notifications = state.notifications.clone();
+        let registry = state.app_registry.clone();
+        let guard_registry = state.app_registry.clone();
+        let surveillance_busy = state.surveillance.clone();
+        let backup_busy = state.backup.clone();
+        let findings_svc = state.surveillance.clone();
+        let resolve_svc = state.surveillance.clone();
+        state.pilot.configure_hooks(PilotHooks {
+            token: Arc::new(move || {
+                let store = token_store.clone();
+                Box::pin(async move { store.token().await })
+            }),
+            build: Arc::new(move |slug| {
+                let ctx = build_ctx.clone();
+                Box::pin(async move {
+                    let r = ctx.build(slug, Some(1800)).await;
+                    pipeline_verdict("build", r.ok, r.data, r.error)
+                })
+            }),
+            ship: Arc::new(move |slug| {
+                let ctx = ship_ctx.clone();
+                Box::pin(async move {
+                    let r = ctx.ship(slug, Some(900)).await;
+                    pipeline_verdict("ship", r.ok, r.data, r.error)
+                })
+            }),
+            health: Arc::new(move |slug| {
+                let registry = registry.clone();
+                Box::pin(async move {
+                    let app = registry.get(&slug).await.ok_or_else(|| "app introuvable".to_string())?;
+                    let path = if app.health_path.starts_with('/') { app.health_path } else { format!("/{}", app.health_path) };
+                    let url = format!("http://127.0.0.1:4100/apps/{slug}{path}");
+                    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|e| e.to_string())?;
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+                    loop {
+                        if let Ok(resp) = client.get(&url).send().await
+                            && (resp.status().is_success() || resp.status().is_redirection()) { return Ok(()); }
+                        if tokio::time::Instant::now() >= deadline { return Err(format!("healthcheck timeout: {url}")); }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                })
+            }),
+            notify: Arc::new(move |slug, level, title, body| {
+                let notifications = notifications.clone();
+                Box::pin(async move {
+                    let title = format!("Pilote — {title}");
+                    // source='pilot' : le front route ces notifications vers /backlog
+                    // (rapport du matin, item bloqué, questions, auth).
+                    let _ = notifications.push(slug.as_deref(), "pilot", "notice", &level, &title, Some(&body)).await;
+                })
+            }),
+            // Panne d'auth SDK détectée par un run Pilote : même claim atomique
+            // (dédup `agent_auth.record_failure`) que le sink du watcher — un token
+            // mort touche chaque run de la nuit, une seule notification rouge par
+            // intervalle. `record_ok` (au retour d'un token valide) réarme le claim.
+            on_auth_failure: {
+                Arc::new(move |msg: String| {
+                    let (aa, notif) = (auth_store.clone(), auth_notifications.clone());
+                    tokio::spawn(async move {
+                        if aa
+                            .record_failure(&msg, atelier_common::agent_auth::notify_interval_secs())
+                            .await
+                        {
+                            let _ = notif
+                                .push(
+                                    None,
+                                    "pilot",
+                                    "notice",
+                                    "error",
+                                    "Authentification Claude expirée — nuit Pilote interrompue",
+                                    Some(&format!(
+                                        "Le token OAuth abonnement du runner est expiré/révoqué — la \
+                                         nuit Pilote s'arrête (tout run échouerait pareil). \
+                                         Renouvelle-le (`claude setup-token`) puis Paramètres → \
+                                         Authentification Claude. Détail : {msg}"
+                                    )),
+                                )
+                                .await;
+                        }
+                    });
+                })
+            },
+            live_sessions: Arc::new(atelier_api::routes::agent::has_live_sessions),
+            platform_busy: Arc::new(move || surveillance_busy.is_busy() || backup_busy.is_running()),
+            findings: Arc::new(move || {
+                let svc = findings_svc.clone();
+                Box::pin(async move {
+                    let Some(store) = svc.findings() else { return Vec::new() };
+                    store.list(atelier_watcher::FindingFilter { status: Some("open".into()), limit: Some(1000), ..Default::default() })
+                        .await.unwrap_or_default().into_iter().map(|f| atelier_pilot::service::PilotFinding {
+                            id: f.id, slug: f.slug, kind: f.kind, severity: f.severity,
+                            title: f.title, summary: f.summary, plan: f.plan,
+                        }).collect()
+                })
+            }),
+            resolve_finding: Arc::new(move |id, sha| {
+                let svc = resolve_svc.clone();
+                Box::pin(async move {
+                    let store = svc.findings().ok_or_else(|| "surveillance indisponible".to_string())?;
+                    store.resolve(id, sha.as_deref()).await.map(|_| ()).map_err(|e| e.to_string())
+                })
+            }),
+            app_slugs: Arc::new(move || {
+                let registry = guard_registry.clone();
+                Box::pin(async move { registry.list().await.into_iter().map(|app| app.slug).collect() })
+            }),
+        });
+        let pilot_busy = state.pilot.clone();
+        let backup_busy = state.backup.clone();
+        state.surveillance.set_external_busy(Arc::new(move || {
+            pilot_busy.is_busy() || backup_busy.is_running()
+        }));
+    }
     info!(
         slugs = ?state.preserve_prefix_slugs,
         "apps_proxy: prefix-preserving (no-strip) slugs"
@@ -417,7 +629,7 @@ async fn main() -> Result<()> {
     info!(addr = %http_addr, "http listener bound");
 
     let http_task = tokio::spawn(async move {
-        if let Err(err) = axum::serve(listener, app).await {
+        if let Err(err) = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
             error!(?err, "http server exited");
         }
     });
@@ -471,9 +683,11 @@ async fn main() -> Result<()> {
 async fn init_surveillance(
     registry: &atelier_apps::AppRegistry,
     apps_src_root: &PathBuf,
+    atelier_src_root: &PathBuf,
     mcp_endpoint: &str,
     token_provider: Option<atelier_watcher::TokenProvider>,
     on_auth_failure: Option<atelier_watcher::AuthFailureSink>,
+    on_backlog_settled: Option<atelier_watcher::BacklogSettledSink>,
 ) -> SurveillanceService {
     let admin_dsn = std::env::var("ATELIER_DV_ADMIN_URL")
         .ok()
@@ -534,13 +748,68 @@ async fn init_surveillance(
             db_name: None,
             seed_apps,
             apps_src_root: apps_src_root.clone(),
+            atelier_src_root: Some(atelier_src_root.clone()),
             driver: driver_cfg,
             max_concurrent,
         },
         token_provider,
         on_auth_failure,
+        on_backlog_settled,
     )
     .await
+}
+
+/// Verdict réel des pipelines `AppsContext::{build,ship}` pour les hooks Pilote.
+/// WHY : ces pipelines renvoient `ok=true` MÊME quand la commande interne échoue
+/// — l'échec vit dans `data.exit_code` (cf. `StageAccumulator::into_result`,
+/// apps_ops.rs), mirror de l'inspection du tool MCP `ship` (mcp.rs). C'est le
+/// gate final avant l'auto-commit d'un run autonome : se contenter de `ok`
+/// laisserait committer un build cassé.
+fn pipeline_verdict(
+    action: &str,
+    ok: bool,
+    data: Option<serde_json::Value>,
+    error: Option<String>,
+) -> Result<(), String> {
+    let exit_code = data
+        .as_ref()
+        .and_then(|d| d.get("exit_code"))
+        .and_then(|v| v.as_i64());
+    // exit_code absent + ok=true = pipeline sans AppExecResult (rien à inspecter),
+    // même convention que le handler MCP ship (`unwrap_or(0)`).
+    if ok && exit_code.unwrap_or(0) == 0 {
+        return Ok(());
+    }
+    // Message le plus utile disponible : erreur explicite du pipeline, sinon le
+    // tail du stderr accumulé (compile/rsync/restart), sinon générique.
+    let stderr_tail = data
+        .as_ref()
+        .and_then(|d| d.get("stderr"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| tail_str(s, 800));
+    let detail = error
+        .filter(|e| !e.trim().is_empty())
+        .or(stderr_tail)
+        .unwrap_or_else(|| format!("{action} failed"));
+    match exit_code {
+        Some(code) if code != 0 => Err(format!("{action} exit={code}: {detail}")),
+        _ => Err(detail),
+    }
+}
+
+/// Derniers `max` octets d'une chaîne, alignés sur une frontière UTF-8 (la fin
+/// d'un stderr de build porte l'erreur ; le début n'est que du bruit).
+fn tail_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &s[start..])
 }
 
 /// Bootstrap du service de sauvegarde. Réutilise `ATELIER_DV_ADMIN_URL` pour

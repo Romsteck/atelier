@@ -29,6 +29,7 @@ atelier-apps      = { workspace = true }
 atelier-logging = { workspace = true }
 atelier-watcher = { workspace = true }
 atelier-backup  = { workspace = true }
+atelier-pilot   = { workspace = true }
 sqlx-core    = { workspace = true }
 sqlx-postgres = { workspace = true }
 reqwest      = { workspace = true }

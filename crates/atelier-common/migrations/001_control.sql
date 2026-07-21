@@ -245,6 +245,9 @@ CREATE TABLE IF NOT EXISTS agent_conversation_meta (
 -- resume/list/delete pour un sessionId donné. DEFAULT 'claude' : tout le legacy
 -- est Claude, les lignes existantes se qualifient donc correctement d'office.
 ALTER TABLE agent_conversation_meta ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'claude';
+-- Profil chef de projet Pilote, séparé des conversations de développement.
+ALTER TABLE agent_conversation_meta ADD COLUMN IF NOT EXISTS profile TEXT NOT NULL DEFAULT 'dev';
+ALTER TABLE agent_conversation_meta ADD COLUMN IF NOT EXISTS pm_mode TEXT NOT NULL DEFAULT 'normal';
 
 -- ---------------------------------------------------------------------------
 -- agent_auth — singleton : token OAuth abonnement LONGUE DURÉE du runner/scan

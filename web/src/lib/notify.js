@@ -74,11 +74,15 @@ export async function showAgentNotification({ slug, sid, title }) {
 // event système). `tag` par id → chaque onglet ouvert reçoit le même WS event et
 // appelle showNotification : le tag identique collapse nativement les doublons
 // multi-onglets (renotify:false = pas de re-alerte).
-export async function showPlatformNotification({ id, slug, level, title, body }) {
+export async function showPlatformNotification({ id, slug, source, level, title, body }) {
   if (notificationPermission() !== 'granted') return;
   try {
     const reg = await navigator.serviceWorker?.ready;
     const prefix = level === 'error' ? '⛔ ' : level === 'warn' ? '⚠️ ' : '';
+    // Routage Pilote par `source` (le backend pose source='pilot' sur toutes les
+    // notifs Pilote) ; le préfixe de titre reste en repli pour les entrées émises
+    // avant ce contrat.
+    const isPilot = source === 'pilot' || String(title || '').startsWith('Pilote —');
     await reg?.showNotification?.(`${prefix}Atelier${slug ? ` — ${slug}` : ''}`, {
       body: body ? `${title}\n${body}` : title,
       icon: '/icon-192.png',
@@ -87,7 +91,7 @@ export async function showPlatformNotification({ id, slug, level, title, body })
       renotify: false,
       // `target` consommé par `notificationclick` (sw.js) : Studio de l'app si
       // slug, sinon homepage avec le tiroir notifications ouvert.
-      data: { target: slug ? `/studio/${slug}?tab=code` : '/?notif=1' },
+      data: { target: isPilot ? '/backlog?notif=1' : (slug ? `/studio/${slug}?tab=code` : '/?notif=1') },
     });
   } catch {
     /* ignore */

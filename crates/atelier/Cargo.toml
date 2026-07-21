@@ -22,8 +22,10 @@ atelier-api = { workspace = true }
 atelier-logging = { workspace = true }
 atelier-watcher = { workspace = true }
 atelier-backup  = { workspace = true }
+atelier-pilot   = { workspace = true }
 atelier-common    = { workspace = true }
 atelier-docs      = { workspace = true }
 atelier-git       = { workspace = true }
 atelier-dataverse = { workspace = true }
 atelier-apps      = { workspace = true }
+reqwest           = { workspace = true }

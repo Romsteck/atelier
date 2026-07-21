@@ -123,6 +123,10 @@ struct RunState {
     /// `plan_decision`) jusqu'au `turn_done`/`done`. Exposé dans le snapshot (`running`,
     /// pour restaurer l'indicateur de réflexion après un refresh) et utilisé par le drain.
     turn_active: bool,
+    /// `dev` | `pm`; PM sessions are permanently read-only project managers.
+    profile: String,
+    /// `normal` | `brainstorm`, persisted per PM conversation.
+    pm_mode: String,
 }
 
 static RUNS: LazyLock<Mutex<HashMap<String, RunState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -493,6 +497,15 @@ fn claude_config_dir() -> String {
     std::env::var("ATELIER_AGENT_CLAUDE_CONFIG_DIR")
         .unwrap_or_else(|_| "/var/lib/hr-studio/.claude".into())
 }
+fn pilot_claude_config_dir() -> String {
+    std::env::var("ATELIER_PILOT_CLAUDE_CONFIG_DIR")
+        .unwrap_or_else(|_| "/var/lib/atelier/pilot/.claude".into())
+}
+fn atelier_source_root() -> PathBuf {
+    std::env::var("ATELIER_SOURCE_ROOT")
+        .unwrap_or_else(|_| "/home/romain/atelier".into())
+        .into()
+}
 fn mcp_endpoint_base() -> String {
     std::env::var("ATELIER_MCP_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:4100/mcp".into())
 }
@@ -526,15 +539,20 @@ fn runner_command(cwd: &FsPath, engine: Engine) -> Command {
     // Whitelist d'env : une seule variable (un chemin, jamais un secret) par moteur
     // traverse l'env_reset de sudo. Les secrets — MCP_TOKEN, token OAuth, contenu
     // d'auth.json — passent TOUJOURS par stdin (sudo journalise son ENV=).
+    let global_pm = engine == Engine::Claude && cwd == atelier_source_root();
     let (env_key, env_val, script) = match engine {
-        Engine::Claude => ("CLAUDE_CONFIG_DIR", claude_config_dir(), runner_script()),
+        Engine::Claude => (
+            "CLAUDE_CONFIG_DIR",
+            if global_pm { pilot_claude_config_dir() } else { claude_config_dir() },
+            runner_script(),
+        ),
         Engine::Codex => ("CODEX_HOME", codex_home(), codex_script()),
     };
     let mut cmd = Command::new("sudo");
     cmd.arg("-n")
         .arg("-H")
         .arg("-u")
-        .arg(run_as_user())
+        .arg(if global_pm { "romain".to_string() } else { run_as_user() })
         .arg(format!("--preserve-env={env_key}"))
         .arg("--")
         .arg(node_bin())
@@ -661,6 +679,18 @@ struct QueryBody {
     model: Option<String>,
     #[serde(default)]
     images: Option<Vec<ImageInput>>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    pm_mode: Option<String>,
+}
+
+fn workspace_cwd(state: &ApiState, slug: &str) -> PathBuf {
+    if slug == "@pilot" {
+        PathBuf::from(std::env::var("ATELIER_SOURCE_ROOT").unwrap_or_else(|_| "/home/romain/atelier".into()))
+    } else {
+        state.apps_src_root.join(slug).join("src")
+    }
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
@@ -677,8 +707,13 @@ async fn query(
     if body.prompt.trim().is_empty() && n_images == 0 {
         return err(StatusCode::BAD_REQUEST, "prompt vide");
     }
-    // cwd = la source de l'app (le working tree édité par l'agent). Doit exister.
-    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    let profile = if body.profile.as_deref() == Some("pm") { "pm" } else { "dev" };
+    let pm_mode = if body.pm_mode.as_deref() == Some("brainstorm") { "brainstorm" } else { "normal" };
+    if slug == "@pilot" && profile != "pm" {
+        return err(StatusCode::BAD_REQUEST, "@pilot est réservé au profil chef de projet");
+    }
+    // PM global reads the Atelier source root; app profiles keep the app workspace.
+    let cwd = workspace_cwd(&state, &slug);
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, format!("app source introuvable: {}", cwd.display()));
     }
@@ -686,25 +721,33 @@ async fn query(
     let Some(mut engine) = Engine::parse(body.engine.as_deref().unwrap_or("")) else {
         return err(StatusCode::BAD_REQUEST, "engine invalide (claude|codex)");
     };
+    if profile == "pm" { engine = Engine::Claude; }
     // Reprise : le moteur PERSISTÉ fait autorité (il est figé au binding, jamais mis à
     // jour). WHY on ne rejette PAS un désaccord : un client qui a perdu le meta de la
     // conversation (Postgres muet au moment du snapshot) enverrait le défaut `claude` et
     // se verrait refuser la reprise de son thread Codex — alors que la base sait à quel
     // runner l'adresser. On corrige et on trace.
     if let Some(sid) = body.resume.as_deref() {
-        let persisted = state
-            .conversation_meta
-            .get(&slug, sid)
-            .await
-            .and_then(|v| v.get("engine").and_then(|x| x.as_str()).map(String::from))
-            .and_then(|e| Engine::parse(&e));
-        if let Some(p) = persisted {
+        let persisted_meta = state.conversation_meta.get(&slug, sid).await;
+        if let Some(bound_profile) = persisted_meta.as_ref()
+            .and_then(|v| v.get("profile")).and_then(|v| v.as_str())
+            && bound_profile != profile
+        {
+            return err(StatusCode::CONFLICT, "conversation liée à un autre profil");
+        }
+        let persisted = persisted_meta.as_ref()
+            .and_then(|v| v.get("engine").and_then(|x| x.as_str()))
+            .and_then(Engine::parse);
+        if profile != "pm" && let Some(p) = persisted {
             if p != engine {
                 warn!(slug = %slug, sid = %sid, asked = engine.as_str(), effective = p.as_str(), "resume: engine du client ignoré au profit du moteur persisté");
             }
             engine = p;
         }
     }
+    // PM safety is invariant across resumes, including legacy metadata that
+    // might have been bound to Codex before profiles existed.
+    if profile == "pm" { engine = Engine::Claude; }
     // Incohérence modèle/moteur = bug client (le mauvais runner échouerait de façon
     // opaque). Un modèle absent ou de famille inconnue reste accepté (cf. engine_of_model).
     if let Some(want) = engine_of_model(body.model.as_deref())
@@ -781,7 +824,7 @@ async fn query(
     items.push(user_item(&body.prompt));
 
     // Mode initial côté UI ('plan' | 'bypass'), dérivé du permissionMode SDK demandé.
-    let permission_mode = body.permission_mode.clone().unwrap_or_else(|| "plan".into());
+    let permission_mode = if profile == "pm" { "plan".into() } else { body.permission_mode.clone().unwrap_or_else(|| "plan".into()) };
     let ui_mode = if permission_mode == "bypassPermissions" { "bypass" } else { "plan" };
 
     // L'init est consommé par le shim du moteur (clés camelCase, communes aux deux).
@@ -793,9 +836,13 @@ async fn query(
     // Côté Codex l'init est volontairement PLUS PAUVRE : pas de MCP studio en v1 (donc
     // ni endpoint ni token), pas d'allowlist d'outils (le garde-fou est le sandbox du
     // CLI, piloté par `permissionMode`), et l'auth est le fichier `$CODEX_HOME/auth.json`.
+    let wire_prompt = if profile == "pm" {
+        format!("{}\n⟦/PM⟧\n{}", crate::pm_prompts::mode_header(pm_mode), body.prompt)
+    } else { body.prompt.clone() };
+    let pm_system = if slug == "@pilot" { crate::pm_prompts::PM_PREAMBLE_GLOBAL } else { crate::pm_prompts::PM_PREAMBLE_APP };
     let init = match engine {
         Engine::Codex => json!({
-            "prompt": body.prompt,
+            "prompt": wire_prompt,
             "effort": body.effort, // None → null → le shim retombe sur 'medium'
             "permissionMode": permission_mode,
             "cwd": cwd.to_string_lossy(),
@@ -804,17 +851,23 @@ async fn query(
             "images": body.images,
         }),
         Engine::Claude => json!({
-            "prompt": body.prompt,
-            "effort": body.effort, // None → null → runner omet (Haiku ne supporte pas effort)
+            "prompt": wire_prompt,
+            "effort": if profile == "pm" { Some("xhigh".to_string()) } else { body.effort.clone() },
             "permissionMode": permission_mode,
             "allowedTools": allowed_tools,
             "cwd": cwd.to_string_lossy(),
-            "mcpEndpoint": format!("{}?project={}", mcp_endpoint_base(), slug),
+            "mcpEndpoint": if profile == "pm" {
+                if slug == "@pilot" { format!("{}?scope=pilot", mcp_endpoint_base()) }
+                else { format!("{}?scope=pilot&project={}", mcp_endpoint_base(), slug) }
+            } else { format!("{}?project={}", mcp_endpoint_base(), slug) },
             "mcpToken": std::env::var("MCP_TOKEN").ok(),
             "oauthToken": state.agent_auth.token().await, // None → null → runner ignore (fallback creds)
             "resume": body.resume,
-            "model": body.model,
+            "model": if profile == "pm" { Some("claude-opus-4-8[1m]".to_string()) } else { body.model.clone() },
             "images": body.images, // None → null → runner omet (texte seul)
+            "systemAppend": if profile == "pm" { Some(pm_system) } else { None },
+            "disallowedTools": if profile == "pm" { crate::pm_prompts::PM_DISALLOWED } else { &[] },
+            "profile": profile,
         }),
     };
     if n_images > 0 {
@@ -836,6 +889,8 @@ async fn query(
             model: body.model.clone(),
             effort: body.effort.clone(),
             turn_active: true, // le prompt d'init est le tour #1
+            profile: profile.to_string(),
+            pm_mode: pm_mode.to_string(),
         },
     );
 
@@ -916,6 +971,8 @@ struct MessageBody {
     text: String,
     #[serde(default)]
     images: Option<Vec<ImageInput>>,
+    #[serde(default)]
+    pm_mode: Option<String>,
 }
 
 #[instrument(skip(state, body), fields(slug = %slug, run_id = %run_id))]
@@ -929,7 +986,16 @@ async fn message(
     if body.text.trim().is_empty() && n_images == 0 {
         return err(StatusCode::BAD_REQUEST, "message vide");
     }
-    let line = json!({ "type": "user_message", "text": body.text, "images": body.images }).to_string();
+    let pm_mode = if body.pm_mode.as_deref() == Some("brainstorm") { "brainstorm" } else { "normal" };
+    let (wire_text, sid, is_pm) = {
+        let mut runs = RUNS.lock();
+        let Some(r) = runs.get_mut(&run_id) else { return err(StatusCode::NOT_FOUND, "session inconnue ou terminée") };
+        let is_pm = r.profile == "pm";
+        if is_pm { r.pm_mode = pm_mode.into(); }
+        let text = if is_pm { format!("{}\n⟦/PM⟧\n{}", crate::pm_prompts::mode_header(pm_mode), body.text) } else { body.text.clone() };
+        (text, r.session_id.clone(), is_pm)
+    };
+    let line = json!({ "type": "user_message", "text": wire_text, "images": body.images }).to_string();
     // Marqueur d'image dans le buffer d'affichage (reload) si le tour est image-only.
     let display_text = if body.text.trim().is_empty() && n_images > 0 { "🖼 image".to_string() } else { body.text.clone() };
     if send_input(&run_id, line) {
@@ -939,6 +1005,9 @@ async fn message(
             r.turn_active = true; // nouveau tour soumis
         }
         info!(run_id = %run_id, "agent message sent");
+        if is_pm {
+            if let Some(sid) = sid { state.conversation_meta.set_pm_mode(&slug, &sid, pm_mode).await; }
+        }
         (StatusCode::OK, Json(json!({"ok": true}))).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "session inconnue ou terminée")
@@ -1070,6 +1139,9 @@ async fn set_mode(
     if body.mode != "plan" && body.mode != "bypass" {
         return err(StatusCode::BAD_REQUEST, "mode invalide (plan|bypass)");
     }
+    if RUNS.lock().get(&run_id).map(|r| r.profile.as_str()) == Some("pm") && body.mode != "plan" {
+        return err(StatusCode::FORBIDDEN, "le profil chef de projet reste en lecture seule");
+    }
     let line = json!({ "type": "set_mode", "mode": body.mode }).to_string();
     if send_input(&run_id, line) {
         if let Some(r) = RUNS.lock().get_mut(&run_id) {
@@ -1101,6 +1173,9 @@ async fn set_model(
     let Some(engine) = RUNS.lock().get(&run_id).map(|r| r.engine) else {
         return err(StatusCode::NOT_FOUND, "run inconnu ou terminé");
     };
+    if RUNS.lock().get(&run_id).map(|r| r.profile.as_str()) == Some("pm") {
+        return err(StatusCode::FORBIDDEN, "le modèle du profil chef de projet est figé");
+    }
     if let Some(want) = engine_of_model(body.model.as_deref())
         && want != engine
     {
@@ -1156,9 +1231,10 @@ fn pending_dialog(items: &[Value]) -> Value {
     Value::Null
 }
 
-/// Sessions vivantes de cet app : `(session_id, run_id, résumé, moteur)`. Sert à annoter
+/// Sessions vivantes de cet app : `(session_id, run_id, résumé, moteur, profil, mode PM)`.
+/// Sert à annoter
 /// la liste `live` ET à y injecter les sessions pas encore flushées sur disque.
-fn live_sessions_for(slug: &str) -> Vec<(String, String, String, Engine)> {
+fn live_sessions_for(slug: &str) -> Vec<(String, String, String, Engine, String, String)> {
     let sid_runs: Vec<(String, String)> =
         SID_RUN.lock().iter().map(|(s, r)| (s.clone(), r.clone())).collect();
     let runs = RUNS.lock();
@@ -1178,9 +1254,15 @@ fn live_sessions_for(slug: &str) -> Vec<(String, String, String, Engine)> {
                 .chars()
                 .take(80)
                 .collect::<String>();
-            Some((sid, rid, summary, r.engine))
+            Some((sid, rid, summary, r.engine, r.profile.clone(), r.pm_mode.clone()))
         })
         .collect()
+}
+
+/// Scheduler gate exposed to the Pilote wiring. It intentionally returns only
+/// a boolean so the private engine/session metadata never leaks across modules.
+pub fn has_live_sessions(slug: &str) -> bool {
+    !live_sessions_for(slug).is_empty()
 }
 
 /// Moteur d'une conversation EXISTANTE, par ordre d'autorité DÉCROISSANT : run vivant
@@ -1240,15 +1322,26 @@ struct EngineQuery {
     engine: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConversationListQuery {
+    #[serde(default)]
+    profile: Option<String>,
+}
+
 /// `GET /api/apps/{slug}/agent/conversations` — liste les sessions des DEUX moteurs
 /// (`op:list` de chaque shim, sur disque), chacune taggée `engine`, annotées
 /// `live`/`run_id`, plus les sessions vivantes pas encore persistées (injectées en tête).
-#[instrument(skip(state), fields(slug = %slug))]
+#[instrument(skip(state, q), fields(slug = %slug))]
 async fn list_conversations(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
+    Query(q): Query<ConversationListQuery>,
 ) -> impl IntoResponse {
-    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    let requested_profile = q.profile.as_deref().unwrap_or("dev");
+    if !matches!(requested_profile, "dev" | "pm" | "all") {
+        return err(StatusCode::BAD_REQUEST, "profile invalide (dev|pm|all)");
+    }
+    let cwd = workspace_cwd(&state, &slug);
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
@@ -1258,10 +1351,22 @@ async fn list_conversations(
     // shims EN PARALLÈLE (deux spawns concurrents, pas deux fois la latence) et on
     // fusionne. L'indisponibilité d'un moteur (Codex pas encore déployé, par ex.) ne
     // doit PAS vider la liste de l'autre → liste partielle + warn.
-    let (claude, codex) = tokio::join!(
-        run_runner_op(&cwd, init.clone(), oauth.as_deref(), Engine::Claude),
-        run_runner_op(&cwd, init, None, Engine::Codex),
-    );
+    // Exception : la sentinelle @pilot (PM global) est Claude-only — le shim Codex
+    // tournerait en hr-studio avec cwd /home/romain/atelier (EACCES) et produirait
+    // un `unavailable` systématique et trompeur ; on ne le spawne pas du tout.
+    let results: Vec<(Engine, Result<Value, String>)> = if slug == "@pilot" {
+        vec![(
+            Engine::Claude,
+            run_runner_op(&cwd, init, oauth.as_deref(), Engine::Claude).await,
+        )]
+    } else {
+        let (claude, codex) = tokio::join!(
+            run_runner_op(&cwd, init.clone(), oauth.as_deref(), Engine::Claude),
+            run_runner_op(&cwd, init, None, Engine::Codex),
+        );
+        vec![(Engine::Claude, claude), (Engine::Codex, codex)]
+    };
+    let queried = results.len();
 
     let mut conversations: Vec<Value> = Vec::new();
     // WHY nommer les moteurs en échec plutôt que les compter : fondue dans un compteur
@@ -1270,7 +1375,7 @@ async fn list_conversations(
     // partielle reste tolérée (Codex jamais configuré ne doit pas casser l'historique
     // Claude), mais le champ `unavailable` rend la panne visible au front.
     let mut unavailable: Vec<String> = Vec::new();
-    for (engine, res) in [(Engine::Claude, claude), (Engine::Codex, codex)] {
+    for (engine, res) in results {
         match res {
             Ok(v) if v.get("t").and_then(|x| x.as_str()) == Some("sessions") => {
                 for mut s in v.get("sessions").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
@@ -1288,7 +1393,7 @@ async fn list_conversations(
             }
         }
     }
-    if unavailable.len() == 2 {
+    if unavailable.len() == queried {
         return err(StatusCode::BAD_GATEWAY, "aucun moteur n'a pu lister les conversations");
     }
 
@@ -1300,11 +1405,18 @@ async fn list_conversations(
         };
         on_disk.push(sid.clone());
         match live.iter().find(|(lsid, ..)| *lsid == sid) {
-            Some((_, rid, _, _)) => {
+            Some((_, rid, _, _, profile, pm_mode)) => {
                 s["live"] = json!(true);
                 s["run_id"] = json!(rid);
+                s["profile"] = json!(profile);
+                s["pm_mode"] = json!(pm_mode);
             }
-            None => s["live"] = json!(false),
+            None => {
+                s["live"] = json!(false);
+                let meta = state.conversation_meta.get(&slug, &sid).await;
+                s["profile"] = meta.as_ref().and_then(|m| m.get("profile")).cloned().unwrap_or_else(|| json!("dev"));
+                s["pm_mode"] = meta.as_ref().and_then(|m| m.get("pm_mode")).cloned().unwrap_or_else(|| json!("normal"));
+            }
         }
     }
     // Chaque shim trie SA liste : la fusion doit re-trier (`lastModified` en ms unix des
@@ -1312,7 +1424,7 @@ async fn list_conversations(
     conversations.sort_by_key(|c| {
         std::cmp::Reverse(c.get("lastModified").and_then(|x| x.as_u64()).unwrap_or(0))
     });
-    for (sid, rid, summary, engine) in live {
+    for (sid, rid, summary, engine, profile, pm_mode) in live {
         if !on_disk.contains(&sid) {
             conversations.insert(0, json!({
                 "sessionId": sid,
@@ -1320,9 +1432,16 @@ async fn list_conversations(
                 "live": true,
                 "run_id": rid,
                 "summary": summary,
+                "profile": profile,
+                "pm_mode": pm_mode,
                 "lastModified": now_ms(),
             }));
         }
+    }
+    if requested_profile != "all" {
+        conversations.retain(|c| {
+            c.get("profile").and_then(Value::as_str).unwrap_or("dev") == requested_profile
+        });
     }
     Json(json!({ "conversations": conversations, "unavailable": unavailable })).into_response()
 }
@@ -1335,7 +1454,7 @@ async fn get_conversation(
     Path((slug, sid)): Path<(String, String)>,
     Query(q): Query<EngineQuery>,
 ) -> axum::response::Response {
-    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    let cwd = workspace_cwd(&state, &slug);
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
@@ -1349,8 +1468,8 @@ async fn get_conversation(
         let snap = RUNS
             .lock()
             .get(&rid)
-            .map(|r| (r.items.clone(), r.mode.clone(), r.turn_active, r.model.clone(), r.effort.clone(), r.engine));
-        if let Some((items, mode, turn_active, model, effort, engine)) = snap {
+            .map(|r| (r.items.clone(), r.mode.clone(), r.turn_active, r.model.clone(), r.effort.clone(), r.engine, r.profile.clone(), r.pm_mode.clone()));
+        if let Some((items, mode, turn_active, model, effort, engine, profile, pm_mode)) = snap {
             // `running` (tour en vol) + `pending` (dialogue non résolu) permettent au
             // frontend de restaurer l'indicateur de réflexion / la carte d'attente après
             // un refresh (le WS broadcast ne rejoue pas `started`/`question`).
@@ -1365,7 +1484,7 @@ async fn get_conversation(
                 "mode": mode.clone(),
                 "running": turn_active,
                 "pending": pending,
-                "settings": { "engine": engine.as_str(), "model": model, "effort": effort, "mode": mode },
+                "settings": { "engine": engine.as_str(), "model": model, "effort": effort, "mode": mode, "profile": profile, "pm_mode": pm_mode },
             }))
             .into_response();
         }
@@ -1397,7 +1516,10 @@ async fn get_conversation(
 
 #[derive(Deserialize)]
 struct SettingsBody {
-    effort: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    pm_mode: Option<String>,
 }
 
 /// `PATCH /api/apps/{slug}/agent/conversations/{sid}/settings` — persiste l'effort
@@ -1414,8 +1536,18 @@ async fn patch_conversation_settings(
     // intention persistée, et le shim Codex clampe lui-même `max` → `xhigh` au spawn.
     // Rejeter `max` pour une conversation Codex casserait une préférence héritée d'un
     // sélecteur Claude sans rien protéger.
-    if !["low", "medium", "high", "xhigh", "max"].contains(&body.effort.as_str()) {
+    if body.effort.is_none() && body.pm_mode.is_none() {
+        return err(StatusCode::BAD_REQUEST, "aucun réglage fourni");
+    }
+    if let Some(effort) = body.effort.as_deref()
+        && !["low", "medium", "high", "xhigh", "max"].contains(&effort)
+    {
         return err(StatusCode::BAD_REQUEST, "effort invalide");
+    }
+    if let Some(mode) = body.pm_mode.as_deref()
+        && !matches!(mode, "normal" | "brainstorm")
+    {
+        return err(StatusCode::BAD_REQUEST, "pm_mode invalide");
     }
     let engine = match engine_for_sid(&state, &slug, &sid, q.engine.as_deref()).await {
         Ok(e) => e,
@@ -1424,12 +1556,27 @@ async fn patch_conversation_settings(
     // Cohérence du snapshot live pendant la fenêtre de drain (le run mourant sert
     // encore le buffer mémoire) : on reflète aussi l'effort dans le RunState.
     let rid = SID_RUN.lock().get(&sid).cloned();
-    if let Some(rid) = rid {
-        if let Some(r) = RUNS.lock().get_mut(&rid) {
-            r.effort = Some(body.effort.clone());
+    if body.pm_mode.is_some() {
+        let live_is_pm = rid.as_ref().and_then(|id| RUNS.lock().get(id).map(|r| r.profile == "pm")).unwrap_or(false);
+        let stored_is_pm = state.conversation_meta.get(&slug, &sid).await
+            .and_then(|v| v.get("profile").and_then(|p| p.as_str()).map(|p| p == "pm"))
+            .unwrap_or(false);
+        if !live_is_pm && !stored_is_pm {
+            return err(StatusCode::FORBIDDEN, "réglage PM réservé au profil chef de projet");
         }
     }
-    state.conversation_meta.set_effort(&slug, &sid, engine.as_str(), &body.effort).await;
+    if let Some(rid) = rid.as_ref() {
+        if let Some(r) = RUNS.lock().get_mut(rid) {
+            if let Some(effort) = body.effort.clone() { r.effort = Some(effort); }
+            if let Some(mode) = body.pm_mode.clone() { r.pm_mode = mode; }
+        }
+    }
+    if let Some(effort) = body.effort.as_deref() {
+        state.conversation_meta.set_effort(&slug, &sid, engine.as_str(), effort).await;
+    }
+    if let Some(mode) = body.pm_mode.as_deref() {
+        state.conversation_meta.set_pm_mode(&slug, &sid, mode).await;
+    }
     (StatusCode::OK, Json(json!({"ok": true}))).into_response()
 }
 
@@ -1446,7 +1593,7 @@ async fn rename_conversation(
     Query(q): Query<EngineQuery>,
     Json(body): Json<RenameBody>,
 ) -> axum::response::Response {
-    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    let cwd = workspace_cwd(&state, &slug);
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
@@ -1473,7 +1620,7 @@ async fn delete_conversation(
     Path((slug, sid)): Path<(String, String)>,
     Query(q): Query<EngineQuery>,
 ) -> axum::response::Response {
-    let cwd: PathBuf = state.apps_src_root.join(&slug).join("src");
+    let cwd = workspace_cwd(&state, &slug);
     if !cwd.is_dir() {
         return err(StatusCode::NOT_FOUND, "app source introuvable");
     }
@@ -1772,16 +1919,16 @@ async fn run_agent(
                                     let mut runs = RUNS.lock();
                                     runs.get_mut(&run_id).map(|r| {
                                         r.session_id = Some(sid.to_string());
-                                        (r.model.clone(), r.effort.clone(), r.mode.clone())
+                                        (r.model.clone(), r.effort.clone(), r.mode.clone(), r.profile.clone(), r.pm_mode.clone())
                                     })
                                 };
-                                if let Some((model, effort, mode)) = settings {
+                                if let Some((model, effort, mode, profile, pm_mode)) = settings {
                                     let (meta, slug, sid) = (meta.clone(), slug.clone(), sid.to_string());
                                     // `engine` n'est écrit qu'à la CRÉATION de la ligne
                                     // (cf. ConversationMetaStore) : c'est ici qu'il fige
                                     // le moteur de la conversation.
                                     tokio::spawn(async move {
-                                        meta.upsert(&slug, &sid, engine.as_str(), model.as_deref(), effort.as_deref(), &mode).await;
+                                        meta.upsert(&slug, &sid, engine.as_str(), model.as_deref(), effort.as_deref(), &mode, &profile, &pm_mode).await;
                                     });
                                 }
                                 info!(run_id = %run_id, session_id = %sid, engine = engine.as_str(), "agent session bound");

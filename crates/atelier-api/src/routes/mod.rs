@@ -41,6 +41,7 @@ pub mod issues;
 pub mod logs;
 pub mod mcp;
 pub mod notifications;
+pub mod pilot;
 pub mod source;
 pub mod stats;
 pub mod surveillance;

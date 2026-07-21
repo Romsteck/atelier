@@ -87,6 +87,8 @@ pub struct McpState {
     pub notifications: atelier_common::notification_store::NotificationStore,
     /// Remontées plateforme — tool `issue_report` (même store que POST /issues).
     pub issues: atelier_common::issue_store::PlatformIssueStore,
+    /// Project backlog tools used by PM assistants and autonomous workers.
+    pub pilot: atelier_pilot::PilotService,
 }
 
 impl McpState {
@@ -113,6 +115,7 @@ impl McpState {
             surveillance: state.surveillance.clone(),
             notifications: state.notifications.clone(),
             issues: state.issues.clone(),
+            pilot: state.pilot.clone(),
         })
     }
 }
@@ -163,7 +166,7 @@ pub async fn mcp_handler(
     // cannot reach destructive tools (app.delete, db_drop_table, app.exec, …)
     // even with the global MCP token. Enforced by capability (server-authoritative),
     // not just by the prompt. Inert unless the param is present.
-    let readonly = query.get("scope").map(|s| s == "surveillance").unwrap_or(false);
+    let scope = McpScope::parse(query.get("scope").map(String::as_str));
     // ── Auth ──
     let authorized = headers
         .get("authorization")
@@ -227,8 +230,8 @@ pub async fn mcp_handler(
     // ── Route method ──
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id, &project_slug, readonly),
-        "tools/call" => handle_tools_call(id, request.params, &state, project_slug, readonly).await,
+        "tools/list" => handle_tools_list(id, &project_slug, scope),
+        "tools/call" => handle_tools_call(id, request.params, &state, project_slug, scope).await,
         _ => error_response(
             id,
             METHOD_NOT_FOUND,
@@ -250,12 +253,22 @@ fn tool_definitions() -> Value {
         tool_definitions_extended(),
         tool_definitions_apps(),
         tool_definitions_surveillance(),
+        tool_definitions_pilot(),
     ] {
         if let Value::Array(items) = defs {
             tools.extend(items);
         }
     }
     Value::Array(tools)
+}
+
+fn tool_definitions_pilot() -> Value {
+    json!([
+        { "name":"backlog_add", "description":"Create and score a project backlog item. In a project-scoped assistant, scope is injected automatically.", "inputSchema":{"type":"object","properties":{"scope":{"type":"string"},"title":{"type":"string"},"request":{"type":"string"},"description":{"type":"string"},"plan":{"type":"string"},"kind":{"type":"string","enum":["feature","bug","improvement","finding_fix"]},"priority":{"type":"string","enum":["critical","high","medium","low"]},"severity":{"type":"string","enum":["critical","high","medium","low"]},"effort":{"type":"string","enum":["xs","s","m","l","xl"]},"finding_id":{"type":"integer"},"needs_user":{"type":"boolean"},"reason":{"type":"string"},"questions":{"type":"array","items":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}},"required":["title","kind","priority","severity","effort"]}},
+        { "name":"backlog_update", "description":"Update scoring, plan, lane or block an item with explicit questions for the user.", "inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"request":{"type":"string"},"description":{"type":"string"},"plan":{"type":"string"},"kind":{"type":"string"},"priority":{"type":"string"},"severity":{"type":"string"},"effort":{"type":"string"},"lane":{"type":"string"},"engine":{"type":"string"},"needs_user":{"type":"boolean"},"reason":{"type":"string"},"questions":{"type":"array","items":{"type":"object","properties":{"q":{"type":"string"},"answer":{"type":"string"}},"required":["q"]}}},"required":["id"]}},
+        { "name":"backlog_list", "description":"List backlog items, optionally filtered by scope and lane.", "inputSchema":{"type":"object","properties":{"scope":{"type":"string"},"lane":{"type":"string"}}}},
+        { "name":"backlog_get", "description":"Get one backlog item including its plan and pending questions.", "inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}
+    ])
 }
 
 /// Global-scope surveillance tools (explicit `slug`). The project-scope
@@ -493,7 +506,29 @@ fn handle_initialize(id: Value) -> Value {
 /// mutates app code, business data, schema, or lifecycle (app.delete/create/
 /// build/exec/control, db.execute, db_create_table/drop_table/add_column/…,
 /// raw db_query/db_exec).
-fn is_readonly_tool(name: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpScope { Full, Surveillance, Pilot, PilotWorker }
+
+impl McpScope {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("surveillance") => Self::Surveillance,
+            Some("pilot") => Self::Pilot,
+            Some("pilot-worker") => Self::PilotWorker,
+            _ => Self::Full,
+        }
+    }
+    fn permits(self, name: &str) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Surveillance => is_surveillance_tool(name),
+            Self::Pilot => is_pilot_pm_tool(name),
+            Self::PilotWorker => !is_pilot_worker_denied(name),
+        }
+    }
+}
+
+fn is_surveillance_tool(name: &str) -> bool {
     matches!(
         name,
         // Surveillance surface (meta-DB only) + forensic read
@@ -521,11 +556,38 @@ fn is_readonly_tool(name: &str) -> bool {
     )
 }
 
-fn handle_tools_list(id: Value, project_slug: &Option<String>, readonly: bool) -> Value {
-    if readonly {
-        // Read-only surveillance scope: the global set filtered to the read-only
-        // whitelist (findings/memory/runs + pm_query + read-only schema/git/docs).
-        let all = tool_definitions();
+fn is_pilot_pm_tool(name: &str) -> bool {
+    matches!(name,
+        "backlog_add" | "backlog_update" | "backlog_list" | "backlog_get"
+        | "findings_list" | "runs_list" | "pm_query" | "scan_get" | "memory_get"
+        | "notify_user" | "issue_report"
+        | "status" | "app.status" | "app.get" | "app.list"
+        | "db_tables" | "db_schema" | "db_overview" | "db_count_rows" | "db_get_schema"
+        | "db.tables" | "db.list_tables" | "db.describe" | "db.describe_table" | "db.overview" | "db.count_rows" | "db.get_schema"
+        | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search" | "docs_completeness" | "docs_diagram_get"
+        | "docs.overview" | "docs.list_entries" | "docs.get" | "docs.search" | "docs.list_apps" | "docs.completeness" | "docs.diagram_get"
+        | "git_log" | "git_branches" | "git.repos" | "git.log" | "git.branches" | "git.activity" | "git.show"
+    )
+}
+
+fn is_pilot_worker_denied(name: &str) -> bool {
+    matches!(name,
+        "app.create" | "app.delete" | "app.update" | "app_update"
+        | "env_set" | "env_delete" | "scan_set"
+        | "start" | "stop" | "restart" | "exec" | "app.control" | "app.exec"
+        | "findings_resolve" | "findings_upsert" | "findings_delete" | "surveillance_run"
+    )
+}
+
+fn project_tools_with_pilot() -> Value {
+    let mut out = tool_definitions_project().as_array().cloned().unwrap_or_default();
+    out.extend(tool_definitions_pilot().as_array().cloned().unwrap_or_default());
+    Value::Array(out)
+}
+
+fn handle_tools_list(id: Value, project_slug: &Option<String>, scope: McpScope) -> Value {
+    let all = if project_slug.is_some() { project_tools_with_pilot() } else { tool_definitions() };
+    if scope != McpScope::Full {
         let filtered: Vec<Value> = all
             .as_array()
             .map(|a| {
@@ -533,7 +595,7 @@ fn handle_tools_list(id: Value, project_slug: &Option<String>, readonly: bool) -
                     .filter(|t| {
                         t.get("name")
                             .and_then(|n| n.as_str())
-                            .map(is_readonly_tool)
+                            .map(|name| scope.permits(name))
                             .unwrap_or(false)
                     })
                     .cloned()
@@ -544,7 +606,7 @@ fn handle_tools_list(id: Value, project_slug: &Option<String>, readonly: bool) -
     }
     if project_slug.is_some() {
         // Project-scoped: only app/db/docs/studio/git tools
-        success_response(id, json!({ "tools": tool_definitions_project() }))
+        success_response(id, json!({ "tools": project_tools_with_pilot() }))
     } else {
         // Global: all tools (infra + apps)
         success_response(id, json!({ "tools": tool_definitions() }))
@@ -690,18 +752,22 @@ async fn handle_tools_call(
     params: Value,
     state: &McpState,
     project_slug: Option<String>,
-    readonly: bool,
+    scope: McpScope,
 ) -> Value {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
+    if scope == McpScope::PilotWorker && project_slug.is_none() {
+        return tool_error(id, "le scope pilot-worker exige ?project=<slug>");
+    }
+
     // Read-only surveillance scope: reject any tool outside the read-only
     // whitelist by CAPABILITY (the surveillance scan-agent cannot mutate app
     // code, data, schema or lifecycle even though it holds the global MCP token).
-    if readonly && !is_readonly_tool(tool_name) {
+    if !scope.permits(tool_name) {
         return tool_error(
             id,
-            &format!("tool '{tool_name}' is not permitted in read-only surveillance scope"),
+            &format!("tool '{tool_name}' is not permitted in {} scope", match scope { McpScope::Surveillance=>"surveillance",McpScope::Pilot=>"pilot",McpScope::PilotWorker=>"pilot-worker",McpScope::Full=>"full" }),
         );
     }
 
@@ -716,16 +782,18 @@ async fn handle_tools_call(
             "studio.refresh_context"
         ) || is_project_simplified_tool(tool_name);
         if needs_slug {
-            if arguments.get("slug").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                arguments["slug"] = json!(slug);
-            }
-            if arguments.get("app_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                arguments["app_id"] = json!(slug);
-            }
-            if arguments.get("repo").and_then(|v| v.as_str()).unwrap_or("").is_empty() && tool_name.starts_with("git.") {
-                arguments["repo"] = json!(slug);
-            }
+            arguments["slug"] = json!(slug);
+            arguments["app_id"] = json!(slug);
+            if tool_name.starts_with("git.") { arguments["repo"] = json!(slug); }
         }
+        // Backlog ownership is strict: a project-scoped PM/worker cannot
+        // override its injected scope to inspect or mutate another project.
+        if tool_name.starts_with("backlog_") {
+            arguments["scope"] = json!(slug);
+        }
+    }
+    if scope == McpScope::PilotWorker {
+        arguments["_pilot_worker"] = json!(true);
     }
 
     info!(tool = tool_name, project = ?project_slug, "MCP tools/call");
@@ -855,6 +923,11 @@ async fn handle_tools_call(
         "pm_query" => tool_pm_query(id, &arguments, state).await,
         "scan_get" => tool_scan_get(id, &arguments, state).await,
         "scan_set" => tool_scan_set(id, &arguments, state).await,
+        // ── Pilote backlog ──
+        "backlog_add" => tool_backlog_add(id, &arguments, state).await,
+        "backlog_update" => tool_backlog_update(id, &arguments, state).await,
+        "backlog_list" => tool_backlog_list(id, &arguments, state).await,
+        "backlog_get" => tool_backlog_get(id, &arguments, state).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
@@ -868,11 +941,92 @@ async fn handle_tools_call(
     // jamais le tool. Hors scope : l'UI Studio (HTTP direct) et le scan-agent
     // (readonly) ne journalisent pas.
     if let Some(ref slug) = project_slug {
-        if !readonly && is_journaled_action(tool_name) && mcp_call_ok(&response) {
+        let attention_transition = tool_name == "backlog_update"
+            && (arguments.get("needs_user").and_then(Value::as_bool) == Some(true)
+                || arguments.get("lane").and_then(Value::as_str) == Some("attention"));
+        if scope != McpScope::Surveillance && scope != McpScope::Pilot
+            && (is_journaled_action(tool_name) || attention_transition) && mcp_call_ok(&response) {
             journal_agent_action(state, slug, tool_name, &arguments).await;
         }
     }
     response
+}
+
+async fn tool_backlog_add(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.pilot.backlog() else { return tool_error(id, "Pilote indisponible"); };
+    let title = args.get("title").and_then(Value::as_str).unwrap_or("").trim();
+    if title.is_empty() { return tool_error(id, "title requis"); }
+    let scope = args.get("scope").and_then(Value::as_str).unwrap_or("atelier");
+    // Même garde que le POST HTTP /api/pilot/backlog : en scope pilot/global le
+    // scope vient du modèle — le valider contre le registre évite des items sur
+    // apps fantômes qu'aucun run ne pourra jamais exécuter. (En ?project= le slug
+    // est injecté serveur, donc déjà valide — la vérification reste un no-op.)
+    if scope != "atelier" {
+        let ctx = apps_ctx!(id, state);
+        if ctx.supervisor.registry.get(scope).await.is_none() {
+            return tool_error(
+                id,
+                &format!("scope inconnu '{scope}' : utiliser 'atelier' ou le slug d'une app existante"),
+            );
+        }
+    }
+    let questions = args.get("questions").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let body = atelier_pilot::NewBacklogItem {
+        scope: scope.into(), title: title.into(),
+        request: args.get("request").and_then(Value::as_str).unwrap_or(title).into(),
+        description: args.get("description").and_then(Value::as_str).unwrap_or("").into(),
+        plan: args.get("plan").and_then(Value::as_str).map(String::from),
+        kind: args.get("kind").and_then(Value::as_str).unwrap_or("improvement").into(),
+        priority: args.get("priority").and_then(Value::as_str).unwrap_or("medium").into(),
+        severity: args.get("severity").and_then(Value::as_str).unwrap_or("medium").into(),
+        effort: args.get("effort").and_then(Value::as_str).unwrap_or("m").into(),
+        lane: if args.get("needs_user").and_then(Value::as_bool).unwrap_or(false) { "attention" } else { "ready" }.into(),
+        engine: "auto".into(), needs_user: args.get("needs_user").and_then(Value::as_bool).unwrap_or(false),
+        needs_user_reason: args.get("reason").and_then(Value::as_str).map(String::from),
+        questions, finding_id: args.get("finding_id").and_then(Value::as_i64), created_by: "assistant".into(),
+    };
+    match store.insert(body).await {
+        Ok(item) => { state.pilot.publish("created",Some(item.clone()),Some(item.id)); tool_success(id,json!(item)) }
+        Err(e) => tool_error(id,&format!("backlog_add failed: {e}")),
+    }
+}
+
+async fn tool_backlog_update(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store) = state.pilot.backlog() else { return tool_error(id, "Pilote indisponible"); };
+    let Some(item_id) = args.get("id").and_then(Value::as_i64) else { return tool_error(id,"id requis"); };
+    let current = match store.get(item_id).await { Ok(Some(v))=>v,Ok(None)=>return tool_error(id,"item introuvable"),Err(e)=>return tool_error(id,&e.to_string()) };
+    if let Some(scope)=args.get("scope").and_then(Value::as_str) && scope!=current.scope { return tool_error(id,"item hors du scope projet"); }
+    let needs_user=args.get("needs_user").and_then(Value::as_bool);
+    let worker = args.get("_pilot_worker").and_then(Value::as_bool).unwrap_or(false);
+    if worker && needs_user != Some(true) {
+        return tool_error(id,"un worker autonome peut seulement suspendre son item avec needs_user=true");
+    }
+    let questions=args.get("questions").cloned().and_then(|v|serde_json::from_value(v).ok());
+    let patch=atelier_pilot::BacklogPatch {
+        title:if worker{None}else{args.get("title").and_then(Value::as_str).map(String::from)}, request:if worker{None}else{args.get("request").and_then(Value::as_str).map(String::from)},
+        description:if worker{None}else{args.get("description").and_then(Value::as_str).map(String::from)}, plan:if worker{None}else{args.get("plan").and_then(Value::as_str).map(String::from)},
+        kind:if worker{None}else{args.get("kind").and_then(Value::as_str).map(String::from)}, priority:if worker{None}else{args.get("priority").and_then(Value::as_str).map(String::from)},
+        severity:if worker{None}else{args.get("severity").and_then(Value::as_str).map(String::from)}, effort:if worker{None}else{args.get("effort").and_then(Value::as_str).map(String::from)},
+        lane:if needs_user==Some(true){Some("attention".into())}else{args.get("lane").and_then(Value::as_str).map(String::from)},
+        exec_status:if needs_user==Some(true){Some("blocked".into())}else{None}, engine:if worker{None}else{args.get("engine").and_then(Value::as_str).map(String::from)},
+        needs_user, needs_user_reason:args.get("reason").and_then(Value::as_str).map(String::from), questions,
+        reset_attempts:args.get("reset_attempts").and_then(Value::as_bool), ..Default::default()
+    };
+    match store.update(item_id,patch).await {
+        Ok(Some(item))=>{state.pilot.publish("updated",Some(item.clone()),Some(item.id));tool_success(id,json!(item))}
+        Ok(None)=>tool_error(id,"item en cours : update refusé"),Err(e)=>tool_error(id,&format!("backlog_update failed: {e}")),
+    }
+}
+
+async fn tool_backlog_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store)=state.pilot.backlog()else{return tool_error(id,"Pilote indisponible")};
+    match store.list(args.get("scope").and_then(Value::as_str),args.get("lane").and_then(Value::as_str)).await{Ok(v)=>tool_success(id,json!(v)),Err(e)=>tool_error(id,&format!("backlog_list failed: {e}"))}
+}
+
+async fn tool_backlog_get(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(store)=state.pilot.backlog()else{return tool_error(id,"Pilote indisponible")};
+    let Some(item_id)=args.get("id").and_then(Value::as_i64)else{return tool_error(id,"id requis")};
+    match store.get(item_id).await{Ok(Some(v))=>{if let Some(scope)=args.get("scope").and_then(Value::as_str)&&scope!=v.scope{return tool_error(id,"item hors du scope projet")}tool_success(id,json!(v))},Ok(None)=>tool_error(id,"item introuvable"),Err(e)=>tool_error(id,&format!("backlog_get failed: {e}"))}
 }
 
 /// Succès JSON-RPC au sens tool : pas de clé `error` ET pas de
@@ -2944,5 +3098,20 @@ mod tests {
                  Add the arm AND mirror the name in is_dispatched_project_tool()."
             );
         }
+    }
+
+    #[test]
+    fn pilot_scope_permissions_match_the_safety_contract() {
+        assert!(McpScope::Pilot.permits("backlog_add"));
+        assert!(McpScope::Pilot.permits("findings_list"));
+        assert!(!McpScope::Pilot.permits("ship"));
+        assert!(!McpScope::Pilot.permits("db_execute"));
+
+        assert!(McpScope::PilotWorker.permits("ship"));
+        assert!(McpScope::PilotWorker.permits("app.build"));
+        assert!(McpScope::PilotWorker.permits("backlog_update"));
+        assert!(!McpScope::PilotWorker.permits("findings_resolve"));
+        assert!(!McpScope::PilotWorker.permits("env_set"));
+        assert!(!McpScope::PilotWorker.permits("app.delete"));
     }
 }

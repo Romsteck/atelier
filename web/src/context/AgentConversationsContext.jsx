@@ -497,7 +497,10 @@ function reducer(state, a) {
   }
 }
 
-export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, children }) {
+export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, profile = 'dev', pmMode = 'normal', children }) {
+  // PM tabs deliberately use a separate namespace from developer tabs. This
+  // prevents a project-manager dock from opening/closing Studio code chats.
+  const tabScope = profile === 'pm' ? `${slug}::pm` : slug;
   const [state, dispatch] = useReducer(reducer, { order: [], convos: {}, active: null });
   const [allConvos, setAllConvos] = useState([]);
   // Moteurs dont le `op:list` a échoué au dernier refresh (champ `unavailable` du serveur).
@@ -551,7 +554,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     // local est troué → même re-sync de snapshots qu'au reconnect.
     'resync': (m) => { if (m?.channel === 'agent:event') resyncAllSnapshots(); },
     'agent:open-tabs': (d) => {
-      if (!d || d.slug !== slug) return;
+      if (!d || d.slug !== tabScope) return;
       const incoming = canonTabs(d.tabs);
       const keys = incoming.map(descriptorKey);
       const active = d.active && keys.includes(d.active) ? d.active : null;
@@ -591,8 +594,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     lastSyncedRef.current = null;
     // Capture le cache local AVANT que l'effet de cache (déclaré après) n'écrive l'état
     // transitoire vide au montage → la migration douce lirait sinon un cache effacé.
-    const cachedLocal = loadTabs(slug);
-    const cachedActive = loadActive(slug);
+    const cachedLocal = loadTabs(tabScope);
+    const cachedActive = loadActive(tabScope);
 
     const applyLoaded = (tabs, rawActive, seed) => {
       if (cancelled) return;
@@ -603,13 +606,13 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       dispatch({ type: 'RESTORE_TABS', tabs, active });
       lastSyncedRef.current = JSON.stringify(canonical);
       loadedRef.current = true;
-      if (seed) setAgentOpenTabs(slug, canonical).catch(() => {});
+      if (seed) setAgentOpenTabs(tabScope, canonical).catch(() => {});
       for (const t of tabs) {
         if (t.t === 'c' && t.sid) fetchSnapshot(t.sid, t.en);
       }
     };
 
-    getAgentOpenTabs(slug)
+    getAgentOpenTabs(tabScope)
       .then((r) => {
         if (cancelled) return;
         const serverTabs = Array.isArray(r.data?.tabs) ? r.data.tabs : [];
@@ -628,7 +631,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       });
 
     return () => { cancelled = true; };
-  }, [slug, fetchSnapshot]);
+  }, [tabScope, fetchSnapshot]);
 
   // Sérialisation canonique de l'état courant (brouillons sans sid exclus). DOIT
   // matcher `canonTabs(...)` à l'octet près pour que l'anti-écho fonctionne.
@@ -667,11 +670,11 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   useEffect(() => {
     if (!loadedRef.current) return;
     try {
-      localStorage.setItem(openTabsKey(slug), tabsStr);
-      if (activeKeyVal) localStorage.setItem(activeTabKey(slug), activeKeyVal);
-      else localStorage.removeItem(activeTabKey(slug));
+      localStorage.setItem(openTabsKey(tabScope), tabsStr);
+      if (activeKeyVal) localStorage.setItem(activeTabKey(tabScope), activeKeyVal);
+      else localStorage.removeItem(activeTabKey(tabScope));
     } catch { /* ignore */ }
-  }, [tabsStr, activeKeyVal, slug]);
+  }, [tabsStr, activeKeyVal, tabScope]);
 
   // Source de vérité = serveur : PUT (debouncé 400 ms) à chaque changement réel →
   // broadcast WS aux autres PCs. Anti-écho via lastSyncedRef ; pas de PUT tant que
@@ -680,13 +683,13 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
     if (!loadedRef.current) return;
     if (payloadStr === lastSyncedRef.current) return;
     const id = setTimeout(() => {
-      setAgentOpenTabs(slug, { tabs: tabsArr, active: activeKeyVal })
+      setAgentOpenTabs(tabScope, { tabs: tabsArr, active: activeKeyVal })
         .then(() => { lastSyncedRef.current = payloadStr; })
         .catch(() => { /* serveur/PG down → cache local seul, retry au prochain changement */ });
     }, 400);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payloadStr, slug]);
+  }, [payloadStr, tabScope]);
 
   // Filet de sécurité : si l'actif n'est plus dans l'ordre (chemin ne passant pas par
   // CLOSE_PANEL), basculer sur le dernier onglet (miroir de l'ancienne logique de
@@ -712,7 +715,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
   const setActive = useCallback((key) => { dispatch({ type: 'SET_ACTIVE', key }); }, []);
 
   const refreshAll = useCallback(() => {
-    listConversations(slug)
+    listConversations(slug, profile)
       .then((r) => {
         const list = Array.isArray(r.data?.conversations) ? r.data.conversations : [];
         const un = Array.isArray(r.data?.unavailable) ? r.data.unavailable : [];
@@ -738,7 +741,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
       // Liste best-effort (les en-têtes retombent sur les ids) — mais on trace l'échec,
       // sinon une API en erreur est indistinguable d'un historique vide.
       .catch((e) => console.warn('[agent] listConversations a échoué :', apiErr(e)));
-  }, [slug]);
+  }, [slug, profile]);
 
   // Charge la liste des sessions au montage du workspace → les noms (résumés générés
   // par le SDK) sont dispo dans les en-têtes de chat même sans ouvrir l'historique.
@@ -885,23 +888,23 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         let runId = c.runId;
         if (c.runId) {
           try {
-            await sendAgentMessage(slug, c.runId, { text: t, images: apiImages }); // tour suivant, session vivante
+            await sendAgentMessage(slug, c.runId, { text: t, images: apiImages, pm_mode: pmMode }); // tour suivant, session vivante
           } catch (e) {
             // runId périmé : le run est mort sans que `done` n'ait atteint ce client (ex.
             // après un deploy qui a coupé la session). On retombe sur la reprise de la session
             // sur disque → la conversation se relance au lieu de renvoyer une erreur 404.
             if (e.response?.status === 404 && c.sid) {
-              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...withEngine });
+              const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...withEngine, profile, pm_mode: pmMode });
               runId = r.data?.run_id;
             } else {
               throw e;
             }
           }
         } else if (c.sid) {
-          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...withEngine }); // reprise
+          const r = await resumeAgentQuery(slug, c.sid, { prompt: t, images: apiImages, ...withEngine, profile, pm_mode: pmMode }); // reprise
           runId = r.data?.run_id;
         } else {
-          const r = await startAgentQuery(slug, { prompt: t, images: apiImages, ...withEngine }); // session neuve
+          const r = await startAgentQuery(slug, { prompt: t, images: apiImages, ...withEngine, profile, pm_mode: pmMode }); // session neuve
           runId = r.data?.run_id;
         }
         if (runId && runId !== c.runId) dispatch({ type: 'SET_RUN', key, runId });
@@ -909,7 +912,7 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
         dispatch({ type: 'SET_ERROR', key, error: apiErr(e) });
       }
     },
-    [slug],
+    [slug, profile, pmMode],
   );
 
   // Lancement externe (bouton « Résoudre tout » de la surveillance) : on crée une conversation
@@ -1148,6 +1151,8 @@ export function AgentConversationsProvider({ slug, launch, onLaunchConsumed, chi
 
   const value = {
     slug,
+    profile,
+    pmMode,
     order: state.order,
     convos: state.convos,
     active: state.active,

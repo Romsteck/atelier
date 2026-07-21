@@ -49,16 +49,20 @@ impl ConversationMetaStore {
         model: Option<&str>,
         effort: Option<&str>,
         mode: &str,
+        profile: &str,
+        pm_mode: &str,
     ) {
         let Some(pool) = self.pool.as_ref() else { return };
         if let Err(e) = query(
             r#"
-            INSERT INTO agent_conversation_meta (slug, session_id, engine, model, effort, mode, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, now())
+            INSERT INTO agent_conversation_meta (slug, session_id, engine, model, effort, mode, profile, pm_mode, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
             ON CONFLICT (slug, session_id) DO UPDATE SET
                 model      = EXCLUDED.model,
                 effort     = EXCLUDED.effort,
                 mode       = EXCLUDED.mode,
+                profile    = EXCLUDED.profile,
+                pm_mode    = EXCLUDED.pm_mode,
                 updated_at = now()
             "#,
         )
@@ -68,6 +72,8 @@ impl ConversationMetaStore {
         .bind(model)
         .bind(effort)
         .bind(mode)
+        .bind(profile)
+        .bind(pm_mode)
         .execute(pool)
         .await
         {
@@ -163,7 +169,7 @@ impl ConversationMetaStore {
     /// `None` as `settings: null` and the frontend keeps its local defaults.
     pub async fn get(&self, slug: &str, sid: &str) -> Option<Value> {
         let pool = self.pool.as_ref()?;
-        match query("SELECT engine, model, effort, mode FROM agent_conversation_meta WHERE slug = $1 AND session_id = $2")
+        match query("SELECT engine, model, effort, mode, profile, pm_mode FROM agent_conversation_meta WHERE slug = $1 AND session_id = $2")
             .bind(slug)
             .bind(sid)
             .fetch_optional(pool)
@@ -176,13 +182,25 @@ impl ConversationMetaStore {
                 let model: Option<String> = row.try_get("model").ok().flatten();
                 let effort: Option<String> = row.try_get("effort").ok().flatten();
                 let mode: Option<String> = row.try_get("mode").ok().flatten();
-                Some(json!({ "engine": engine, "model": model, "effort": effort, "mode": mode }))
+                let profile: String = row.try_get("profile").unwrap_or_else(|_| "dev".into());
+                let pm_mode: String = row.try_get("pm_mode").unwrap_or_else(|_| "normal".into());
+                Some(json!({ "engine": engine, "model": model, "effort": effort, "mode": mode, "profile": profile, "pm_mode": pm_mode }))
             }
             Ok(None) => None,
             Err(e) => {
                 error!(slug, sid, error = %e, "conversation_meta get failed");
                 None
             }
+        }
+    }
+
+    pub async fn set_pm_mode(&self, slug: &str, sid: &str, pm_mode: &str) {
+        let Some(pool) = self.pool.as_ref() else { return };
+        let value = if pm_mode == "brainstorm" { "brainstorm" } else { "normal" };
+        if let Err(e) = query("UPDATE agent_conversation_meta SET pm_mode=$3,updated_at=now() WHERE slug=$1 AND session_id=$2")
+            .bind(slug).bind(sid).bind(value).execute(pool).await
+        {
+            error!(slug,sid,error=%e,"conversation_meta set_pm_mode failed");
         }
     }
 

@@ -61,3 +61,24 @@ pub fn parse_surveillance_ref(subject: &str) -> Option<i64> {
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
+
+/// Manual fixes may close a Pilote item with `fix(backlog:<id>): ...`.
+pub fn parse_backlog_ref(subject: &str) -> Option<i64> {
+    let start = subject.find("fix(backlog:")? + "fix(backlog:".len();
+    let rest = &subject[start..];
+    let end = rest.find(')')?;
+    rest[..end].parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_backlog_ref, parse_surveillance_ref};
+
+    #[test]
+    fn parses_manual_resolution_commit_references() {
+        assert_eq!(parse_backlog_ref("fix(backlog:42): corriger le formulaire"), Some(42));
+        assert_eq!(parse_backlog_ref("fix(backlog:x): invalide"), None);
+        assert_eq!(parse_backlog_ref("fix: sans référence"), None);
+        assert_eq!(parse_surveillance_ref("fix(surveillance:17): fuite"), Some(17));
+    }
+}

@@ -4,10 +4,12 @@ import {
   GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
   Play, Square, Archive, Loader2, Settings2,
   MessageSquareWarning, CheckCircle2, BarChart3,
+  ClipboardList,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useApps } from '../context/AppsContext';
 import { useIssues } from '../context/IssuesContext';
+import { usePilot } from '../context/PilotContext';
 import { statusDot } from '../lib/appsUi';
 import { openStudio } from '../lib/openStudio';
 import { useEffect } from 'react';
@@ -24,6 +26,7 @@ const navGroups = [
       { to: '/schema', icon: TableProperties, label: 'Schema' },
       { to: '/git', icon: GitBranch, label: 'Git' },
       { to: '/surveillance', icon: ShieldAlert, label: 'Surveillance' },
+      { to: '/backlog', icon: ClipboardList, label: 'Pilote' },
       { to: '/issues', icon: MessageSquareWarning, label: 'Remontées' },
       { to: '/stats', icon: BarChart3, label: 'Statistiques' },
       { to: '/backup', icon: Archive, label: 'Sauvegarde' },
@@ -58,6 +61,13 @@ function IssuesBadge() {
       </span>
     );
   }
+  return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
+}
+
+function PilotBadge() {
+  const { counts } = usePilot();
+  if (counts.attention > 0) return <span className="bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{counts.attention > 99 ? '99+' : counts.attention}</span>;
+  if (counts.running + counts.ready > 0) return <span className="bg-blue-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{counts.running + counts.ready}</span>;
   return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
 }
 
@@ -202,6 +212,7 @@ function Sidebar({ onClose, collapsed }) {
                       {to === '/issues' && (
                         <span className={railLabel}><IssuesBadge /></span>
                       )}
+                      {to === '/backlog' && <span className={railLabel}><PilotBadge /></span>}
                     </NavLink>
                   </li>
                 );

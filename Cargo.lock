@@ -95,9 +95,11 @@ dependencies = [
  "atelier-docs",
  "atelier-git",
  "atelier-logging",
+ "atelier-pilot",
  "atelier-watcher",
  "axum",
  "notify",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -120,6 +122,7 @@ dependencies = [
  "atelier-git",
  "atelier-ipc",
  "atelier-logging",
+ "atelier-pilot",
  "atelier-watcher",
  "axum",
  "chrono",
@@ -294,6 +297,24 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "atelier-pilot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atelier-common",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sqlx-core",
+ "sqlx-postgres",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 
@@ -2566,6 +2587,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -400,6 +400,14 @@ async fn delete_app(
     // Non-fatal — never affects the delete result.
     if resp.ok {
         state.homeroute.cleanup_on_delete(&slug).await;
+        // Backlog rows are part of the app lifecycle. Running/queued rows stay
+        // protected by the store and will surface in Attention instead of being
+        // silently orphaned.
+        if let Some(backlog) = state.pilot.backlog()
+            && let Err(e) = backlog.delete_by_scope(&slug).await
+        {
+            warn!(slug = %slug, error = %e, "pilot backlog cleanup after AppDelete failed");
+        }
     }
     ipc_to_http(resp)
 }

@@ -290,6 +290,8 @@ const {
   mcpToken,
   oauthToken, // token longue durée `claude setup-token` injecté par Atelier (stdin) — jamais argv/env
   authIsolate, // op:auth_check — valider le token SEUL (sans fallback .credentials.json). Cf. token apps.
+  systemAppend,
+  disallowedTools,
 } = init || {};
 
 // Token OAuth abonnement longue durée : posé sur process.env AVANT la garde et
@@ -422,6 +424,8 @@ const MCP_READONLY = new Set([
   'docs_overview', 'docs_list_entries', 'docs_get', 'docs_search', 'docs_completeness',
   'docs_diagram_get', 'git_log', 'git_branches', 'scan_get',
   'notify_user', 'env_list', 'issue_report',
+  // Dérogation méta-DB du profil chef de projet Pilote.
+  'backlog_add', 'backlog_update', 'backlog_list', 'backlog_get',
 ]);
 
 async function canUseTool(toolName, input, opts) {
@@ -557,7 +561,10 @@ const options = {
   // 'project' charge CLAUDE.md + .claude/rules/ + skills du workspace (cf. WHY ci-dessus).
   // Le preset claude_code est REQUIS pour que CLAUDE.md soit injecté (vérifié SDK 0.3.167).
   settingSources: ['project'],
-  systemPrompt: { type: 'preset', preset: 'claude_code' },
+  systemPrompt: systemAppend
+    ? { type: 'preset', preset: 'claude_code', append: systemAppend }
+    : { type: 'preset', preset: 'claude_code' },
+  ...(Array.isArray(disallowedTools) && disallowedTools.length ? { disallowedTools } : {}),
   canUseTool, // host unique : AskUserQuestion (2 modes) + ExitPlanMode (plan) + garde-fou MCP en plan
   hooks: { UserPromptSubmit: [{ hooks: [todoResetHook] }] }, // reset déterministe de la todolist terminée au nouveau tour
   // Omettre model → le CLI résout le défaut de l'abonnement = claude-opus-4-8[1m] (contexte 1M).
@@ -625,6 +632,11 @@ function trimToolResultText(isError, text) {
   return (text || '').slice(0, 800);
 }
 
+function stripPmHeader(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(/^⟦PM:(?:normal|brainstorm)⟧[\s\S]*?⟦\/PM⟧\n?/, '');
+}
+
 // Convertit le transcript persisté (SessionMessage[] = messages Anthropic bruts) en
 // items normalisés IDENTIQUES au flux live (user/assistant/thinking/tool_use/tool_result/
 // question) — l'UI les rend avec le même code. `getSessionMessages` rend `message`
@@ -661,10 +673,14 @@ function messagesToItems(msgs) {
     } else if (m?.type === 'user') {
       const content = message?.content;
       if (typeof content === 'string') {
-        if (content.trim()) items.push({ type: 'user', text: content });
+        const visible = stripPmHeader(content);
+        if (visible.trim()) items.push({ type: 'user', text: visible });
       } else if (Array.isArray(content)) {
         for (const b of content) {
-          if (b.type === 'text' && b.text) items.push({ type: 'user', text: b.text });
+          if (b.type === 'text' && b.text) {
+            const visible = stripPmHeader(b.text);
+            if (visible.trim()) items.push({ type: 'user', text: visible });
+          }
           // Image collée par l'utilisateur : on ne réinjecte pas le base64 (lourd, déjà
           // consommé par le modèle) — juste un marqueur pour que le tour ne soit pas vide.
           else if (b.type === 'image') {

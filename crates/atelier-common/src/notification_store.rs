@@ -59,7 +59,10 @@ impl NotificationStore {
         body: Option<&str>,
     ) -> anyhow::Result<Value> {
         let pool = self.pool().ok_or_else(Self::no_pool)?;
-        let source = coerce(source, &["agent", "scan", "system", "user"], "system");
+        // 'pilot' : notifications émises par les hooks Pilote (rapport du matin,
+        // item bloqué, questions d'un run, auth) — le front route ce source vers
+        // la page /backlog au clic.
+        let source = coerce(source, &["agent", "scan", "system", "user", "pilot"], "system");
         let kind = coerce(kind, &["notice", "action"], "notice");
         let level = coerce(level, &["info", "warn", "error"], "info");
         let id = format!("ntf-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);

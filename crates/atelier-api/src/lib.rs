@@ -3,6 +3,7 @@
 pub mod clients;
 pub mod host_gate;
 pub mod mcp;
+pub mod pm_prompts;
 pub mod routes;
 pub mod state;
 
@@ -128,6 +129,7 @@ fn api_router() -> Router<ApiState> {
         .nest("/notifications", routes::notifications::router())
         .nest("/agent", routes::agent::global_router())
         .nest("/backup", routes::backup::router())
+        .nest("/pilot", routes::pilot::router())
         .nest("/homeroute", routes::homeroute::router())
         .nest("/stats", routes::stats::router())
         .merge(routes::ws::router())

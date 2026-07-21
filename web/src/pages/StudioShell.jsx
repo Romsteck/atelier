@@ -6,6 +6,9 @@ import SplitDivider from '../components/SplitDivider';
 import DocsTab from '../components/docs/DocsTab';
 import SurveillanceTab from '../components/SurveillanceTab';
 import AgentWorkspace from '../components/AgentWorkspace';
+import Backlog from './Backlog';
+import PmAssistantDock from '../components/pilot/PmAssistantDock';
+import { PilotStatusChip } from '../components/pilot/PilotBanner';
 import EnvTab from '../components/EnvTab';
 import Button from '../components/Button';
 import BuildBadge from '../components/BuildBadge';
@@ -16,7 +19,7 @@ import NotificationDrawer from '../components/notifications/NotificationDrawer';
 import {
   Code2, BookOpen, Database, ScrollText, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Play, Square, Trash2, RefreshCw,
-  ShieldAlert, Monitor, Columns2, KeyRound, ArrowLeft,
+  ShieldAlert, Monitor, Columns2, KeyRound, ArrowLeft, ClipboardList,
 } from 'lucide-react';
 import {
   controlApp, deleteApp, updateApp,
@@ -50,6 +53,7 @@ const TABS = [
   { id: 'docs', label: 'Docs', icon: BookOpen },
   { id: 'env', label: 'Variables', icon: KeyRound },
   { id: 'surveillance', label: 'Surveillance', icon: ShieldAlert },
+  { id: 'backlog', label: 'Backlog', icon: ClipboardList },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -412,6 +416,7 @@ export default function StudioShell({ slug }) {
       case 'docs':         return <DocsTab slug={slug} />;
       case 'env':          return <EnvTab slug={slug} onRestart={() => handleControl('restart')} />;
       case 'surveillance': return <SurveillanceTab slug={slug} initialKind={pendingKind} onResolve={openAgentWithPrompt} />;
+      case 'backlog':      return <Backlog lockedScope={slug} embedded />;
       case 'settings':     return <SettingsTab app={currentApp} onUpdate={handleUpdate} onDelete={handleDelete} />;
       default:             return null;
     }
@@ -485,6 +490,7 @@ export default function StudioShell({ slug }) {
         </div>
       </div>
       <div className="flex items-center gap-1 shrink-0">
+        <PilotStatusChip />
         <div className="relative">
           <NotificationBell />
           <NotificationDrawer contextSlug={slug} />
@@ -585,6 +591,11 @@ export default function StudioShell({ slug }) {
             {dragging && <div className="absolute inset-0 z-50 cursor-col-resize" />}
           </div>
         </div>
+        {/* Dock PM uniquement quand l'onglet Backlog est visible (tabs OU pane
+            droit du split) : monté partout, il chargeait l'agent PM sur tous
+            les onglets du Studio. */}
+        {((effectiveMode === 'tabs' && activeTab === 'backlog') || (effectiveMode === 'split' && rightTab === 'backlog'))
+          && <PmAssistantDock slug={slug} />}
       </div>
       <Toast toast={toast} />
     </div>

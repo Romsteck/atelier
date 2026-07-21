@@ -229,6 +229,12 @@ pub type TokenProvider = Arc<
 /// Le watcher ne connaît ni le store ni le NotificationStore — juste ce callback.
 pub type AuthFailureSink = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Sink appelé quand le git_watcher clôt un item backlog depuis un commit
+/// `fix(backlog:<id>)`. `main.rs` y branche `BacklogStore::republish` (event
+/// `pilot:backlog`) — même patron d'inversion que les deux types ci-dessus :
+/// le watcher ne dépend jamais d'atelier-pilot.
+pub type BacklogSettledSink = Arc<dyn Fn(i64) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SurveillanceService {
     inner: Arc<Inner>,
@@ -247,6 +253,9 @@ struct Inner {
     stacks: HashMap<String, String>,
     /// Ordered app list (slug + name) for the automatic sweep.
     apps: Vec<AppMeta>,
+    /// Reciprocal platform gate (Pilote/backup). Installed by the control plane
+    /// after all services exist, so the watcher crate stays dependency-free.
+    external_busy: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// Single-flight automatic sweep state (`None` = never started).
     sweep: Mutex<Option<SweepInner>>,
     /// Broadcast of the full sweep snapshot on every transition (WebSocket fan-out).
@@ -281,6 +290,10 @@ pub struct SurveillanceConfig {
     pub seed_apps: Vec<AppMeta>,
     /// Root of app sources: `<root>/<slug>/src/`.
     pub apps_src_root: PathBuf,
+    /// Racine du dépôt source d'Atelier — scannée par le git_watcher pour les
+    /// commits `fix(backlog:<id>)` du scope 'atelier' uniquement (Atelier n'a
+    /// pas de findings de surveillance). `None` = pas de couverture Atelier.
+    pub atelier_src_root: Option<PathBuf>,
     /// AI engine for scans — the Claude Agent SDK (OAuth subscription, run as
     /// `hr-studio` via `scan.js`; never an API key).
     pub driver: ClaudeScanConfig,
@@ -289,14 +302,16 @@ pub struct SurveillanceConfig {
 }
 
 impl SurveillanceService {
-    /// `token_provider` / `on_auth_failure` : câblage d'auth SDK (cf. types). Passés
-    /// en params plutôt que dans `SurveillanceConfig` (qui dérive Debug/Clone/Default
-    /// — incompatible avec des `Arc<dyn Fn…>`). `None`/`None` = auth SDK non gérée
-    /// par Atelier (le scan retombe sur le `.credentials.json` local, pas de notif).
+    /// `token_provider` / `on_auth_failure` / `on_backlog_settled` : câblages runtime
+    /// (cf. types). Passés en params plutôt que dans `SurveillanceConfig` (qui dérive
+    /// Debug/Clone/Default — incompatible avec des `Arc<dyn Fn…>`). `None` = auth SDK
+    /// non gérée par Atelier (le scan retombe sur le `.credentials.json` local, pas de
+    /// notif) / pas de republication live des items backlog clos par commit.
     pub async fn start(
         cfg: SurveillanceConfig,
         token_provider: Option<TokenProvider>,
         on_auth_failure: Option<AuthFailureSink>,
+        on_backlog_settled: Option<BacklogSettledSink>,
     ) -> Self {
         let pool = match bootstrap(&cfg).await {
             Ok(p) => Some(p),
@@ -338,6 +353,7 @@ impl SurveillanceService {
                 apps_src_root: cfg.apps_src_root.clone(),
                 stacks,
                 apps: cfg.seed_apps.clone(),
+                external_busy: Mutex::new(None),
                 sweep: Mutex::new(None),
                 sweep_tx,
                 sem: Arc::new(Semaphore::new(cfg.max_concurrent.max(1))),
@@ -378,9 +394,12 @@ impl SurveillanceService {
                 let gw = GitWatcher::new(
                     cfg.apps_src_root.clone(),
                     slugs,
+                    cfg.atelier_src_root.clone(),
                     f,
                     m,
                     svc.inner.tx.clone(),
+                    pool.as_ref().expect("enabled watcher pool").clone(),
+                    on_backlog_settled,
                 );
                 tokio::spawn(gw.run_loop());
             }
@@ -415,6 +434,23 @@ impl SurveillanceService {
     /// Subscribe to live sweep-state snapshots (the `surveillance:sweep` channel).
     pub fn subscribe_sweep(&self) -> broadcast::Receiver<SweepSnapshot> {
         self.inner.sweep_tx.subscribe()
+    }
+
+    /// True while an individual scan or a full sweep owns the surveillance
+    /// execution lane. Used by Pilote's reciprocal scheduler gate.
+    pub fn is_busy(&self) -> bool {
+        if !self.inner.running.lock().unwrap().is_empty() {
+            return true;
+        }
+        self.inner.sweep.lock().unwrap().as_ref().map(|s| {
+            matches!(s.snapshot.status, SweepStatus::Running | SweepStatus::Cancelling)
+        }).unwrap_or(false)
+    }
+
+    /// Install the reciprocal scheduler gate. Manual and scheduled sweeps share
+    /// `start_sweep`, therefore neither can race an autonomous Pilote run.
+    pub fn set_external_busy(&self, gate: Arc<dyn Fn() -> bool + Send + Sync>) {
+        *self.inner.external_busy.lock().unwrap() = Some(gate);
     }
 
     /// Current sweep state for page-load hydration. `Idle` when no sweep has run
@@ -473,6 +509,16 @@ impl SurveillanceService {
     pub fn start_sweep(&self, trigger: &str) -> Result<SweepSnapshot, String> {
         if !self.inner.enabled {
             return Err("surveillance disabled (postgres unreachable)".into());
+        }
+        if self
+            .inner
+            .external_busy
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|gate| gate())
+        {
+            return Err("another platform job is in progress".into());
         }
         // Exclusion mutuelle avec les scans individuels (Studio/manuels) : refuser le
         // sweep tant qu'un scan est en vol — sa relecture FORCÉE du même app+kind

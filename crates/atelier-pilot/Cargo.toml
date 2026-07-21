@@ -1,0 +1,18 @@
+[package]
+name = "atelier-pilot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+libc = { workspace = true }
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }
+atelier-common = { workspace = true }

@@ -44,9 +44,54 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut homeroute_routes_rx = state.events.homeroute_routes.subscribe();
     let mut notify_rx = state.events.notify.subscribe();
     let mut issue_rx = state.events.issue.subscribe();
+    let mut pilot_rx = state.pilot.subscribe();
+    let mut pilot_transcript_rx = state.pilot.subscribe_transcript();
+    let mut pilot_night_rx = state.pilot.subscribe_night();
 
     loop {
         tokio::select! {
+            result = pilot_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "pilot:backlog", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "pilot:backlog", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "pilot:backlog", n).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = pilot_transcript_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "pilot:transcript", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "pilot:transcript", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "pilot:transcript", n).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = pilot_night_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "pilot:night", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "pilot:night", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "pilot:night", n).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
             result = agent_rx.recv() => {
                 match result {
                     Ok(event) => {

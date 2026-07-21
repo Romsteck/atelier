@@ -76,7 +76,8 @@ self.addEventListener('notificationclick', (event) => {
   const target = data.target || (data.slug ? `/studio/${data.slug}?tab=code` : '/');
   // Path de matching : un onglet déjà ouvert sur ce préfixe est focusé plutôt
   // que d'ouvrir un doublon (les query params du target ne matchent pas l'URL).
-  const matchPath = target.startsWith('/studio/') ? target.split('?')[0] : null;
+  const targetPath = target.split('?')[0];
+  const matchPath = targetPath === '/' ? null : targetPath;
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });

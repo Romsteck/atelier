@@ -169,6 +169,8 @@ impl ContextGenerator {
         // relu en session dev Atelier). Pilote la skill `0-report-issue`.
         log_write(&app.slug, &src_rules_dir.join("report-issues.md"),
                   &render_report_issues_rule_md(app))?;
+        log_write(&app.slug, &src_rules_dir.join("autonomous.md"),
+                  &render_autonomous_rule_md())?;
 
         // Le système de flux a été éradiqué (2026-05-26) — nettoyer les
         // anciennes règles `flows-first.md` si encore présentes.
@@ -526,6 +528,24 @@ impl ContextGenerator {
 
 // ── Standalone helpers ─────────────────────────────────────────────────
 
+fn render_autonomous_rule_md() -> String {
+    r#"# Régime autonome Pilote
+
+- Le marqueur `[RUN AUTONOME]` signifie qu’Atelier orchestre ce tour sans humain présent.
+- Travaille uniquement sur l’item et dans ce workspace.
+- Ne crée jamais de commit, ne pousse jamais et ne redémarre aucun service.
+- Atelier possède checkpoint, build, ship, healthcheck, commit et rollback.
+- Les suppressions de données en masse sont interdites.
+- Le schéma peut évoluer si le besoin l’exige et si la migration est sûre.
+- En cas d’ambiguïté produit, plan caduc ou risque non borné, n’improvise pas.
+- Appelle `backlog_update` avec `needs_user=true`, une raison et des questions autosuffisantes.
+- Après ce signal, arrête-toi; Atelier annulera tout diff éventuel.
+- Ne notifie pas Romain directement pendant un run autonome.
+- Remonte une friction de plateforme avec `issue_report`.
+- Termine toujours par un résumé des changements et validations effectuées.
+"#.to_string()
+}
+
 fn render_mcp_tools_md(app: &Application) -> String {
     format!(
         "# MCP tools — {name}\n\
@@ -575,6 +595,12 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `ship` — livraison prod : stop + restart pour reprendre les artefacts compilés par 0-build (aucune compilation). `BUILD_BUSY` = un build/ship est en cours, ne PAS retry.\n\
          - `notify_user` — notifie Romain (cloche + appareils). Réservé à ce qui mérite VRAIMENT son attention (décision, anomalie, résultat inattendu). Tes actions plateforme (restart, ship, env, schéma) sont déjà **journalisées automatiquement** — ne notifie pas pour ça.\n\
          - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier) ou une suggestion d'amélioration (`kind: error|limitation|suggestion`). Voir `.claude/rules/report-issues.md`.\n\
+         \n\
+         ## Backlog Pilote (`backlog_*`)\n\
+         - `backlog_list`, `backlog_get` — lire les besoins et leurs décisions\n\
+         - `backlog_add` — créer un livrable borné et scoré\n\
+         - `backlog_update` — préciser le plan/scoring ou signaler `needs_user` avec des questions autosuffisantes\n\
+         - Un run `[RUN AUTONOME]` ne commite jamais : Atelier valide et commite après build/ship/health.\n\
          \n\
          ## Environment (`env_*`)\n\
          Le `.env` est un **artefact généré** — ne JAMAIS l'éditer à la main. Une variable modifiée n'est vue par le process qu'au prochain restart.\n\

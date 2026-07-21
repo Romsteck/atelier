@@ -321,7 +321,7 @@ function QuestionCard({ questions, answered, answerText, idle, onSubmit, onCance
         <>
           {idle && (
             <div className="text-[11px] italic text-amber-700 dark:text-amber-400/90">
-              L'agent s'est mis en pause en attendant ta réponse — réponds pour reprendre.
+              L&apos;agent s&apos;est mis en pause en attendant ta réponse — réponds pour reprendre.
             </div>
           )}
           <div className="flex items-center gap-2">
@@ -358,7 +358,7 @@ function PlanReviewCard({ plan, decided, approved, idle, onApprove, onReject }) 
         <>
           {idle && (
             <div className="text-[11px] italic text-amber-700 dark:text-amber-400/90">
-              L'agent s'est mis en pause en attendant ta décision — décide pour reprendre.
+              L&apos;agent s&apos;est mis en pause en attendant ta décision — décide pour reprendre.
             </div>
           )}
           <input value={feedback} onChange={(e) => setFeedback(e.target.value)}
@@ -418,21 +418,22 @@ function Segmented({ options, value, onChange, disabled = false, title, accent }
 // en attente) vit dans le provider, indexé par `panelKey`. Le panneau ne fait que
 // rendre + déléguer (sendMessage/answer/cancel/closeConversation). La SAISIE est isolée
 // dans <Composer> (état local) pour que taper ne re-render pas la liste des messages.
-export default function AgentPanel({ panelKey }) {
+export default function AgentPanel({ panelKey, variant = 'dev' }) {
   const { slug, convos, convName, sendMessage, answer, cancel, decidePlan, changeMode, changeModel, changeEffort, closeConversation } = useAgentConversations();
   const convo = convos[panelKey];
+  const isPm = variant === 'pm';
 
   // `seedModelId` = moteur/modèle choisi au « + » (menu de création) ; il prime sur la
   // préférence globale, qui reste le défaut d'une conversation ouverte autrement.
   const [modelId, setModelId] = useState(() =>
-    resolveModelId(convo?.seedModelId || localStorage.getItem('agent:model')),
+    resolveModelId(isPm ? 'opus-4-8' : (convo?.seedModelId || localStorage.getItem('agent:model'))),
   );
   // Effort de CE panneau : l'effort imposé au lancement (ex. 'max' depuis « Résoudre »)
   // prime sur la préférence stockée. Ne persiste PAS un effort synchronisé depuis la
   // conversation (sinon « Résoudre » polluerait la préférence globale) — seul un clic
   // délibéré sur le sélecteur l'enregistre (cf. chooseEffort).
-  const [effort, setEffort] = useState(() => convo?.effort || localStorage.getItem('agent:effort') || 'max');
-  const [mode, setMode] = useState(() => localStorage.getItem('agent:mode') || 'plan');
+  const [effort, setEffort] = useState(() => isPm ? 'xhigh' : (convo?.effort || localStorage.getItem('agent:effort') || 'max'));
+  const [mode, setMode] = useState(() => isPm ? 'plan' : (localStorage.getItem('agent:mode') || 'plan'));
   // « Fast » = tier RAPIDE du modèle (axe indépendant de l'effort, cf. wireModel).
   // N'a de sens que pour un modèle qui en a un ; ignoré sinon.
   const [fast, setFast] = useState(() => localStorage.getItem('agent:fast') === '1');
@@ -712,8 +713,11 @@ export default function AgentPanel({ panelKey }) {
   // de la frappe : taper ne re-render que le Composer.
   const onSend = useCallback((text, images) => {
     if (running) return;
-    sendMessage(panelKey, text, buildSettings({ modelId, effort: effEff, mode, fast }), images);
-  }, [running, mode, modelId, effEff, fast, panelKey, sendMessage]);
+    const settings = isPm
+      ? buildSettings({ modelId: 'opus-4-8', effort: 'xhigh', mode: 'plan', fast: false })
+      : buildSettings({ modelId, effort: effEff, mode, fast });
+    sendMessage(panelKey, text, settings, images);
+  }, [running, mode, modelId, effEff, fast, panelKey, sendMessage, isPm]);
 
   const stop = useCallback(() => cancel(panelKey), [cancel, panelKey]);
   const submitAnswer = useCallback((request_id, payload) => answer(panelKey, request_id, payload), [answer, panelKey]);
@@ -835,7 +839,7 @@ export default function AgentPanel({ panelKey }) {
           )}
           {/* MAJ du Claude Agent SDK : hors sujet sur une conversation Codex (son SDK a
               son propre bandeau dans Paramètres → Codex). */}
-          {sdk?.update_available && engine === 'claude' && (
+          {!isPm && sdk?.update_available && engine === 'claude' && (
             <Button variant="warning" size="xs" onClick={onUpdateSdk} loading={updatingSdk}
               title={`MAJ Agent SDK : ${sdk.installed} → ${sdk.latest}`}>
               {updatingSdk ? 'MAJ…' : `MAJ ${sdk.latest}`}
@@ -858,11 +862,11 @@ export default function AgentPanel({ panelKey }) {
       <div ref={bodyRef} onScroll={onScroll} className="h-full overflow-y-auto px-3 py-2 space-y-2">
         {items.length === 0 && !convo.loading && (
           <div className="text-[13px] text-gray-600 mt-4 text-center">
-            Pose une question à l’agent sur <span className="text-gray-400">{slug}</span>.
-            <div className="text-[11px] mt-1 text-gray-700">
+            {isPm ? <>Décris un besoin, une idée ou une décision à préparer.</> : <>Pose une question à l’agent sur <span className="text-gray-400">{slug}</span>.</>}
+            {!isPm && <div className="text-[11px] mt-1 text-gray-700">
               <span className="text-blue-400/80">Plan</span> = lecture seule ·{' '}
               <span className="text-amber-400/80">Bypass</span> = édite &amp; exécute (relu dans Git).
-            </div>
+            </div>}
           </div>
         )}
         {convo.error && (
@@ -905,7 +909,7 @@ export default function AgentPanel({ panelKey }) {
           prochain message, mémoire conservée) ; pendant un tour en vol il est verrouillé.
           Les valeurs affichées se resynchronisent sur les settings serveur de la
           conversation (agent_conversation_meta) — cohérentes entre PCs. */}
-      <div className="flex items-center flex-wrap gap-x-3 gap-y-1.5 px-3 py-1.5 border-t border-gray-800 bg-gray-950/40 shrink-0">
+      {!isPm && <div className="flex items-center flex-wrap gap-x-3 gap-y-1.5 px-3 py-1.5 border-t border-gray-800 bg-gray-950/40 shrink-0">
         {/* Brouillon : choix libre du moteur (groupes) — c'est le SEUL moment où il se
             décide. Conversation liée : uniquement les modèles de SON moteur (verrou). */}
         <label className="flex items-center gap-1.5 w-full sm:w-auto">
@@ -969,7 +973,7 @@ export default function AgentPanel({ panelKey }) {
             />
           </div>
         )}
-      </div>
+      </div>}
 
       {/* Saisie (état local isolé) */}
       <Composer onSend={onSend} running={running} onStop={stop} />

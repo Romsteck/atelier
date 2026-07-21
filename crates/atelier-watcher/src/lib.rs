@@ -47,8 +47,9 @@ pub use scandef::{
     watermark_key,
 };
 pub use service::{
-    AppMeta, AuthFailureSink, ERR_SCAN_ALREADY_RUNNING, RunOutcome, ScanCell, SurveillanceConfig,
-    SurveillanceService, SweepAppRow, SweepScanState, SweepSnapshot, SweepStatus, TokenProvider,
+    AppMeta, AuthFailureSink, BacklogSettledSink, ERR_SCAN_ALREADY_RUNNING, RunOutcome, ScanCell,
+    SurveillanceConfig, SurveillanceService, SweepAppRow, SweepScanState, SweepSnapshot,
+    SweepStatus, TokenProvider,
 };
 pub use sweep_scheduler::{SweepSchedule, SweepScheduleStore};
 

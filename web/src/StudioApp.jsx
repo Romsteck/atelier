@@ -3,6 +3,7 @@ import { Routes, Route, useParams } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
 import { NotificationsProvider } from './context/NotificationsContext';
+import { PilotProvider } from './context/PilotContext';
 import StudioShell from './pages/StudioShell';
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -27,12 +28,14 @@ export default function StudioApp() {
     <ThemeProvider>
       <AuthProvider>
         <NotificationsProvider>
+        <PilotProvider>
           <ErrorBoundary>
             <Routes>
               <Route path="/:slug" element={<StudioRoute />} />
               <Route path="*" element={<RedirectHome />} />
             </Routes>
           </ErrorBoundary>
+        </PilotProvider>
         </NotificationsProvider>
       </AuthProvider>
     </ThemeProvider>

@@ -80,8 +80,10 @@ runner-deps:
 runner: runner-deps
 	@test -f runner/src/runner.js || { echo "error: runner/src/runner.js missing — aborting" >&2; exit 1; }
 	@test -f runner/src/scan.js || { echo "error: runner/src/scan.js missing (surveillance scan runner) — aborting" >&2; exit 1; }
+	@test -f runner/src/worker.js || { echo "error: runner/src/worker.js missing (worker Pilote Claude) — aborting" >&2; exit 1; }
 	@test -d $(RUNNER_SDK_NATIVE) || { echo "error: $(RUNNER_SDK_NATIVE) missing — le binaire natif est une optional-dep : relancer 'npm ci --omit=dev' SANS --omit=optional" >&2; exit 1; }
 	@test -f runner/src/codex.js || { echo "error: runner/src/codex.js missing (moteur Codex du Studio) — aborting" >&2; exit 1; }
+	@test -f runner/src/codex_worker.js || { echo "error: runner/src/codex_worker.js missing (worker Pilote Codex) — aborting" >&2; exit 1; }
 	@test -x $(RUNNER_CODEX_BIN) || { echo "error: $(RUNNER_CODEX_BIN) missing/non-exécutable — le CLI Codex est une optional-dep : relancer 'npm ci --omit=dev' SANS --omit=optional" >&2; exit 1; }
 
 deploy:
@@ -135,6 +137,8 @@ deploy-local: atelier web runner
 	sudo rsync -a --delete $(RUNNER_LOCAL)/src/ $(RUNNER_DST)/src/
 	sudo rsync -a --delete $(RUNNER_LOCAL)/node_modules/ $(RUNNER_DST)/node_modules/
 	sudo rsync -a $(RUNNER_LOCAL)/package.json $(RUNNER_LOCAL)/package-lock.json $(RUNNER_LOCAL)/.npmrc $(RUNNER_DST)/
+	@echo "→ install detached Atelier Pilote worker"
+	sudo install -o root -g root -m 0755 scripts/pilot-atelier-worker.sh $(PREFIX)/bin/pilot-atelier-worker.sh
 	@echo "→ sync systemd unit → /etc/systemd/system/atelier.service (le repo est la source de vérité)"
 	sudo install -o root -g root -m 0644 systemd/atelier.service /etc/systemd/system/atelier.service
 	sudo systemctl daemon-reload
@@ -157,6 +161,7 @@ deploy-remote: atelier web runner
 	rsync -a --rsync-path='sudo rsync' --delete $(RUNNER_LOCAL)/src/ $(MEDION):$(RUNNER_DST)/src/
 	rsync -a --rsync-path='sudo rsync' --delete $(RUNNER_LOCAL)/node_modules/ $(MEDION):$(RUNNER_DST)/node_modules/
 	rsync -a --rsync-path='sudo rsync' $(RUNNER_LOCAL)/package.json $(RUNNER_LOCAL)/package-lock.json $(RUNNER_LOCAL)/.npmrc $(MEDION):$(RUNNER_DST)/
+	rsync -a --chmod=F755 --rsync-path='sudo rsync' scripts/pilot-atelier-worker.sh $(MEDION):$(PREFIX)/bin/pilot-atelier-worker.sh
 	@echo "→ atomic swap + restart atelier.service on $(MEDION)"
 	ssh $(MEDION) 'sudo install -o root -g root -m 0755 $(BIN_DST).new $(BIN_DST) && sudo rm -f $(BIN_DST).new && sudo install -o root -g root -m 0755 $(CODEGEN_BIN_DST).new $(CODEGEN_BIN_DST) && sudo rm -f $(CODEGEN_BIN_DST).new && sudo ln -sfn atelier-dv-codegen $(PREFIX)/bin/hr-dv-codegen && sudo systemctl restart atelier.service'
 	$(call HEALTHCHECK,http://10.0.0.254:4100,ssh $(MEDION) 'sudo journalctl -u atelier -n 30 --no-pager')

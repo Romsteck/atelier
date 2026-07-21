@@ -7,6 +7,8 @@ import TaskDropdown from "./tasks/TaskDropdown";
 import NotificationBell from "./notifications/NotificationBell";
 import NotificationDrawer from "./notifications/NotificationDrawer";
 import { PageHeaderSlotProvider, usePageHeaderSlotRegister } from "../context/PageHeaderSlot";
+import PmAssistantDock from "./pilot/PmAssistantDock";
+import PilotBanner from "./pilot/PilotBanner";
 
 // Layout de la HOMEPAGE (panneau de contrôle). Le Studio per-app n'est plus monté
 // ici : c'est une app Vite séparée ouverte en onglet (`/studio/<slug>`). Toutes les
@@ -57,10 +59,12 @@ function LayoutInner({ children }) {
             </div>
           </div>
         </div>
+        <PilotBanner />
         <main className="flex-1 overflow-hidden relative">
           <div className="h-full overflow-auto">{children}</div>
         </main>
       </div>
+      <PmAssistantDock slug="@pilot" />
     </div>
   );
 }
