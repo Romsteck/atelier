@@ -648,12 +648,24 @@ if (!prompt && !(Array.isArray(init.images) && init.images.length)) {
 // Deux modes produit, mappés sur le SANDBOX du CLI (Codex n'a pas de permissionMode) :
 //   - 'plan' (défaut, SÛR) : sandbox 'read-only' + réseau coupé → le modèle peut lire et
 //     raisonner, jamais écrire ni sortir. C'est l'équivalent fonctionnel du plan-mode SDK.
-//   - 'bypass' : sandbox 'workspace-write' + réseau autorisé (les builds tirent des deps).
+//   - 'bypass' : sandbox DÉSACTIVÉ ('danger-full-access') + réseau autorisé.
 // `approvalPolicy:'never'` dans les deux cas : aucun humain sur le TTY du CLI, toute
 // demande d'approbation bloquerait le tour jusqu'au timeout.
+//
+// WHY 'danger-full-access' et pas 'workspace-write' en bypass : le sandbox du CLI
+// force `.git` en LECTURE SEULE — et ce montage est appliqué APRÈS les `writable_roots`,
+// donc ni `writable_roots` ni `--add-dir` ne peuvent l'outrepasser (bugs amont ouverts
+// openai/codex #7071, #14338, #15505). Tout `git add`/`commit`/`fetch` échoue alors sur
+// « Unable to create .git/index.lock: Read-only file system ». Observé en vrai : l'agent
+// a contourné en clonant dans /tmp pour committer, laissant l'index du workspace
+// désynchronisé du remote — pire que pas de sandbox du tout.
+// Le périmètre de confiance ne change pas pour autant : en bypass, l'agent Claude tourne
+// DÉJÀ sans aucun sandbox OS (mode `acceptEdits`, Bash libre en `hr-studio`). Les deux
+// moteurs ont donc la même frontière — le compte `hr-studio` — et le mode plan reste, lui,
+// strictement confiné côté Codex.
 function applyMode(mode) {
   liveMode = mode === 'bypass' ? 'bypass' : 'plan';
-  threadOptions.sandboxMode = liveMode === 'bypass' ? 'workspace-write' : 'read-only';
+  threadOptions.sandboxMode = liveMode === 'bypass' ? 'danger-full-access' : 'read-only';
   threadOptions.networkAccessEnabled = liveMode === 'bypass';
 }
 
