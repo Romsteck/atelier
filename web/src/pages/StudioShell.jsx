@@ -156,14 +156,21 @@ function SettingsTab({ app, onUpdate, onDelete }) {
   const [saving, setSaving] = useState(false);
   const { toast, showToast } = useToast();
 
+  // Ré-hydrate les champs quand la valeur de l'app change (pas seulement la
+  // référence objet) : run_command peut être posé par l'agent (app.update) APRÈS
+  // l'init du formulaire → sans ça, un Save réenverrait la valeur périmée.
   useEffect(() => {
-    if (app) { setName(app.name); setVisibility(app.visibility); setRunCmd(app.run_command); setBuildCmd(app.build_command || ''); setHealthPath(app.health_path); setClaudeAccess(!!app.claude_access); }
-  }, [app]);
+    if (app) { setName(app.name); setVisibility(app.visibility); setRunCmd(app.run_command || ''); setBuildCmd(app.build_command || ''); setHealthPath(app.health_path); setClaudeAccess(!!app.claude_access); }
+  }, [app?.name, app?.visibility, app?.run_command, app?.build_command, app?.health_path, app?.claude_access]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await onUpdate({ name, visibility, run_command: runCmd, build_command: buildCmd || null, health_path: healthPath, claude_access: claudeAccess });
+      const payload = { name, visibility, build_command: buildCmd || null, health_path: healthPath, claude_access: claudeAccess };
+      // N'inclure run_command que s'il est non vide : un champ vide ne doit jamais
+      // écraser la valeur existante (le backend l'ignore aussi, défense en profondeur).
+      if (runCmd.trim()) payload.run_command = runCmd.trim();
+      await onUpdate(payload);
       showToast('Réglages sauvegardés');
     } catch (e) {
       showToast(apiErr(e), 'error');

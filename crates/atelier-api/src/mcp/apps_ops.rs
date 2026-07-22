@@ -438,7 +438,16 @@ impl AppsContext {
             }
         }
         if let Some(rc) = run_command {
-            app.run_command = rc;
+            // Un run_command vide n'est jamais valide (l'app ne peut pas démarrer) :
+            // l'ignorer préserve la valeur existante. Empêche qu'une sauvegarde
+            // Paramètres Studio (ou tout app.update) avec un champ vide/périmé
+            // écrase un run_command posé par l'agent (iss-fa13bdb2, symptôme a).
+            let rc = rc.trim();
+            if !rc.is_empty() {
+                app.run_command = rc.to_string();
+            } else {
+                info!(slug = %slug, "AppUpdate: run_command vide ignoré (préservation valeur existante)");
+            }
         }
         if build_command.is_some() {
             app.build_command = build_command;
