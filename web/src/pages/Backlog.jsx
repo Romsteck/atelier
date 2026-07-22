@@ -7,6 +7,9 @@ import {
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
 import { useConfirm } from '../components/ConfirmDialog';
+import PilotRunLive, { pilotRunMetrics, engineLabel } from '../components/pilot/PilotRunLive';
+import { mergeLines } from '../components/surveillance/scanFormat';
+import { formatTokens } from '../lib/toolDisplay';
 import MarkdownView from '../components/docs/MarkdownView';
 import { useApps } from '../context/AppsContext';
 import { usePilot } from '../context/PilotContext';
@@ -55,7 +58,7 @@ function positionBetween(list, index, dir) {
 }
 
 function NightLivePanel({ night, showToast }) {
-  const { items, cancelRun } = usePilot();
+  const { items, cancelRun, transcripts } = usePilot();
   const { confirm, dialog } = useConfirm();
   const stats = night?.stats || {};
   const queue = Array.isArray(stats.queue) ? stats.queue : [];
@@ -75,6 +78,7 @@ function NightLivePanel({ night, showToast }) {
       {total > 0 && <div className="h-1.5 rounded-full bg-gray-800 overflow-hidden"><div className="h-full bg-blue-400 transition-all" style={{ width: `${Math.min(100, Math.round((done / total) * 100))}%` }} /></div>}
       {stats.current && <div className="flex items-center gap-2 text-[11px] text-gray-300">
         <span className="min-w-0 truncate">En cours · <span className="text-blue-800 dark:text-blue-200">{stats.current.scope}</span> · {stats.current.title}{stats.current.attempt ? ` · tentative ${stats.current.attempt}/3` : ''}</span>
+        {(() => { const lm = currentItem?.last_run_id ? pilotRunMetrics(transcripts[currentItem.last_run_id] || []) : null; return lm ? <span className="shrink-0 text-blue-700 dark:text-blue-300">🧠 {formatTokens(lm.thinkingTokens)} · ✍ {formatTokens(lm.outputTokens)} · 🔧 {lm.actions}</span> : null; })()}
         {currentItem?.last_run_id && <Button size="xs" variant="danger" icon={Square} onClick={stopCurrent}>Stopper</Button>}
       </div>}
       {queue.length > 0 && <div className="flex gap-1.5 overflow-x-auto pb-1">{queue.map((item) => <span key={item.id} title={item.title} className={`max-w-48 truncate rounded-sm border px-2 py-1 text-[10px] ${item.status === 'done' ? 'border-emerald-500/30 text-emerald-700 dark:text-emerald-300' : ['queued', 'running'].includes(item.status) ? 'border-blue-400/40 text-blue-800 dark:text-blue-200' : item.status === 'blocked' || item.status === 'failed' ? 'border-red-500/35 text-red-700 dark:text-red-300' : 'border-gray-700 text-gray-500'}`}>{item.scope} · #{item.id}</span>)}</div>}
@@ -173,8 +177,10 @@ function CaptureHint() {
 }
 
 function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
-  const { move, run, cancelRun } = usePilot();
+  const { move, run, cancelRun, transcripts } = usePilot();
   const { confirm, dialog } = useConfirm();
+  // Métriques live compactes tant que l'agent tourne (flux WS depuis le montage).
+  const liveMetrics = item.exec_status === 'running' && item.last_run_id ? pilotRunMetrics(transcripts[item.last_run_id] || []) : null;
   const active = ['queued', 'running'].includes(item.exec_status);
   const index = laneItems.findIndex((x) => x.id === item.id);
   async function execute(e) {
@@ -226,6 +232,13 @@ function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
       </div>
       {item.needs_user_reason && <p className={`mt-2 text-[11px] line-clamp-3 ${item.needs_user ? 'text-amber-700 dark:text-amber-300' : 'text-red-700 dark:text-red-300'}`}>{item.needs_user_reason}</p>}
       {item.exec_status !== 'idle' && <div className="mt-2 text-[10px] text-gray-500">{EXEC[item.exec_status] || item.exec_status}{item.attempts ? ` · tentative ${item.attempts}/3` : ''}</div>}
+      {liveMetrics && <div className="mt-1 flex items-center gap-2 text-[10px] text-blue-700 dark:text-blue-300">
+        <span>{engineLabel(liveMetrics.model, item.last_engine)}</span>
+        <span className="text-gray-500">·</span>
+        <span title="tokens de réflexion">🧠 {formatTokens(liveMetrics.thinkingTokens)}</span>
+        <span title="tokens générés">✍ {formatTokens(liveMetrics.outputTokens)}</span>
+        <span title="actions">🔧 {liveMetrics.actions}</span>
+      </div>}
       {(canMove || canRun || canStop) && <div className="mt-2 pt-2 border-t border-gray-800 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
         {!active && item.lane === 'ready' && <>
           {index > 0 && <button title="Monter" onClick={() => reorder(-1)} className="p-1 text-gray-500 hover:text-gray-200"><ArrowUp className="w-3.5 h-3.5" /></button>}
@@ -293,6 +306,16 @@ function ItemDrawer({ item, onClose, showToast }) {
   const close = () => { setShown(false); setTimeout(onClose, 200); };
   useEffect(() => { setDraft(item); getPilotItemRuns(item.id).then((r) => setRuns(unwrapApi(r) || [])).catch(() => setRuns([])); }, [item]);
   const active = ['queued', 'running'].includes(item.exec_status);
+  // Vue live du run en cours : hydrate le ring (lignes émises avant l'ouverture)
+  // puis fusionne le flux WS. `engineHint` = engine du run avant l'event `system`.
+  const liveRunId = item.exec_status === 'running' ? item.last_run_id : null;
+  const [liveBase, setLiveBase] = useState([]);
+  useEffect(() => {
+    if (!liveRunId) { setLiveBase([]); return; }
+    getPilotTranscript(liveRunId).then((r) => setLiveBase(unwrapApi(r) || [])).catch(() => setLiveBase([]));
+  }, [liveRunId]);
+  const liveLines = liveRunId ? mergeLines(liveBase, transcripts[liveRunId] || []) : [];
+  const liveEngineHint = runs.find((r) => r.id === liveRunId)?.engine || item.last_engine;
   async function save() {
     try {
       const body = {}; for (const k of ['title', 'request', 'description', 'plan', 'kind', 'priority', 'severity', 'effort', 'engine']) if (draft[k] !== item[k] && draft[k] != null) body[k] = draft[k];
@@ -342,7 +365,8 @@ function ItemDrawer({ item, onClose, showToast }) {
           {ENGINE_LABEL[item.last_engine] && <Chip className="bg-blue-500/15 text-blue-700 dark:text-blue-300" title="Moteur du dernier run">{ENGINE_LABEL[item.last_engine]}</Chip>}
           <button onClick={close} className="p-1.5 text-gray-400 hover:text-white"><X className="w-4 h-4" /></button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-y-auto p-4 space-y-5">
+          {liveRunId && <PilotRunLive lines={liveLines} engineHint={liveEngineHint} onStop={stop} />}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-5">
             {/* Colonne gauche : définition de l'item (le « quoi ») */}
             <div className="space-y-5 min-w-0">
