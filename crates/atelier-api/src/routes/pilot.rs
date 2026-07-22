@@ -264,10 +264,12 @@ async fn run_item(
             "confirmation explicite requise pour le scope Atelier",
         );
     }
-    match state.pilot.run_item(id, "manual").await {
-        Ok(run_id) => (
+    // File d'attente : le plafond global max_concurrent + Atelier-en-dernier
+    // s'appliquent aussi le jour (le dispatcher lance quand un créneau se libère).
+    match state.pilot.enqueue_manual(id).await {
+        Ok(item) => (
             StatusCode::ACCEPTED,
-            Json(json!({"success":true,"data":{"run_id":run_id}})),
+            Json(json!({"success":true,"data":item})),
         )
             .into_response(),
         Err(e) => fail(StatusCode::CONFLICT, e),

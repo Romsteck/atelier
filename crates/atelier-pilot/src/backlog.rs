@@ -273,11 +273,31 @@ impl BacklogStore {
         .rows_affected())
     }
 
-    pub async fn mark_queued(&self, id: i64, run_id: Uuid) -> anyhow::Result<Option<BacklogItem>> {
+    /// File d'attente manuelle : l'item passe `queued` SANS run_id (il n'a pas
+    /// encore de créneau). Le dispatcher lui en attribuera un via `mark_queued`
+    /// au moment du lancement réel. `last_run_id=NULL` distingue un item « en
+    /// file, jamais démarré » d'un run réellement interrompu (cf. reconcile_boot).
+    pub async fn mark_pending(&self, id: i64) -> anyhow::Result<Option<BacklogItem>> {
         let row = query(
-            "UPDATE backlog_items SET exec_status='queued',last_run_id=$2,updated_at=now() \
+            "UPDATE backlog_items SET exec_status='queued',last_run_id=NULL,updated_at=now() \
              WHERE id=$1 AND exec_status NOT IN ('queued','running') AND needs_user=false \
              AND lane IN ('ready','attention') RETURNING *",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_item).transpose()
+    }
+
+    pub async fn mark_queued(&self, id: i64, run_id: Uuid) -> anyhow::Result<Option<BacklogItem>> {
+        // Claim par le lanceur (nuit ou dispatcher manuel). Autorisé si l'item
+        // est frais (idle/failed/…) OU « en file jamais démarré » (queued sans
+        // run_id, posé par mark_pending) — mais JAMAIS s'il tourne déjà
+        // (queued/running AVEC run_id).
+        let row = query(
+            "UPDATE backlog_items SET exec_status='queued',last_run_id=$2,updated_at=now() \
+             WHERE id=$1 AND (exec_status NOT IN ('queued','running') OR last_run_id IS NULL) \
+             AND needs_user=false AND lane IN ('ready','attention') RETURNING *",
         )
         .bind(id)
         .bind(run_id)
@@ -358,6 +378,17 @@ impl BacklogStore {
     }
 
     pub async fn reconcile_boot(&self) -> anyhow::Result<u64> {
+        // Un item « en file mais jamais démarré » (queued sans run_id, cf.
+        // mark_pending) n'a rien exécuté : la file manuelle étant en mémoire, il
+        // est simplement perdu au restart → on le rend `ready`, sans le punir.
+        query(
+            "UPDATE backlog_items SET exec_status='idle',updated_at=now() \
+             WHERE exec_status='queued' AND last_run_id IS NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Les runs réellement interrompus (queued avec run_id, ou running) →
+        // attention, sauf le worker atelier détaché encore en phase report.
         Ok(query(
             "UPDATE backlog_items b SET exec_status='failed',lane='attention',needs_user_reason='Run interrompu par le redémarrage d’Atelier',updated_at=now() \
              WHERE exec_status IN ('queued','running') AND NOT EXISTS (\

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
+import { useConfirm } from '../components/ConfirmDialog';
 import MarkdownView from '../components/docs/MarkdownView';
 import { useApps } from '../context/AppsContext';
 import { usePilot } from '../context/PilotContext';
@@ -55,6 +56,7 @@ function positionBetween(list, index, dir) {
 
 function NightLivePanel({ night, showToast }) {
   const { items, cancelRun } = usePilot();
+  const { confirm, dialog } = useConfirm();
   const stats = night?.stats || {};
   const queue = Array.isArray(stats.queue) ? stats.queue : [];
   const total = Number(stats.total || queue.length || 0);
@@ -63,7 +65,7 @@ function NightLivePanel({ night, showToast }) {
   // items pour brancher l'annulation du run live.
   const currentItem = stats.current ? items.find((x) => x.id === stats.current.id) : null;
   async function stopCurrent() {
-    if (!currentItem?.last_run_id || !window.confirm('Stopper le run en cours ?')) return;
+    if (!currentItem?.last_run_id || !(await confirm({ title: 'Stopper le run en cours ?', message: currentItem ? `« ${currentItem.title} »` : undefined, confirmLabel: 'Stopper', variant: 'danger' }))) return;
     try { await cancelRun(currentItem.last_run_id); showToast?.('Annulation demandée'); }
     catch (e) { showToast?.(apiErr(e), 'error'); }
   }
@@ -77,6 +79,7 @@ function NightLivePanel({ night, showToast }) {
       </div>}
       {queue.length > 0 && <div className="flex gap-1.5 overflow-x-auto pb-1">{queue.map((item) => <span key={item.id} title={item.title} className={`max-w-48 truncate rounded-sm border px-2 py-1 text-[10px] ${item.status === 'done' ? 'border-emerald-500/30 text-emerald-700 dark:text-emerald-300' : ['queued', 'running'].includes(item.status) ? 'border-blue-400/40 text-blue-800 dark:text-blue-200' : item.status === 'blocked' || item.status === 'failed' ? 'border-red-500/35 text-red-700 dark:text-red-300' : 'border-gray-700 text-gray-500'}`}>{item.scope} · #{item.id}</span>)}</div>}
       <div className="text-[10px] text-gray-500">Les apps et leurs findings passent avant Atelier.</div>
+      {dialog}
     </section>
   );
 }
@@ -171,19 +174,20 @@ function CaptureHint() {
 
 function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
   const { move, run, cancelRun } = usePilot();
+  const { confirm, dialog } = useConfirm();
   const active = ['queued', 'running'].includes(item.exec_status);
   const index = laneItems.findIndex((x) => x.id === item.id);
   async function execute(e) {
     e.stopPropagation();
+    if (!(await confirmExecute(confirm, item))) return;
     try {
-      const confirmAtelier = item.scope === 'atelier' ? window.confirm('Exécuter un changement Atelier peut redémarrer la plateforme. Continuer ?') : false;
-      if (item.scope === 'atelier' && !confirmAtelier) return;
-      await run(item.id, confirmAtelier); showToast('Run Pilote lancé');
+      await run(item.id, item.scope === 'atelier');
+      showToast(item.scope === 'atelier' ? 'Atelier en file — passera après les apps' : 'Ajouté à la file d’exécution');
     } catch (err) { showToast(apiErr(err), 'error'); }
   }
   async function stop(e) {
     e.stopPropagation();
-    if (!window.confirm('Stopper ce run ?')) return;
+    if (!(await confirm({ title: 'Stopper ce run ?', message: `« ${item.title} »\n\nL'agent sera interrompu et les modifications non validées seront annulées.`, confirmLabel: 'Stopper', variant: 'danger' }))) return;
     try { await cancelRun(item.last_run_id); showToast('Annulation demandée'); }
     catch (err) { showToast(apiErr(err), 'error'); }
   }
@@ -231,8 +235,28 @@ function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
         {canStop && <Button size="xs" variant="danger" icon={Square} onClick={stop}>Stopper</Button>}
         {canRun && <Button size="xs" variant="primary" icon={Play} onClick={execute}>Exécuter</Button>}
       </div>}
+      {dialog}
     </article>
   );
+}
+
+// Dialogue de confirmation d'exécution partagé (carte + tiroir) : contexte de
+// l'activité, avertissement renforcé (danger) pour le scope Atelier dont le run
+// redémarre la plateforme.
+function confirmExecute(confirm, item) {
+  if (item.scope === 'atelier') {
+    return confirm({
+      title: 'Exécuter cette activité sur Atelier ?',
+      message: `« ${item.title} »\n\nUn agent autonome va modifier la plateforme puis la déployer (make deploy) — Atelier redémarrera brièvement. Le run passera après tout le travail des apps.`,
+      confirmLabel: 'Exécuter sur Atelier',
+      variant: 'danger',
+    });
+  }
+  return confirm({
+    title: 'Exécuter cette activité ?',
+    message: `« ${item.title} »\n\nUn agent autonome va traiter cet item (${item.scope}) : implémentation, build, déploiement, puis commit automatique si la validation passe.`,
+    confirmLabel: 'Exécuter',
+  });
 }
 
 // Lecture = markdown rendu (MarkdownView, le même que le fil agent) ; édition =
@@ -257,6 +281,7 @@ function MarkdownField({ label, value, rows, onChange }) {
 
 function ItemDrawer({ item, onClose, showToast }) {
   const { patch, remove, run, move, cancelRun, state, transcripts } = usePilot();
+  const { confirm, dialog } = useConfirm();
   const [draft, setDraft] = useState(item);
   const [runs, setRuns] = useState([]);
   const [selectedRun, setSelectedRun] = useState(null);
@@ -277,11 +302,12 @@ function ItemDrawer({ item, onClose, showToast }) {
     catch (e) { showToast(apiErr(e), 'error'); }
   }
   async function execute() {
-    try { const confirmAtelier = item.scope === 'atelier' && window.confirm('Confirmer l’exécution sur Atelier ?'); if (item.scope === 'atelier' && !confirmAtelier) return; await run(item.id, !!confirmAtelier); showToast('Run lancé'); }
+    if (!(await confirmExecute(confirm, item))) return;
+    try { await run(item.id, item.scope === 'atelier'); showToast(item.scope === 'atelier' ? 'Atelier en file — passera après les apps' : 'Ajouté à la file d’exécution'); }
     catch (e) { showToast(apiErr(e), 'error'); }
   }
   async function stop() {
-    if (!item.last_run_id || !window.confirm('Stopper ce run ?')) return;
+    if (!item.last_run_id || !(await confirm({ title: 'Stopper ce run ?', message: `« ${item.title} »\n\nL'agent sera interrompu et les modifications non validées seront annulées.`, confirmLabel: 'Stopper', variant: 'danger' }))) return;
     try { await cancelRun(item.last_run_id); showToast('Annulation demandée'); }
     catch (e) { showToast(apiErr(e), 'error'); }
   }
@@ -328,9 +354,10 @@ function ItemDrawer({ item, onClose, showToast }) {
             <Button size="sm" variant="success" icon={CheckCircle2} onClick={markHandled}>Marquer traité</Button>
           </>}
           {item.scope !== 'atelier' && <Button as="a" href={`/studio/${item.scope}?tab=backlog`} target="_blank" size="sm" variant="neutral" icon={ExternalLink}>Studio</Button>}
-          <span className="flex-1" /><Button variant="danger" icon={Trash2} onClick={async () => { if (window.confirm('Supprimer cet item ?')) { await remove(item.id); onClose(); } }}>Supprimer</Button>
+          <span className="flex-1" /><Button variant="danger" icon={Trash2} onClick={async () => { if (await confirm({ title: 'Supprimer cet item ?', message: `« ${item.title} »\n\nCette action est définitive.`, confirmLabel: 'Supprimer', variant: 'danger' })) { await remove(item.id); onClose(); } }}>Supprimer</Button>
         </div>
       </aside>
+      {dialog}
     </div>
   );
 }

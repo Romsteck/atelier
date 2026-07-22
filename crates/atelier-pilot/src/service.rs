@@ -136,6 +136,46 @@ struct RunningWork {
     trigger: String,
 }
 
+/// File d'attente des runs MANUELS (déclenchés à la main hors nuit). Elle porte
+/// la même discipline que la nuit : plafond `max_concurrent` GLOBAL (compté sur
+/// la map `running`, donc partagé avec la nuit) et Atelier toujours en dernier
+/// (son deploy redémarre le service — il attend que tout le travail app soit
+/// drainé). `active` = un dispatcher tourne ; géré sous le même verrou que la
+/// file pour éviter tout double dispatcher.
+#[derive(Default)]
+struct ManualQueue {
+    items: VecDeque<(i64, String)>, // (item_id, scope)
+    active: bool,
+}
+
+enum ManualPick {
+    Dispatch(i64),
+    Wait,
+    Done,
+}
+
+/// Index (dans la file) du prochain item manuel lançable, ou `None` si aucun
+/// (plafond atteint, tous les scopes occupés, ou seul Atelier reste alors que
+/// du travail app est encore en file/en cours). Fonction pure = testable.
+/// Contraintes : plafond `cap` sur le nombre total de runs actifs ; un run par
+/// scope ; Atelier après tout run/queue non-atelier.
+fn manual_dispatch_index(cap: usize, running: &[&str], queue: &[&str]) -> Option<usize> {
+    if running.len() >= cap {
+        return None;
+    }
+    let other_running = running.iter().any(|s| *s != "atelier");
+    let other_queued = queue.iter().any(|s| *s != "atelier");
+    queue.iter().position(|scope| {
+        if running.contains(scope) {
+            return false;
+        }
+        if *scope == "atelier" && (other_running || other_queued) {
+            return false;
+        }
+        true
+    })
+}
+
 /// Rings de transcript bornés à N runs : sans purge, la map mémoire grossissait
 /// indéfiniment (un ring de 500 lignes par run, jamais libéré).
 #[derive(Default)]
@@ -171,6 +211,7 @@ struct Inner {
     config: PilotConfig,
     hooks: RwLock<PilotHooks>,
     running: Mutex<HashMap<String, RunningWork>>,
+    manual: Mutex<ManualQueue>,
     transcript: Mutex<TranscriptBuf>,
     backlog_tx: broadcast::Sender<PilotEvent>,
     transcript_tx: broadcast::Sender<TranscriptLine>,
@@ -216,6 +257,7 @@ impl PilotService {
                 config,
                 hooks: RwLock::new(PilotHooks::default()),
                 running: Mutex::new(HashMap::new()),
+                manual: Mutex::new(ManualQueue::default()),
                 transcript: Mutex::new(TranscriptBuf::default()),
                 backlog_tx,
                 transcript_tx,
@@ -423,6 +465,110 @@ impl PilotService {
             svc.execute_with_retries(item, run_id, &trigger).await;
         });
         Ok(run_id)
+    }
+
+    /// Lancement manuel : n'exécute PAS immédiatement — met l'item en file et
+    /// laisse le dispatcher respecter le plafond `max_concurrent` global et la
+    /// règle Atelier-en-dernier (mêmes garanties que la nuit). Retourne l'item
+    /// en état `queued` (l'UI le montre « En file » jusqu'à obtention d'un
+    /// créneau, puis « Agent actif »).
+    pub async fn enqueue_manual(&self, id: i64) -> Result<BacklogItem, String> {
+        let backlog = self.inner.backlog.as_ref().ok_or("Pilote indisponible")?;
+        let item = backlog
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("item introuvable")?;
+        if item.needs_user {
+            return Err("item bloqué dans l’attente de réponses".into());
+        }
+        if !matches!(item.lane.as_str(), "ready" | "attention") {
+            return Err("item non exécutable dans cette colonne".into());
+        }
+        if matches!(item.exec_status.as_str(), "queued" | "running") {
+            return Err("item déjà en file ou en cours".into());
+        }
+        let Some(pending) = backlog.mark_pending(id).await.map_err(|e| e.to_string())? else {
+            return Err("item déjà en file ou en cours".into());
+        };
+        let spawn = {
+            let mut q = self.inner.manual.lock().expect("pilot manual");
+            q.items.push_back((id, item.scope.clone()));
+            if q.active {
+                false
+            } else {
+                q.active = true;
+                true
+            }
+        };
+        info!(item_id = id, scope = %item.scope, "pilot manual enqueue");
+        self.publish("exec", Some(pending.clone()), Some(id));
+        if spawn {
+            let svc = self.clone();
+            tokio::spawn(async move { svc.run_manual_dispatcher().await });
+        }
+        Ok(pending)
+    }
+
+    /// Boucle qui vide la file manuelle en respectant : plafond global (map
+    /// `running`, partagé avec la nuit), un run par scope, Atelier après tout le
+    /// reste. Un seul dispatcher vit à la fois (flag `active` sous le verrou).
+    async fn run_manual_dispatcher(&self) {
+        loop {
+            let cap = match self.inner.schedule.as_ref() {
+                Some(s) => s.get().await.map(|c| c.max_concurrent).unwrap_or(2),
+                None => 2,
+            }
+            .max(1) as usize;
+            let decision = self.pick_manual(cap);
+            match decision {
+                ManualPick::Dispatch(item_id) => {
+                    // run_item re-valide et peut refuser (session interactive
+                    // apparue, etc.) : l'item est déjà `queued` en base, on le
+                    // bascule alors en attention pour ne pas le laisser coincé.
+                    if let Err(e) = self.run_item(item_id, "manual").await {
+                        warn!(item_id, error = %e, "pilot manual dispatch rejected");
+                        if let Some(b) = self.inner.backlog.as_ref() {
+                            if let Ok(it) = b
+                                .settle_attention(
+                                    item_id,
+                                    false,
+                                    &format!("Lancement impossible : {e}"),
+                                    None,
+                                )
+                                .await
+                            {
+                                self.publish("exec", Some(it), Some(item_id));
+                            }
+                        }
+                    }
+                }
+                // Rien de lançable maintenant (plafond atteint ou barrière
+                // Atelier) mais la file n'est pas vide : on attend un créneau.
+                ManualPick::Wait => tokio::time::sleep(Duration::from_secs(2)).await,
+                ManualPick::Done => return,
+            }
+        }
+    }
+
+    /// Choisit le prochain item manuel lançable. Verrous pris dans l'ordre
+    /// `running` puis `manual` (aucun autre chemin ne prend `manual`).
+    fn pick_manual(&self, cap: usize) -> ManualPick {
+        let running = self.inner.running.lock().expect("pilot running");
+        let mut q = self.inner.manual.lock().expect("pilot manual");
+        if q.items.is_empty() {
+            q.active = false;
+            return ManualPick::Done;
+        }
+        let running_scopes: Vec<&str> = running.keys().map(String::as_str).collect();
+        let queue_scopes: Vec<&str> = q.items.iter().map(|(_, s)| s.as_str()).collect();
+        match manual_dispatch_index(cap, &running_scopes, &queue_scopes) {
+            Some(i) => {
+                let (id, _) = q.items.remove(i).expect("pilot manual item");
+                ManualPick::Dispatch(id)
+            }
+            None => ManualPick::Wait,
+        }
     }
 
     pub fn cancel_run(&self, run_id: Uuid) -> bool {
@@ -2218,7 +2364,28 @@ fn worker_needs_user(report: Option<&str>) -> Option<(String, Vec<Question>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blocked_reason, exec_tail, worker_needs_user};
+    use super::{blocked_reason, exec_tail, manual_dispatch_index, worker_needs_user};
+
+    #[test]
+    fn manual_queue_respects_cap_scope_and_atelier_last() {
+        // Plafond global : rien ne part si `running` sature le cap.
+        assert_eq!(manual_dispatch_index(2, &["a", "b"], &["c"]), None);
+        // Un créneau libre → le 1er item lançable part.
+        assert_eq!(manual_dispatch_index(2, &["a"], &["b", "c"]), Some(0));
+        // Scope déjà en cours → sauté au profit du suivant.
+        assert_eq!(manual_dispatch_index(2, &["b"], &["b", "c"]), Some(1));
+        // Atelier attend tant qu'un item app est en file…
+        assert_eq!(manual_dispatch_index(2, &[], &["atelier", "www"]), Some(1));
+        // …ou tant qu'un run app tourne.
+        assert_eq!(manual_dispatch_index(2, &["www"], &["atelier"]), None);
+        // Atelier seul (rien d'autre) → il part.
+        assert_eq!(manual_dispatch_index(2, &[], &["atelier"]), Some(0));
+        // Atelier après plusieurs apps déjà drainées mais une encore en file.
+        assert_eq!(
+            manual_dispatch_index(3, &[], &["atelier", "atelier", "home"]),
+            Some(2)
+        );
+    }
 
     #[test]
     fn blocked_message_uses_real_attempts_and_reason() {
