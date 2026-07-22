@@ -436,7 +436,16 @@ export default function AgentPanel({ panelKey, variant = 'dev' }) {
   const [mode, setMode] = useState(() => isPm ? 'plan' : (localStorage.getItem('agent:mode') || 'plan'));
   // « Fast » = tier RAPIDE du modèle (axe indépendant de l'effort, cf. wireModel).
   // N'a de sens que pour un modèle qui en a un ; ignoré sinon.
-  const [fast, setFast] = useState(() => localStorage.getItem('agent:fast') === '1');
+  // WHY pas de préférence globale (contrairement à modèle/effort/mode) : Fast n'est pas
+  // un goût stable mais un ARBITRAGE ponctuel — on accepte un tier moins capable pour
+  // aller plus vite. Persisté globalement, un essai unique dégradait silencieusement
+  // TOUTES les conversations suivantes (le sélecteur affichant toujours « GPT 5.6», rien
+  // ne le signalait). Défaut OFF ⇒ le tier proposé est toujours le tier codage (`sol`) ;
+  // une conversation existante, elle, restaure son état depuis le modèle serveur.
+  const [fast, setFast] = useState(false);
+  // Migration : purge la préférence globale posée par la version précédente (elle ne
+  // pilote plus rien, mais laisser une clé morte induirait en erreur au débogage).
+  useEffect(() => { localStorage.removeItem('agent:fast'); }, []);
   const [sdk, setSdk] = useState(null);
   const [updatingSdk, setUpdatingSdk] = useState(false);
   const [sdkMsg, setSdkMsg] = useState(null); // { ok: bool, text } — retour de la MAJ SDK
@@ -700,7 +709,6 @@ export default function AgentPanel({ panelKey, variant = 'dev' }) {
   const onToggleFast = () => {
     const next = !fast;
     setFast(next);
-    localStorage.setItem('agent:fast', next ? '1' : '0');
     if (live) changeModel(panelKey, wireModel(selModel, next));
   };
   const onChangeMode = (id) => {
@@ -915,7 +923,12 @@ export default function AgentPanel({ panelKey, variant = 'dev' }) {
         <label className="flex items-center gap-1.5 w-full sm:w-auto">
           <span className="text-[10px] uppercase tracking-wider text-gray-500">Modèle</span>
           <select value={modelId} onChange={(e) => onChangeModel(e.target.value)}
-            title={engineLocked ? `Moteur ${ENGINES[engine]?.label || engine} figé pour cette conversation` : undefined}
+            // Le title porte le slug RÉELLEMENT envoyé : le libellé est celui de la
+            // FAMILLE (« GPT 5.6 »), identique que Fast soit actif ou non — sans ça,
+            // rien à l'écran ne distinguait un run sur le tier rapide.
+            title={`modèle envoyé : ${wireModel(selModel, fast) || 'défaut abonnement'}${
+              engineLocked ? ` — moteur ${ENGINES[engine]?.label || engine} figé pour cette conversation` : ''
+            }`}
             className="flex-1 sm:flex-none h-[29px] rounded-md border border-gray-700/80 bg-gray-800/60 text-[11px] text-gray-200 px-1.5 focus:outline-none focus:border-blue-500">
             {engineLocked
               ? modelsForEngine(engine).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)
