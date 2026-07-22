@@ -2296,11 +2296,12 @@ Questions/réponses précédentes :
 {answers}
 
 Contrat : investigue puis implémente strictement ce périmètre. Tu peux modifier uniquement ce workspace. Ne commite jamais, ne pousse jamais et ne redémarre aucun service : l'orchestrateur build/ship/healthcheck/commit après toi. N'utilise ni sudo ni systemctl. Les suppressions de données en masse sont interdites.
-Si une décision produit, une ambiguïté, un plan caduc ou un risque empêche un changement sûr, appelle backlog_update avec id={id}, needs_user=true, reason et questions autosuffisantes, puis ARRÊTE sans modifier davantage. Sinon valide localement autant que possible.
+Si une décision produit, une ambiguïté, un plan caduc ou un risque empêche un changement sûr, appelle backlog_update avec id={id}, needs_user=true, une reason courte, puis ARRÊTE sans modifier davantage.
+Tes questions à Romain doivent être SIMPLES et rapides à trancher : un choix binaire (oui/non) ou A-vs-B, UNE seule décision par question, 2 questions maximum, et formule TA recommandation par défaut (« je propose X parce que… »). Bannis les questions ouvertes, purement techniques ou interdépendantes — Romain répond vite, sans relire le code. S'il te donne une consigne partielle ou une seule réponse, avance avec ce que tu as plutôt que de re-bloquer. Sinon valide localement autant que possible.
 
 Ta réponse finale doit se terminer par un bloc JSON valide de cette forme (sans texte après) :
 ```json
-{{"pilot":{{"outcome":"done|needs_user","summary":"résumé","reason":"raison si besoin","questions":["question autosuffisante"]}}}}
+{{"pilot":{{"outcome":"done|needs_user","summary":"résumé","reason":"raison si besoin","questions":["choix binaire ou A-vs-B, avec ta reco"]}}}}
 ```
 Utilise outcome=needs_user pour tout doute; Atelier appliquera ce rapport même si ton moteur n'a pas accès au MCP."#,
         scope = item.scope,

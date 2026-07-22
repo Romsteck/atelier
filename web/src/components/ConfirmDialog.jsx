@@ -40,7 +40,14 @@ export function useConfirm() {
 
   const dialog = state
     ? createPortal(
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+        // stopPropagation : un portail bubble les events par l'ARBRE REACT, pas
+        // le DOM — sans ça, un clic dans le dialogue remonte au parent (carte
+        // cliquable) et rouvre le drawer derrière la confirmation.
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
           <div className="absolute inset-0 bg-black/60 backdrop-blur-xs" onClick={() => settle(false)} />
           <div role="dialog" aria-modal="true" className="relative w-full max-w-md rounded-lg border border-gray-700 bg-gray-800 shadow-2xl">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-700">

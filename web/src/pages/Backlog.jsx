@@ -286,6 +286,11 @@ function ItemDrawer({ item, onClose, showToast }) {
   const [runs, setRuns] = useState([]);
   const [selectedRun, setSelectedRun] = useState(null);
   const [persistedTranscript, setPersistedTranscript] = useState([]);
+  const [note, setNote] = useState('');
+  // Animation d'entrée : le panneau part hors-écran à droite puis glisse en place.
+  const [shown, setShown] = useState(false);
+  useEffect(() => { const t = requestAnimationFrame(() => setShown(true)); return () => cancelAnimationFrame(t); }, []);
+  const close = () => { setShown(false); setTimeout(onClose, 200); };
   useEffect(() => { setDraft(item); getPilotItemRuns(item.id).then((r) => setRuns(unwrapApi(r) || [])).catch(() => setRuns([])); }, [item]);
   const active = ['queued', 'running'].includes(item.exec_status);
   async function save() {
@@ -296,10 +301,22 @@ function ItemDrawer({ item, onClose, showToast }) {
   }
   async function retry() { try { await patch(item.id, { lane: 'ready', exec_status: 'idle', needs_user: false, reset_attempts: true }); showToast('Item remis en file Prêt'); } catch (e) { showToast(apiErr(e), 'error'); } }
   async function markHandled() { try { await move(item.id, 'done'); showToast('Item marqué traité'); onClose(); } catch (e) { showToast(apiErr(e), 'error'); } }
-  async function answerAndReplan() {
-    if ((draft.questions || []).some((q) => !q.answer?.trim())) { showToast('Réponds à chaque question', 'error'); return; }
-    try { await patch(item.id, { questions: draft.questions, needs_user: false, lane: 'ready', exec_status: 'idle', reset_attempts: true }); showToast('Réponses enregistrées · item prêt'); }
-    catch (e) { showToast(apiErr(e), 'error'); }
+  // Répondre aux questions d'un run incertain. Les réponses sont OPTIONNELLES
+  // par champ (un choix A-vs-B se répond par un seul champ, ou par la consigne
+  // libre) : on exige juste une entrée. `relaunch` = l'agent reprend tout de
+  // suite avec les réponses ; sinon l'item attend la prochaine nuit.
+  async function submitAnswers(relaunch) {
+    const answered = (draft.questions || []).filter((q) => q.answer?.trim());
+    if (answered.length === 0 && !note.trim()) { showToast('Réponds à une question ou laisse une consigne', 'error'); return; }
+    const questions = [...(draft.questions || [])];
+    if (note.trim()) questions.push({ q: 'Consigne complémentaire de Romain', answer: note.trim() });
+    if (relaunch && !(await confirmExecute(confirm, item))) return;
+    try {
+      await patch(item.id, { questions, needs_user: false, lane: 'ready', exec_status: 'idle', reset_attempts: true });
+      if (relaunch) { await run(item.id, item.scope === 'atelier'); showToast('Réponses enregistrées · l’agent reprend'); }
+      else showToast('Réponses enregistrées · planifié pour la nuit');
+      setNote('');
+    } catch (e) { showToast(apiErr(e), 'error'); }
   }
   async function execute() {
     if (!(await confirmExecute(confirm, item))) return;
@@ -317,33 +334,54 @@ function ItemDrawer({ item, onClose, showToast }) {
   // reste alors la seule trace du run.
   const selectedRunTail = selectedRun ? runs.find((r) => r.id === selectedRun)?.transcript_tail : null;
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/55" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <aside className="w-full max-w-2xl h-full bg-gray-900 border-l border-gray-700 flex flex-col shadow-2xl">
+    <div className="fixed inset-0 z-50 flex justify-end">
+      <div className={`absolute inset-0 bg-black/55 transition-opacity duration-200 ${shown ? 'opacity-100' : 'opacity-0'}`} onMouseDown={close} />
+      <aside className={`relative w-full max-w-5xl h-full bg-gray-900 border-l border-gray-700 flex flex-col shadow-2xl transition-transform duration-200 ease-out will-change-transform ${shown ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className="h-12 px-4 border-b border-gray-700 flex items-center gap-2 shrink-0">
-          <ClipboardList className="w-4 h-4 text-blue-600 dark:text-blue-400" /><span className="font-medium text-sm flex-1 truncate">Item #{item.id}</span>
+          <ClipboardList className="w-4 h-4 text-blue-600 dark:text-blue-400" /><span className="font-medium text-sm flex-1 truncate">Item #{item.id} · {item.title}</span>
           {ENGINE_LABEL[item.last_engine] && <Chip className="bg-blue-500/15 text-blue-700 dark:text-blue-300" title="Moteur du dernier run">{ENGINE_LABEL[item.last_engine]}</Chip>}
-          <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-white"><X className="w-4 h-4" /></button>
+          <button onClick={close} className="p-1.5 text-gray-400 hover:text-white"><X className="w-4 h-4" /></button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-5">
-          <div>
-            <label className="text-[10px] uppercase text-gray-500">Titre</label>
-            <input value={draft.title || ''} onChange={(e) => setDraft({ ...draft, title: e.target.value })} className="w-full mt-1 bg-gray-950 border border-gray-700 rounded-sm px-3 py-2 text-sm" />
+        <div className="flex-1 overflow-y-auto p-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-5">
+            {/* Colonne gauche : définition de l'item (le « quoi ») */}
+            <div className="space-y-5 min-w-0">
+              <div>
+                <label className="text-[10px] uppercase text-gray-500">Titre</label>
+                <input value={draft.title || ''} onChange={(e) => setDraft({ ...draft, title: e.target.value })} className="w-full mt-1 bg-gray-950 border border-gray-700 rounded-sm px-3 py-2 text-sm" />
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {Object.entries(OPTIONS).map(([key, vals]) => <label key={key} className="text-[10px] uppercase text-gray-500">{key}<select value={draft[key]} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-300 normal-case">{vals.map((v) => <option key={v}>{v}</option>)}</select></label>)}
+                {/* « Auto » reste une option VALIDE (un item peut déjà porter engine='auto') :
+                    jamais disabled+sélectionnée — le libellé dit la vérité tant que le
+                    routeur de complexité n'est pas branché. */}
+                <label className="text-[10px] uppercase text-gray-500">Moteur<select value={draft.engine} onChange={(e) => setDraft({ ...draft, engine: e.target.value })} className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-300 normal-case"><option value="claude">Opus 4.8</option><option value="auto">{state?.engines?.auto_router ? 'Auto' : 'Auto (bientôt — Claude pour l’instant)'}</option><option value="codex" disabled={!state?.engines?.codex_worker}>GPT-5.6 Sol{state?.engines?.codex_worker ? '' : ' (en attente)'}</option></select></label>
+              </div>
+              <MarkdownField label="request" value={draft.request} rows={4} onChange={(e) => setDraft({ ...draft, request: e.target.value })} />
+              <MarkdownField label="description" value={draft.description} rows={6} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+            </div>
+            {/* Colonne droite : plan + questions/état + historique (le « comment ») */}
+            <div className="space-y-5 min-w-0">
+              <MarkdownField label="plan" value={draft.plan} rows={12} onChange={(e) => setDraft({ ...draft, plan: e.target.value })} />
+              {item.needs_user && <section className="rounded-lg border border-amber-500/35 bg-amber-500/5 p-3 space-y-3">
+                <div className="text-sm font-medium text-amber-700 dark:text-amber-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4" />Questions — décision requise</div>
+                <p className="text-xs text-gray-400">{item.needs_user_reason}</p>
+                {(draft.questions || []).map((q, i) => <label key={i} className="block text-xs text-gray-300">{q.q}<textarea value={q.answer || ''} onChange={(e) => { const questions = [...draft.questions]; questions[i] = { ...q, answer: e.target.value }; setDraft({ ...draft, questions }); }} rows={2} placeholder="Ta réponse (optionnelle)" className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" /></label>)}
+                <label className="block text-xs text-gray-300">Consigne libre / réponse globale<textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Ex. « pars sur l’option A, plus simple » — tu peux répondre ici sans remplir les champs ci-dessus" className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" /></label>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button variant="success" size="sm" icon={CirclePlay} onClick={() => submitAnswers(true)}>Répondre &amp; relancer</Button>
+                  <Button variant="neutral" size="sm" onClick={() => submitAnswers(false)}>Répondre (planifier la nuit)</Button>
+                </div>
+                <p className="text-[10px] text-gray-500">Réponds à ce qui te parle — un seul champ suffit. « Relancer » remet l’agent au travail immédiatement avec tes réponses.</p>
+              </section>}
+              {item.exec_status === 'blocked' && !item.needs_user && <section className="rounded-lg border border-red-500/35 bg-red-500/5 p-3"><div className="text-sm text-red-700 dark:text-red-300 font-medium">Bloqué — {item.attempts || 3} échec{(item.attempts || 3) > 1 ? 's' : ''}</div><p className="text-xs text-gray-400 mt-1">{item.needs_user_reason}</p></section>}
+              <section><h3 className="text-xs uppercase text-gray-500 mb-2">Historique des runs</h3>{runs.length === 0 ? <p className="text-xs text-gray-600">Aucun run.</p> : <div className="space-y-1">{runs.map((r) => <button key={r.id} onClick={() => showRun(r)} className={`w-full text-left rounded-sm border px-2 py-1.5 text-xs ${selectedRun === r.id ? 'border-blue-500/50 bg-blue-500/10' : 'border-gray-800 hover:bg-gray-800/50'}`}><span className={r.status === 'success' ? 'text-emerald-600 dark:text-emerald-400' : r.status === 'running' ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'}>{r.status}</span> · tentative {r.attempt}/3 · {r.phase}{r.failure_reason ? ` · ${r.failure_reason}` : ''}{ENGINE_LABEL[r.engine] ? ` · ${ENGINE_LABEL[r.engine]}` : ''}</button>)}</div>}{selectedRun && (transcript.length > 0
+                ? <pre className="mt-2 max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">{transcript.map((l) => l.line).join('\n')}</pre>
+                : selectedRunTail
+                  ? <div className="mt-2"><div className="text-[10px] text-gray-500 mb-1">Fin de transcript (repli — ring live indisponible)</div><pre className="max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">{selectedRunTail}</pre></div>
+                  : <pre className="mt-2 max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">Transcript indisponible.</pre>)}</section>
+            </div>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-            {Object.entries(OPTIONS).map(([key, vals]) => <label key={key} className="text-[10px] uppercase text-gray-500">{key}<select value={draft[key]} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-300 normal-case">{vals.map((v) => <option key={v}>{v}</option>)}</select></label>)}
-            {/* « Auto » reste une option VALIDE (un item peut déjà porter engine='auto') :
-                jamais disabled+sélectionnée — le libellé dit la vérité tant que le
-                routeur de complexité n'est pas branché. */}
-            <label className="text-[10px] uppercase text-gray-500">Moteur<select value={draft.engine} onChange={(e) => setDraft({ ...draft, engine: e.target.value })} className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-300 normal-case"><option value="claude">Opus 4.8</option><option value="auto">{state?.engines?.auto_router ? 'Auto' : 'Auto (bientôt — Claude pour l’instant)'}</option><option value="codex" disabled={!state?.engines?.codex_worker}>GPT-5.6 Sol{state?.engines?.codex_worker ? '' : ' (en attente)'}</option></select></label>
-          </div>
-          {['request', 'description', 'plan'].map((key) => <MarkdownField key={key} label={key} value={draft[key]} rows={key === 'plan' ? 8 : 4} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />)}
-          {item.needs_user && <section className="rounded-lg border border-amber-500/35 bg-amber-500/5 p-3 space-y-3"><div className="text-sm font-medium text-amber-700 dark:text-amber-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4" />Questions — décision requise</div><p className="text-xs text-gray-400">{item.needs_user_reason}</p>{(draft.questions || []).map((q, i) => <label key={i} className="block text-xs text-gray-300">{q.q}<textarea value={q.answer || ''} onChange={(e) => { const questions = [...draft.questions]; questions[i] = { ...q, answer: e.target.value }; setDraft({ ...draft, questions }); }} rows={2} className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" /></label>)}<Button variant="warning" size="sm" onClick={answerAndReplan}>Répondre &amp; replanifier</Button></section>}
-          {item.exec_status === 'blocked' && !item.needs_user && <section className="rounded-lg border border-red-500/35 bg-red-500/5 p-3"><div className="text-sm text-red-700 dark:text-red-300 font-medium">Bloqué — {item.attempts || 3} échec{(item.attempts || 3) > 1 ? 's' : ''}</div><p className="text-xs text-gray-400 mt-1">{item.needs_user_reason}</p></section>}
-          <section><h3 className="text-xs uppercase text-gray-500 mb-2">Historique des runs</h3>{runs.length === 0 ? <p className="text-xs text-gray-600">Aucun run.</p> : <div className="space-y-1">{runs.map((r) => <button key={r.id} onClick={() => showRun(r)} className={`w-full text-left rounded-sm border px-2 py-1.5 text-xs ${selectedRun === r.id ? 'border-blue-500/50 bg-blue-500/10' : 'border-gray-800 hover:bg-gray-800/50'}`}><span className={r.status === 'success' ? 'text-emerald-600 dark:text-emerald-400' : r.status === 'running' ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'}>{r.status}</span> · tentative {r.attempt}/3 · {r.phase}{r.failure_reason ? ` · ${r.failure_reason}` : ''}{ENGINE_LABEL[r.engine] ? ` · ${ENGINE_LABEL[r.engine]}` : ''}</button>)}</div>}{selectedRun && (transcript.length > 0
-            ? <pre className="mt-2 max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">{transcript.map((l) => l.line).join('\n')}</pre>
-            : selectedRunTail
-              ? <div className="mt-2"><div className="text-[10px] text-gray-500 mb-1">Fin de transcript (repli — ring live indisponible)</div><pre className="max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">{selectedRunTail}</pre></div>
-              : <pre className="mt-2 max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">Transcript indisponible.</pre>)}</section>
         </div>
         <div className="p-3 border-t border-gray-700 flex items-center gap-2 flex-wrap shrink-0">
           <Button size="sm" onClick={save}>Enregistrer</Button>
