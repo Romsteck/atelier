@@ -324,6 +324,7 @@ export const getSourceTree = (slug, path = '') =>
 export const getSourceFile = (slug, path) =>
   api.get(`/apps/${slug}/source/file`, { params: { path } });
 export const getSourceGitStatus = (slug) => api.get(`/apps/${slug}/source/git/status`);
+export const getPilotRepos = () => api.get('/pilot/repos');
 export const getSourceGitDiff = (slug, path) =>
   api.get(`/apps/${slug}/source/git/diff`, { params: { path } });
 export const getSourceGitLog = (slug, limit = 50) =>

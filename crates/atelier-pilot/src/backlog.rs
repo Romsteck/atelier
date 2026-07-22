@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::service::PilotEvent;
 use crate::sqlx::{PgPool, PgRow, Row, query};
 
-pub const LANES: &[&str] = &["inbox", "ready", "in_progress", "attention", "done"];
+pub const LANES: &[&str] = &["ready", "in_progress", "attention", "done"];
 pub const ACTIVE_EXEC: &[&str] = &["queued", "running"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -97,7 +97,7 @@ fn default_effort() -> String {
     "m".into()
 }
 fn default_lane() -> String {
-    "inbox".into()
+    "ready".into()
 }
 fn default_engine() -> String {
     "auto".into()
@@ -199,7 +199,7 @@ impl BacklogStore {
         let rows = query(
             r#"SELECT * FROM backlog_items
                WHERE ($1::text IS NULL OR scope=$1) AND ($2::text IS NULL OR lane=$2)
-               ORDER BY CASE lane WHEN 'inbox' THEN 0 WHEN 'ready' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'attention' THEN 3 ELSE 4 END,
+               ORDER BY CASE lane WHEN 'ready' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'attention' THEN 2 ELSE 3 END,
                         position, id"#,
         ).bind(scope).bind(lane).fetch_all(&self.pool).await?;
         rows.iter().map(row_to_item).collect()
@@ -277,7 +277,7 @@ impl BacklogStore {
         let row = query(
             "UPDATE backlog_items SET exec_status='queued',last_run_id=$2,updated_at=now() \
              WHERE id=$1 AND exec_status NOT IN ('queued','running') AND needs_user=false \
-             AND lane IN ('inbox','ready','attention') RETURNING *",
+             AND lane IN ('ready','attention') RETURNING *",
         )
         .bind(id)
         .bind(run_id)

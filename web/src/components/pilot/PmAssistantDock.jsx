@@ -79,6 +79,16 @@ export default function PmAssistantDock({ slug = '@pilot', className = '' }) {
     localStorage.setItem(`${storageKey}:collapsed`, value ? '0' : '1');
     return !value;
   });
+  // Le CP est LA porte d'entrée du backlog (le quick-add a été retiré) : la
+  // page Backlog demande l'ouverture du dock via cet event global.
+  useEffect(() => {
+    const open = () => {
+      localStorage.setItem(`${storageKey}:collapsed`, '0');
+      setCollapsed(false);
+    };
+    window.addEventListener('pilot:open-assistant', open);
+    return () => window.removeEventListener('pilot:open-assistant', open);
+  }, [storageKey]);
 
   return (
     <aside className={`fixed inset-y-0 right-0 z-50 lg:static lg:z-auto shrink-0 min-h-0 border-l border-gray-700 bg-gray-900 shadow-2xl lg:shadow-none transition-[width] duration-200 ${collapsed ? 'w-11' : 'w-[min(430px,92vw)] lg:w-[min(430px,40vw)]'} ${className}`}>

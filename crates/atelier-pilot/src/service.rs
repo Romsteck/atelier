@@ -240,6 +240,42 @@ impl PilotService {
     pub fn runs(&self) -> Option<RunsStore> {
         self.inner.runs.clone()
     }
+    /// État git agrégé des 8 dépôts (7 apps + Atelier) pour la bande
+    /// « État des dépôts » du Backlog : fichiers en attente de commit,
+    /// commits en attente de push, dernier commit. Statuts collectés en
+    /// parallèle (chaque `repo_status` est une poignée de commandes git
+    /// read-only, jamais bloquantes).
+    pub async fn repos_overview(&self) -> Vec<gitops::RepoStatus> {
+        let cfg = &self.inner.config;
+        let mut jobs = Vec::new();
+        for slug in (self.hooks().app_slugs)().await {
+            let cwd = cfg.apps_src_root.join(&slug).join("src");
+            let user = cfg.app_user.clone();
+            jobs.push(tokio::spawn(async move {
+                gitops::repo_status(&user, &cwd, &slug).await
+            }));
+        }
+        {
+            let cwd = cfg.atelier_root.clone();
+            let user = cfg.atelier_user.clone();
+            jobs.push(tokio::spawn(async move {
+                gitops::repo_status(&user, &cwd, "atelier").await
+            }));
+        }
+        let mut out = Vec::with_capacity(jobs.len());
+        for j in jobs {
+            if let Ok(st) = j.await {
+                out.push(st);
+            }
+        }
+        // Atelier en tête, puis les apps par slug — ordre stable pour l'UI.
+        out.sort_by(|a, b| {
+            (a.scope != "atelier")
+                .cmp(&(b.scope != "atelier"))
+                .then(a.scope.cmp(&b.scope))
+        });
+        out
+    }
     pub fn schedules(&self) -> Option<ScheduleStore> {
         self.inner.schedule.clone()
     }
@@ -322,7 +358,7 @@ impl PilotService {
         if item.needs_user {
             return Err("item bloqué dans l’attente de réponses".into());
         }
-        if !matches!(item.lane.as_str(), "inbox" | "ready" | "attention") {
+        if !matches!(item.lane.as_str(), "ready" | "attention") {
             return Err("item non exécutable dans cette colonne".into());
         }
         if (self.hooks().live_sessions)(&item.scope) {
@@ -796,6 +832,15 @@ impl PilotService {
             Ok(v) => v,
             Err(e) => return failed("commit_failed", e.to_string(), true),
         };
+        if checkpoint.is_some() {
+            // Le snapshot du travail humain part immédiatement vers le bare
+            // repo (= périmètre du backup restic) : même si la nuit crashe
+            // ensuite, rien de ce que Romain avait écrit n'existe en un seul
+            // exemplaire. Best-effort — un échec ne bloque pas le run.
+            if let Err(e) = gitops::push(user, &cwd).await {
+                warn!(scope = %item.scope, error = %e, "pilot push checkpoint failed");
+            }
+        }
         let sha_before = match gitops::head_sha(user, &cwd).await {
             Ok(s) => s,
             Err(e) => return failed("commit_failed", e.to_string(), true),
@@ -1017,6 +1062,12 @@ impl PilotService {
         match gitops::commit(user, &cwd, &message).await {
             Ok(sha) => {
                 info!(item_id = item.id, scope = %item.scope, commit = %sha, "pilot commit");
+                // Push best-effort : le bare repo local est le périmètre du
+                // backup ET la source de vérité multi-postes. Un échec ne
+                // dégrade pas le run (la bande des dépôts montrera le retard).
+                if let Err(e) = gitops::push(user, &cwd).await {
+                    warn!(scope = %item.scope, error = %e, "pilot push after commit failed");
+                }
                 AttemptOutcome::Success {
                     commit: Some(sha),
                     exec,

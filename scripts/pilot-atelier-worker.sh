@@ -139,6 +139,9 @@ if [[ -n "$dirty" ]]; then
     commit -m "chore(atelier): snapshot pré-autonome" -m "Fichiers avant run Pilote:
 $body" >/dev/null || { write_report failed commit_failed "commit checkpoint échoué" "" "" || true; exit 1; }
   checkpoint_sha=$(/usr/bin/git rev-parse HEAD)
+  # Push immédiat du snapshot (best-effort, jamais bloquant) : le travail humain
+  # capturé ne doit pas exister en un seul exemplaire si la suite du run tourne mal.
+  /usr/bin/timeout 60 /usr/bin/git push >>"$run_log" 2>&1 || true
 fi
 sha_before=$(/usr/bin/git rev-parse HEAD) || { write_report failed commit_failed "HEAD Atelier illisible" "" "" || true; exit 1; }
 
@@ -297,5 +300,8 @@ if ! /usr/bin/git -c core.hooksPath=/dev/null -c user.name='Atelier Pilote' -c u
   exit 1
 fi
 commit_sha=$(/usr/bin/git rev-parse HEAD)
+# Push best-effort (origin GitHub, en romain) : jamais bloquant — un échec réseau
+# laisse le commit local, visible « en attente de push » dans la bande des dépôts.
+/usr/bin/timeout 60 /usr/bin/git push >>"$run_log" 2>&1 || true
 write_report success "" "" "$commit_sha" "$report_text" || true
 exit 0

@@ -44,6 +44,8 @@ export function PilotProvider({ children }) {
   const prevEpoch = useRef(0);
   useEffect(() => { if (epoch && epoch !== prevEpoch.current) { prevEpoch.current = epoch; refetch(); } }, [epoch, refetch]);
 
+  // NOTE : la capture directe (quick-add) est retirée de l'UI — les items
+  // naissent via le CP (MCP backlog_add). L'endpoint HTTP POST reste serveur.
   const capture = useCallback(async (body) => {
     const item = unwrapApi(await createPilotItem(body));
     setItems((v) => v.some((x) => x.id === item.id) ? v : [...v, item]);

@@ -426,6 +426,7 @@ const MCP_READONLY = new Set([
   'notify_user', 'env_list', 'issue_report',
   // Dérogation méta-DB du profil chef de projet Pilote.
   'backlog_add', 'backlog_update', 'backlog_list', 'backlog_get',
+  'issues_list',
 ]);
 
 async function canUseTool(toolName, input, opts) {

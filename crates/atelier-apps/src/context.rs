@@ -595,6 +595,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `ship` — livraison prod : stop + restart pour reprendre les artefacts compilés par 0-build (aucune compilation). `BUILD_BUSY` = un build/ship est en cours, ne PAS retry.\n\
          - `notify_user` — notifie Romain (cloche + appareils). Réservé à ce qui mérite VRAIMENT son attention (décision, anomalie, résultat inattendu). Tes actions plateforme (restart, ship, env, schéma) sont déjà **journalisées automatiquement** — ne notifie pas pour ça.\n\
          - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier) ou une suggestion d'amélioration (`kind: error|limitation|suggestion`). Voir `.claude/rules/report-issues.md`.\n\
+         - `issues_list` — relit les remontées de CETTE app (statut `open` par défaut, lecture seule) : vérifie avant de remonter qu'un souci n'est pas déjà signalé.\n\
          \n\
          ## Backlog Pilote (`backlog_*`)\n\
          - `backlog_list`, `backlog_get` — lire les besoins et leurs décisions\n\

@@ -143,6 +143,78 @@ async fn git_with_identity(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Push best-effort vers l'upstream configuré. Non bloquant par design : un
+/// push raté n'invalide jamais un run (le commit local reste la vérité, la
+/// bande « État des dépôts » montrera le retard). Timeout court : le remote
+/// des apps est le bare repo local, un blocage réseau ne doit pas geler la nuit.
+pub async fn push(user: &str, cwd: &Path) -> anyhow::Result<()> {
+    let fut = git(user, cwd, &["push"]);
+    match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+        Ok(Ok(_)) => {
+            info!(cwd = %cwd.display(), "pilot push ok");
+            Ok(())
+        }
+        Ok(Err(e)) => anyhow::bail!(e),
+        Err(_) => anyhow::bail!("git push: timeout 60 s"),
+    }
+}
+
+/// Snapshot de l'état d'un dépôt pour la bande « État des dépôts » du Backlog.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoStatus {
+    pub scope: String,
+    /// Fichiers non committés (working tree + index + untracked).
+    pub dirty: i64,
+    /// Commits locaux non poussés ; `None` = pas d'upstream configuré.
+    pub ahead: Option<i64>,
+    pub has_upstream: bool,
+    pub last_commit: Option<RepoCommit>,
+    /// Dépôt illisible (absent, HEAD unborn…) — la bande l'affiche tel quel.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoCommit {
+    pub sha: String,
+    pub subject: String,
+    pub at: i64,
+}
+
+pub async fn repo_status(user: &str, cwd: &Path, scope: &str) -> RepoStatus {
+    let mut st = RepoStatus {
+        scope: scope.to_string(),
+        dirty: 0,
+        ahead: None,
+        has_upstream: false,
+        last_commit: None,
+        error: None,
+    };
+    match status_porcelain(user, cwd).await {
+        Ok(s) => st.dirty = s.lines().filter(|l| !l.trim().is_empty()).count() as i64,
+        Err(e) => {
+            st.error = Some(e.to_string());
+            return st;
+        }
+    }
+    // `@{u}` échoue proprement quand la branche n'a pas d'upstream (hevy au
+    // premier boot) ou que HEAD est unborn — has_upstream=false, pas une erreur.
+    if let Ok(n) = git(user, cwd, &["rev-list", "--count", "@{u}..HEAD"]).await {
+        st.has_upstream = true;
+        st.ahead = n.trim().parse::<i64>().ok();
+    }
+    if let Ok(line) = git(user, cwd, &["log", "-1", "--format=%h\u{1f}%s\u{1f}%ct"]).await {
+        let mut parts = line.split('\u{1f}');
+        if let (Some(sha), Some(subject), Some(ct)) = (parts.next(), parts.next(), parts.next()) {
+            st.last_commit = Some(RepoCommit {
+                sha: sha.to_string(),
+                subject: subject.to_string(),
+                at: ct.trim().parse().unwrap_or(0),
+            });
+        }
+    }
+    st
+}
+
 /// Deterministic rollback to the orchestrator-owned pre-agent SHA. Never call
 /// before `checkpoint`: the caller guarantees all prior human work is committed.
 pub async fn rollback(user: &str, cwd: &Path, sha: &str) -> anyhow::Result<()> {

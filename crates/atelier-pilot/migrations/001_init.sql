@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS backlog_items (
     priority          TEXT NOT NULL DEFAULT 'medium',
     severity          TEXT NOT NULL DEFAULT 'medium',
     effort            TEXT NOT NULL DEFAULT 'm',
-    lane              TEXT NOT NULL DEFAULT 'inbox',
+    lane              TEXT NOT NULL DEFAULT 'ready',
     position          DOUBLE PRECISION NOT NULL DEFAULT 0,
     exec_status       TEXT NOT NULL DEFAULT 'idle',
     attempts          INTEGER NOT NULL DEFAULT 0,
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS backlog_items (
     CONSTRAINT backlog_items_priority_check CHECK (priority IN ('critical','high','medium','low')),
     CONSTRAINT backlog_items_severity_check CHECK (severity IN ('critical','high','medium','low')),
     CONSTRAINT backlog_items_effort_check CHECK (effort IN ('xs','s','m','l','xl')),
-    CONSTRAINT backlog_items_lane_check CHECK (lane IN ('inbox','ready','in_progress','attention','done')),
+    CONSTRAINT backlog_items_lane_check CHECK (lane IN ('ready','in_progress','attention','done')),
     CONSTRAINT backlog_items_exec_check CHECK (exec_status IN ('idle','queued','running','done','failed','blocked')),
     CONSTRAINT backlog_items_engine_check CHECK (engine IN ('auto','claude','codex')),
     CONSTRAINT backlog_items_created_by_check CHECK (created_by IN ('user','assistant','scan','system'))
@@ -40,6 +40,16 @@ CREATE TABLE IF NOT EXISTS backlog_items (
 
 -- Moteur du dernier run, posé au settle (done ET blocked) — lu par le front.
 ALTER TABLE backlog_items ADD COLUMN IF NOT EXISTS last_engine TEXT;
+
+-- Lane `inbox` supprimée (2026-07-22) : les items naissent rédigés et scorés par
+-- le chef de projet, il n'y a plus de saisie brute à parquer. Migration des bases
+-- existantes (rejouée à chaque boot, idempotente) : les résidus passent en `ready`,
+-- puis le CHECK est resserré.
+UPDATE backlog_items SET lane = 'ready' WHERE lane = 'inbox';
+ALTER TABLE backlog_items DROP CONSTRAINT IF EXISTS backlog_items_lane_check;
+ALTER TABLE backlog_items ADD CONSTRAINT backlog_items_lane_check
+    CHECK (lane IN ('ready','in_progress','attention','done'));
+ALTER TABLE backlog_items ALTER COLUMN lane SET DEFAULT 'ready';
 
 CREATE INDEX IF NOT EXISTS backlog_items_board_idx ON backlog_items (scope, lane, position, id);
 CREATE INDEX IF NOT EXISTS backlog_items_attention_idx ON backlog_items (updated_at DESC) WHERE lane = 'attention';

@@ -22,6 +22,7 @@ pub fn router() -> Router<ApiState> {
         .route("/backlog/{id}/runs", get(item_runs))
         .route("/backlog/{id}/run", post(run_item))
         .route("/attention", get(attention))
+        .route("/repos", get(repos))
         .route("/runs/{id}/transcript", get(transcript))
         .route("/runs/{id}/cancel", post(cancel_run))
         .route("/schedule", get(get_schedule).put(put_schedule))
@@ -108,6 +109,11 @@ async fn attention(State(state): State<ApiState>) -> impl IntoResponse {
         Err(e) => crate::routes::internal_err("pilot attention", e),
     }
 }
+/// État git agrégé des dépôts (apps + Atelier) — bande « État des dépôts »
+/// du Backlog : fichiers en attente de commit, commits en attente de push.
+async fn repos(State(state): State<ApiState>) -> impl IntoResponse {
+    ok(state.pilot.repos_overview().await)
+}
 async fn get_one(State(state): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
     let Ok((b, _)) = stores(&state) else {
         return fail(StatusCode::SERVICE_UNAVAILABLE, "Pilote indisponible");
@@ -127,6 +133,16 @@ async fn create(
     }
     if body.created_by != "assistant" && body.created_by != "scan" && body.created_by != "system" {
         body.created_by = "user".into();
+        // Capture BRUTE (hors chef de projet : future dictée vocale, intégration
+        // externe) : la demande n'est ni reformulée ni scorée, elle ne doit pas
+        // partir en exécution nocturne telle quelle. La lane `inbox` ayant été
+        // supprimée, on la parque en `attention` — Romain (ou le CP) la reprend.
+        if !body.needs_user {
+            body.needs_user = true;
+            body.needs_user_reason
+                .get_or_insert_with(|| "capture brute — à cadrer avec le chef de projet".into());
+        }
+        body.lane = "attention".into();
     }
     let Ok((b, _)) = stores(&state) else {
         return fail(StatusCode::SERVICE_UNAVAILABLE, "Pilote indisponible");

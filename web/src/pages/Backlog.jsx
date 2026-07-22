@@ -1,27 +1,30 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CalendarClock,
-  CheckCircle2, CirclePlay, ClipboardList, ExternalLink, Loader2, Moon, Play,
-  RefreshCw, Square, Trash2, X,
+  AlertTriangle, ArrowDown, ArrowUp, Bot, CalendarClock,
+  CheckCircle2, ChevronDown, ChevronRight, CirclePlay, ClipboardList, ExternalLink,
+  GitBranch, Loader2, Moon, Play, RefreshCw, Square, Trash2, Upload, X,
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
 import MarkdownView from '../components/docs/MarkdownView';
 import { useApps } from '../context/AppsContext';
 import { usePilot } from '../context/PilotContext';
-import { getPilotItemRuns, getPilotTranscript, unwrapApi } from '../api/client';
+import { getPilotItemRuns, getPilotRepos, getPilotTranscript, pushSource, unwrapApi } from '../api/client';
+import useWebSocket from '../hooks/useWebSocket';
 import { useToast, Toast } from '../hooks/useToast';
 import { apiErr } from '../utils/apiErr';
+import { openStudio } from '../lib/openStudio';
 
 // Thème : seuls les gris sont mirrorés par index.css — toute teinte colorée de
 // TEXTE porte ses deux variantes (`text-<c>-700 dark:text-<c>-300`, patron
 // Issues.jsx / AgentPanel LIVE_BAND). Les voiles bg/border en alpha restent
 // simples (translucides, lisibles dans les deux thèmes).
+// Colonnes du kanban. `attention` n'en est PAS une : elle a sa propre vue
+// (bouton rouge en tête de page) — l'afficher deux fois diluait le signal.
+// La lane `inbox` a été supprimée (les items naissent rédigés/scorés par le CP).
 const LANES = [
-  { id: 'inbox', label: 'Inbox', tone: 'border-gray-700' },
   { id: 'ready', label: 'Prêt', tone: 'border-blue-500/35' },
   { id: 'in_progress', label: 'En cours', tone: 'border-amber-500/40' },
-  { id: 'attention', label: 'Attention', tone: 'border-red-500/45' },
   { id: 'done', label: 'Terminé', tone: 'border-emerald-500/35' },
 ];
 const PRIORITY = {
@@ -78,29 +81,91 @@ function NightLivePanel({ night, showToast }) {
   );
 }
 
-function QuickAdd({ scopes, lockedScope }) {
-  const { capture } = usePilot();
-  const [request, setRequest] = useState('');
-  // Pas de scope par défaut silencieux : tant que l'app n'est pas choisie
-  // explicitement, on ne peut pas noter (placeholder « — quelle app ? — »).
-  const [scope, setScope] = useState(lockedScope || '');
-  const [busy, setBusy] = useState(false);
-  const canSubmit = Boolean(request.trim() && scope);
-  async function submit(e) {
-    e.preventDefault(); if (!canSubmit) return;
-    setBusy(true);
-    try { await capture({ scope, request: request.trim() }); setRequest(''); }
-    finally { setBusy(false); }
+// Bande « État des dépôts » : agrège le git status des 8 dépôts (apps + Atelier)
+// — fichiers en attente de commit, commits en attente de push. Repliable, live
+// via `source:changed` (debounce) + refetch après chaque event backlog (les
+// commits du Pilote changent l'état). Un dépôt d'app se répare dans son Studio
+// (panneau Git) ; le push direct est proposé quand c'est le seul geste manquant.
+function RepoStatusBand({ showToast }) {
+  const [repos, setRepos] = useState(null);
+  const [open, setOpen] = useState(() => localStorage.getItem('pilot:repoBand') !== '0');
+  const [pushing, setPushing] = useState(null);
+  const debounce = useRef(null);
+  const refresh = useCallback(() => {
+    getPilotRepos().then((r) => setRepos(unwrapApi(r))).catch(() => {});
+  }, []);
+  const refreshSoon = useCallback(() => {
+    clearTimeout(debounce.current);
+    debounce.current = setTimeout(refresh, 800);
+  }, [refresh]);
+  useEffect(() => { refresh(); return () => clearTimeout(debounce.current); }, [refresh]);
+  const { epoch } = useWebSocket({ 'source:changed': refreshSoon, 'pilot:backlog': refreshSoon });
+  const prevEpoch = useRef(0);
+  useEffect(() => {
+    if (epoch === 0 || epoch === prevEpoch.current) return;
+    prevEpoch.current = epoch;
+    refresh();
+  }, [epoch, refresh]);
+  const toggle = () => setOpen((v) => { localStorage.setItem('pilot:repoBand', v ? '0' : '1'); return !v; });
+  async function push(scope) {
+    setPushing(scope);
+    try { await pushSource(scope); showToast(`${scope} : poussé`); refreshSoon(); }
+    catch (err) { showToast(apiErr(err), 'error'); }
+    finally { setPushing(null); }
   }
+  const pending = (repos || []).filter((r) => r.error || r.dirty > 0 || (r.ahead ?? 0) > 0 || !r.has_upstream).length;
   return (
-    <form onSubmit={submit} className="flex flex-col sm:flex-row gap-2 rounded-lg border border-gray-700/60 bg-gray-800/40 p-3">
-      {!lockedScope && <select value={scope} onChange={(e) => setScope(e.target.value)} className="bg-gray-900 border border-gray-700 rounded-sm px-2 text-xs text-gray-300 h-9">
-        <option value="">— quelle app ? —</option>
-        {scopes.map((s) => <option key={s} value={s}>{s === 'atelier' ? 'Atelier' : s}</option>)}
-      </select>}
-      <input value={request} onChange={(e) => setRequest(e.target.value)} placeholder="Dis ce dont tu as besoin…" className="flex-1 h-9 bg-gray-900 border border-gray-700 rounded-sm px-3 text-sm text-gray-100 outline-hidden focus:border-blue-500" />
-      <Button type="submit" size="md" icon={ClipboardList} loading={busy} disabled={!canSubmit}>Noter</Button>
-    </form>
+    <div className="rounded-lg border border-gray-700/60 bg-gray-800/40">
+      <button onClick={toggle} className="w-full flex items-center gap-2 px-3 py-2 text-left">
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+        <GitBranch className="w-4 h-4 text-gray-500" />
+        <span className="text-xs font-medium text-gray-300">État des dépôts</span>
+        {repos && (pending > 0
+          ? <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-700 dark:text-amber-300">{pending} en attente</span>
+          : <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">tout est committé et poussé</span>)}
+      </button>
+      {open && repos && (
+        <div className="px-3 pb-2.5 flex flex-wrap gap-1.5">
+          {repos.map((r) => {
+            const clean = !r.error && r.dirty === 0 && (r.ahead ?? 0) === 0 && r.has_upstream;
+            const isApp = r.scope !== 'atelier';
+            return (
+              <div key={r.scope} title={r.last_commit ? `Dernier commit : ${r.last_commit.subject}` : undefined}
+                className={`flex items-center gap-1.5 rounded-sm border px-2 py-1 text-[11px] ${clean ? 'border-gray-700/60 text-gray-400' : 'border-amber-500/30 bg-amber-500/5 text-gray-300'}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${r.error ? 'bg-red-500' : clean ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                {isApp
+                  ? <button onClick={() => openStudio(r.scope, { tab: 'code' })} className="font-medium text-gray-200 hover:underline">{r.scope}</button>
+                  : <span className="font-medium text-gray-200">atelier</span>}
+                {r.error && <span className="text-red-700 dark:text-red-300">illisible</span>}
+                {r.dirty > 0 && <span className="text-amber-700 dark:text-amber-300">{r.dirty} à committer</span>}
+                {(r.ahead ?? 0) > 0 && <span className="text-blue-700 dark:text-blue-300">{r.ahead} à pousser</span>}
+                {!r.has_upstream && !r.error && <span className="text-red-700 dark:text-red-300">sans upstream</span>}
+                {isApp && (r.ahead ?? 0) > 0 && r.dirty === 0 && (
+                  <button onClick={() => push(r.scope)} disabled={pushing === r.scope}
+                    className="ml-0.5 inline-flex items-center gap-0.5 text-blue-700 dark:text-blue-300 hover:underline disabled:opacity-50">
+                    {pushing === r.scope ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}Pousser
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// La saisie directe (quick-add) a été retirée : le chef de projet est LA porte
+// d'entrée du backlog — il reformule, scope, score et planifie chaque besoin
+// (items « bien écrits » plutôt que notes brutes). L'endpoint POST /pilot/backlog
+// reste côté serveur (future dictée vocale / intégrations).
+function CaptureHint() {
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-gray-700/60 bg-gray-800/40 px-3 py-2.5">
+      <Bot className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
+      <span className="text-xs text-gray-400 flex-1">Dis ce dont tu as besoin au <span className="text-gray-200 font-medium">chef de projet</span> — il rédige, score et planifie l&apos;item pour toi.</span>
+      <Button size="xs" icon={ClipboardList} onClick={() => window.dispatchEvent(new CustomEvent('pilot:open-assistant'))}>Ouvrir l&apos;assistant</Button>
+    </div>
   );
 }
 
@@ -134,8 +199,8 @@ function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
   const blockedBadge = item.lane === 'attention' && !questionsBadge && item.exec_status === 'blocked';
   // Moves sémantiques par lane — « En cours » n'est JAMAIS une destination UI ;
   // attention se traite dans le drawer (Relancer / Marquer traité).
-  const canMove = !active && (item.lane === 'inbox' || item.lane === 'ready');
-  const canRun = !active && ['inbox', 'ready'].includes(item.lane) && !item.needs_user;
+  const canMove = !active && item.lane === 'ready';
+  const canRun = !active && item.lane === 'ready' && !item.needs_user;
   const canStop = item.exec_status === 'running' && Boolean(item.last_run_id);
   return (
     <article onClick={() => onOpen(item)} className={`rounded-lg border bg-gray-900/55 p-3 cursor-pointer hover:bg-gray-800/65 transition ${item.lane === 'attention' ? 'border-red-500/45' : 'border-gray-700/60'}`}>
@@ -147,7 +212,7 @@ function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
             <Chip className={PRIORITY[item.priority] || PRIORITY.medium}>{item.priority}</Chip>
             <Chip className="bg-gray-800 text-gray-400">{item.kind}</Chip>
             <Chip className="bg-gray-800 text-gray-400">{item.effort}</Chip>
-            {item.created_by === 'user' && item.lane === 'inbox' && <Chip className="bg-amber-500/15 text-amber-700 dark:text-amber-300">à trier</Chip>}
+            {item.created_by === 'user' && item.lane === 'attention' && <Chip className="bg-amber-500/15 text-amber-700 dark:text-amber-300">à trier</Chip>}
             {item.lane === 'done' && ENGINE_LABEL[item.last_engine] && <Chip className="bg-blue-500/15 text-blue-700 dark:text-blue-300">{ENGINE_LABEL[item.last_engine]}</Chip>}
             {questionsBadge && <Chip className="bg-amber-500/15 text-amber-700 dark:text-amber-300">Questions</Chip>}
             {blockedBadge && <Chip className="bg-red-500/15 text-red-700 dark:text-red-300">Bloqué — {item.attempts || 0} échec{(item.attempts || 0) > 1 ? 's' : ''}</Chip>}
@@ -158,9 +223,7 @@ function BacklogCard({ item, laneItems = [], onOpen, showToast }) {
       {item.needs_user_reason && <p className={`mt-2 text-[11px] line-clamp-3 ${item.needs_user ? 'text-amber-700 dark:text-amber-300' : 'text-red-700 dark:text-red-300'}`}>{item.needs_user_reason}</p>}
       {item.exec_status !== 'idle' && <div className="mt-2 text-[10px] text-gray-500">{EXEC[item.exec_status] || item.exec_status}{item.attempts ? ` · tentative ${item.attempts}/3` : ''}</div>}
       {(canMove || canRun || canStop) && <div className="mt-2 pt-2 border-t border-gray-800 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-        {!active && item.lane === 'inbox' && <Button size="xs" variant="neutral" icon={ArrowRight} onClick={() => moveTo('ready')}>Prêt</Button>}
         {!active && item.lane === 'ready' && <>
-          <Button size="xs" variant="neutral" icon={ArrowLeft} onClick={() => moveTo('inbox')}>Inbox</Button>
           {index > 0 && <button title="Monter" onClick={() => reorder(-1)} className="p-1 text-gray-500 hover:text-gray-200"><ArrowUp className="w-3.5 h-3.5" /></button>}
           {index >= 0 && index < laneItems.length - 1 && <button title="Descendre" onClick={() => reorder(1)} className="p-1 text-gray-500 hover:text-gray-200"><ArrowDown className="w-3.5 h-3.5" /></button>}
         </>}
@@ -318,9 +381,21 @@ export default function Backlog({ lockedScope = null, embedded = false }) {
       {!embedded && <PageHeader title="Pilote · Backlog autonome" icon={Bot}><SchedulePanel /></PageHeader>}
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
         {nightActive && <NightLivePanel night={night} showToast={showToast} />}
-        <QuickAdd scopes={scopes} lockedScope={lockedScope} />
+        <CaptureHint />
+        {!embedded && <RepoStatusBand showToast={showToast} />}
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex border border-gray-700 rounded-sm overflow-hidden"><button onClick={() => setView('kanban')} className={`px-2.5 py-1.5 text-xs ${view === 'kanban' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}>Kanban</button><button onClick={() => setView('attention')} className={`px-2.5 py-1.5 text-xs ${view === 'attention' ? 'bg-red-500/20 text-red-700 dark:text-red-300' : 'text-gray-400'}`}>Attention ({counts.attention})</button></div>
+          <div className="flex border border-gray-700 rounded-sm overflow-hidden">
+            <button onClick={() => setView('kanban')} className={`px-2.5 py-1.5 text-xs ${view === 'kanban' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}>Kanban</button>
+            {/* Attention n'est plus une colonne du board : ce bouton est le SEUL
+                signal — teinté rouge dès qu'un item attend Romain. */}
+            <button onClick={() => setView('attention')} className={`px-2.5 py-1.5 text-xs font-medium ${
+              view === 'attention'
+                ? 'bg-red-500/25 text-red-800 dark:text-red-200'
+                : counts.attention > 0
+                  ? 'bg-red-500/10 text-red-700 dark:text-red-300'
+                  : 'text-gray-400'
+            }`}>Attention ({counts.attention})</button>
+          </div>
           {!lockedScope && <select value={scope} onChange={(e) => setScope(e.target.value)} className="bg-gray-900 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-300"><option value="all">Tous les scopes</option>{scopes.map((s) => <option key={s}>{s}</option>)}</select>}
           <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-gray-900 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-300"><option value="all">Tous les types</option>{OPTIONS.kind.map((v) => <option key={v}>{v}</option>)}</select>
           <span className="ml-auto text-[11px] text-gray-500">{counts.ready} prêt(s) · {counts.running} actif(s) · {counts.blocked} bloqué(s)</span>
@@ -328,7 +403,9 @@ export default function Backlog({ lockedScope = null, embedded = false }) {
         {loading ? <div className="h-40 flex items-center justify-center"><Loader2 className="animate-spin text-blue-600 dark:text-blue-400" /></div> : view === 'attention' ? (
           <div className="max-w-4xl space-y-2">{filtered.filter((x) => x.lane === 'attention').map((item) => <BacklogCard key={item.id} item={item} onOpen={setSelected} showToast={showToast} />)}{filtered.filter((x) => x.lane === 'attention').length === 0 && <div className="text-center py-14 text-gray-500"><CheckCircle2 className="w-8 h-8 mx-auto mb-2 text-emerald-600 dark:text-emerald-400" />Aucun item ne demande ton attention.</div>}</div>
         ) : (
-          <div className="flex gap-3 overflow-x-auto pb-3 min-h-[420px]">{LANES.map((lane) => { const list = filtered.filter((x) => x.lane === lane.id).sort((a, b) => a.position - b.position); return <section key={lane.id} className={`w-[290px] min-w-[290px] rounded-lg border ${lane.tone} bg-gray-800/20 flex flex-col`}><header className="px-3 py-2 border-b border-gray-700/50 flex items-center"><span className="text-xs font-medium text-gray-300">{lane.label}</span><span className="ml-auto text-[10px] text-gray-500">{list.length}</span></header><div className="p-2 space-y-2">{list.map((item) => <BacklogCard key={item.id} item={item} laneItems={list} onOpen={setSelected} showToast={showToast} />)}</div></section>; })}</div>
+          <div className="flex gap-3 overflow-x-auto pb-3 min-h-[420px]">{LANES.map((lane) => { const list = filtered.filter((x) => x.lane === lane.id).sort((a, b) => a.position - b.position); // flex-1 + min-w : les colonnes remplissent la largeur disponible quand
+          // l'écran le permet, et retombent en scroll horizontal en dessous.
+          return <section key={lane.id} className={`flex-1 min-w-[290px] rounded-lg border ${lane.tone} bg-gray-800/20 flex flex-col`}><header className="px-3 py-2 border-b border-gray-700/50 flex items-center"><span className="text-xs font-medium text-gray-300">{lane.label}</span><span className="ml-auto text-[10px] text-gray-500">{list.length}</span></header><div className="p-2 space-y-2">{list.map((item) => <BacklogCard key={item.id} item={item} laneItems={list} onOpen={setSelected} showToast={showToast} />)}</div></section>; })}</div>
         )}
       </div>
       {selected && <ItemDrawer item={selected} onClose={() => setSelected(null)} showToast={showToast} />}
