@@ -22,7 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use atelier_common::Identity;
 use atelier_dataverse::{
-    DatabaseSchema, TableDefinition,
+    DatabaseSchema, DataverseError, TableDefinition,
     audit::{AuditOp, build_audit_insert},
     crud::{build_get, build_insert, build_restore, build_soft_delete, build_update},
     dv_io::{MutationOutcome, run_count, run_get, run_list, run_mutation},
@@ -165,6 +165,55 @@ fn db_error_resp(context: &str, e: impl std::fmt::Display + std::fmt::Debug) -> 
         })),
     )
         .into_response()
+}
+
+/// Structured 409 for a unique-constraint violation. Carries the offending
+/// constraint/index name when Postgres reports it — leaking that name is
+/// acceptable (it belongs to the app's OWN schema, explicitly requested by the
+/// reporter, iss-6be02b35) and makes the conflict discoverable. The raw PG
+/// detail is NOT echoed (it can contain the conflicting value); it is only
+/// logged server-side by the caller.
+fn conflict_resp(constraint: Option<&str>) -> Response {
+    let mut err = json!({
+        "code": "CONFLICT",
+        "message": "unique constraint violation",
+    });
+    if let Some(c) = constraint {
+        err["constraint"] = json!(c);
+    }
+    (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response()
+}
+
+/// Map a `run_mutation` error to an HTTP response, shared by all four mutation
+/// handlers (insert/update/soft-delete/restore):
+///   - `DataverseError::Conflict` (SQLSTATE 23505) → structured 409 with the
+///     constraint name — NOT the opaque 500 `db_error_resp` would produce.
+///     WHY this path is reachable even on inserts of a "new" value: the unique
+///     index also covers soft-deleted rows, so a value still held by a
+///     soft-deleted row trips 23505 (iss-6be02b35).
+///   - anything else → schema-opaque 500 (`db_error_resp`), with the failing
+///     SQL shape (column names + `$N` placeholders, no user data) logged so a
+///     wire-protocol failure stays attributable to a slug/table/builder.
+fn mutation_err_resp(
+    context: &str,
+    slug: &str,
+    table: &str,
+    sql: &str,
+    param_count: usize,
+    e: DataverseError,
+) -> Response {
+    match e {
+        DataverseError::Conflict { constraint, detail } => {
+            info!(slug = %slug, table = %table, constraint = ?constraint,
+                  detail = %detail, "dv mutation unique conflict (409)");
+            conflict_resp(constraint.as_deref())
+        }
+        e => {
+            error!(slug = %slug, table = %table, context = %context,
+                   params = param_count, sql = %sql, "dv mutation failed");
+            db_error_resp(context, e)
+        }
+    }
 }
 
 fn code_label(code: StatusCode) -> &'static str {
@@ -696,13 +745,14 @@ async fn insert_row(
             db_error_resp("dv_insert_unexpected", format!("{:?}", other))
         }
         Err(e) => {
-            // Log the failing SQL shape (no user data — only column names,
-            // `$N` placeholders and casts) + param count so a wire-protocol
-            // failure (e.g. 08P01) is attributable to a slug/table/builder.
-            error!(slug = %slug, table = %table,
-                   params = mutation.params.len(), sql = %mutation.sql,
-                   "dv_insert mutation failed");
-            db_error_resp("dv_insert", e)
+            mutation_err_resp(
+                "dv_insert",
+                &slug,
+                &table,
+                &mutation.sql,
+                mutation.params.len(),
+                e,
+            )
         }
     }
 }
@@ -814,10 +864,14 @@ async fn update_row(
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
         Err(e) => {
-            error!(slug = %slug, table = %table,
-                   params = mutation.params.len(), sql = %mutation.sql,
-                   "dv_update mutation failed");
-            db_error_resp("dv_update", e)
+            mutation_err_resp(
+                "dv_update",
+                &slug,
+                &table,
+                &mutation.sql,
+                mutation.params.len(),
+                e,
+            )
         }
     }
 }
@@ -901,10 +955,14 @@ async fn soft_delete_row(
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
         Err(e) => {
-            error!(slug = %slug, table = %table,
-                   params = mutation.params.len(), sql = %mutation.sql,
-                   "dv_soft_delete mutation failed");
-            db_error_resp("dv_soft_delete", e)
+            mutation_err_resp(
+                "dv_soft_delete",
+                &slug,
+                &table,
+                &mutation.sql,
+                mutation.params.len(),
+                e,
+            )
         }
     }
 }
@@ -988,10 +1046,14 @@ async fn restore_row(
         }
         Ok(MutationOutcome::NotFound) => error_resp(StatusCode::NOT_FOUND, "not_found"),
         Err(e) => {
-            error!(slug = %slug, table = %table,
-                   params = mutation.params.len(), sql = %mutation.sql,
-                   "dv_restore mutation failed");
-            db_error_resp("dv_restore", e)
+            mutation_err_resp(
+                "dv_restore",
+                &slug,
+                &table,
+                &mutation.sql,
+                mutation.params.len(),
+                e,
+            )
         }
     }
 }

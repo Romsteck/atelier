@@ -37,6 +37,17 @@ pub enum DataverseError {
     #[error("dataverse not provisioned for app '{0}' (no DB or _dv_meta missing)")]
     NotProvisioned(String),
 
+    /// A write violated a unique constraint (Postgres SQLSTATE `23505`).
+    /// Carries the offending constraint/index name (when Postgres reports it)
+    /// so the gateway can answer a discoverable 409 instead of an opaque 500.
+    /// `detail` holds the raw PG message for server-side logging only — it can
+    /// include the conflicting value, so it MUST NOT be echoed to the client.
+    #[error("conflict on constraint {constraint:?}: {detail}")]
+    Conflict {
+        constraint: Option<String>,
+        detail: String,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -48,5 +59,9 @@ impl DataverseError {
 
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    pub fn conflict(constraint: Option<String>, detail: impl Into<String>) -> Self {
+        Self::Conflict { constraint, detail: detail.into() }
     }
 }

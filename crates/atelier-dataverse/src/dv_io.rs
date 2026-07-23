@@ -302,6 +302,31 @@ pub enum MutationOutcome {
     NotFound,
 }
 
+/// Map a Postgres error raised by a CRUD mutation to a typed [`DataverseError`].
+///
+/// SQLSTATE `23505` (unique_violation) → [`DataverseError::Conflict`] carrying
+/// the offending constraint/index name, so the gateway can answer a structured
+/// 409 instead of an opaque 500. WHY the 409 matters here: the dataverse unique
+/// index also covers *soft-deleted* rows, so re-inserting a value still held by
+/// a soft-deleted row trips 23505 — surfacing a discoverable conflict makes that
+/// (otherwise invisible) behaviour attributable to a real constraint. Every
+/// other SQLSTATE stays `Internal` (mapped to a schema-opaque 500 upstream);
+/// the code is embedded in the message so wire-level failures (e.g. `08P01`
+/// protocol violation vs `42804` type mismatch) remain diagnosable from logs.
+pub fn map_mutation_err(e: crate::sqlx::Error) -> DataverseError {
+    if let Some(d) = e.as_database_error() {
+        if d.code().as_deref() == Some("23505") {
+            return DataverseError::conflict(
+                d.constraint().map(str::to_string),
+                d.message().to_string(),
+            );
+        }
+        let code = d.code().unwrap_or_default();
+        return DataverseError::internal(format!("mutation [{code}]: {e}"));
+    }
+    DataverseError::internal(format!("mutation: {e}"))
+}
+
 /// Run a CRUD mutation (insert/update/soft-delete/restore) inside a
 /// transaction, also append the supplied audit row, and commit. The
 /// row JSON returned by the mutation's RETURNING clause is decoded
@@ -331,15 +356,7 @@ pub async fn run_mutation(
     let row_opt = sqlx_core::query::query_with(AssertSqlSafe(mutation_sql), args)
         .fetch_optional(&mut *tx)
         .await
-        // Surface the Postgres SQLSTATE (e.g. `08P01` protocol violation vs
-        // `42804` type mismatch) so wire-level failures are diagnosable from logs.
-        .map_err(|e| {
-            let code = e
-                .as_database_error()
-                .and_then(|d| d.code())
-                .unwrap_or_default();
-            DataverseError::internal(format!("mutation [{code}]: {e}"))
-        })?;
+        .map_err(map_mutation_err)?;
 
     let row = match row_opt {
         Some(r) => r,
@@ -411,5 +428,93 @@ async fn probe_outcome(
     {
         Ok(Some(_)) => MutationOutcome::PreconditionFailed,
         _ => MutationOutcome::NotFound,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx_core::error::{DatabaseError, ErrorKind};
+    use std::borrow::Cow;
+
+    // Minimal DatabaseError so we can forge a `sqlx::Error` carrying an
+    // arbitrary SQLSTATE + constraint, exercising `map_mutation_err` without a
+    // live Postgres connection.
+    #[derive(Debug)]
+    struct MockDbError {
+        code: String,
+        constraint: Option<String>,
+        message: String,
+    }
+
+    impl std::fmt::Display for MockDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.message)
+        }
+    }
+    impl std::error::Error for MockDbError {}
+
+    impl DatabaseError for MockDbError {
+        fn message(&self) -> &str {
+            &self.message
+        }
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(&self.code))
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn constraint(&self) -> Option<&str> {
+            self.constraint.as_deref()
+        }
+        fn kind(&self) -> ErrorKind {
+            match self.code.as_str() {
+                "23505" => ErrorKind::UniqueViolation,
+                "23503" => ErrorKind::ForeignKeyViolation,
+                "23514" => ErrorKind::CheckViolation,
+                _ => ErrorKind::Other,
+            }
+        }
+    }
+
+    fn mk_err(code: &str, constraint: Option<&str>) -> crate::sqlx::Error {
+        crate::sqlx::Error::database(MockDbError {
+            code: code.to_string(),
+            constraint: constraint.map(str::to_string),
+            message: format!("mock db error {code}"),
+        })
+    }
+
+    #[test]
+    fn unique_violation_maps_to_conflict_with_constraint() {
+        let mapped = map_mutation_err(mk_err("23505", Some("documents_slug_key")));
+        match mapped {
+            DataverseError::Conflict { constraint, .. } => {
+                assert_eq!(constraint.as_deref(), Some("documents_slug_key"));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unique_violation_without_constraint_still_conflict() {
+        let mapped = map_mutation_err(mk_err("23505", None));
+        assert!(
+            matches!(mapped, DataverseError::Conflict { constraint: None, .. }),
+            "expected Conflict with no constraint name"
+        );
+    }
+
+    #[test]
+    fn other_sqlstate_maps_to_internal() {
+        // e.g. 42804 (datatype mismatch) must stay an opaque internal error.
+        let mapped = map_mutation_err(mk_err("42804", None));
+        assert!(matches!(mapped, DataverseError::Internal(_)), "expected Internal");
     }
 }
