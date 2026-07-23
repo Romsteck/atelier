@@ -31,9 +31,14 @@ export const MODELS = [
     label: 'GPT 5.6',
     model: 'gpt-5.6-sol',
     efforts: ['low', 'medium', 'high', 'xhigh'],
-    // Tier RAPIDE de la même famille, activé par la bascule « Fast » (cf. wireModel).
-    // `luna` est le tier le plus rapide de GPT 5.6 ; l'effort reste réglable par-dessus.
-    fastModel: 'gpt-5.6-luna',
+    // Bascule « Fast » = FAST MODE officiel de Codex (service tier), PAS un autre modèle :
+    // même `gpt-5.6-sol`, ~1.5× plus rapide, ~2.5× les crédits (réservé à l'auth abonnement).
+    // `gpt-5.6-sol-fast` est un slug WIRE INTERNE Atelier (aucun tier `-fast` côté CLI) :
+    // il ne sert qu'à transporter l'état Fast de bout en bout (settings → meta Postgres →
+    // events `t:'model'` → restauration du chip). codex.js le DÉCODE (→ modèle réel `sol`
+    // + `--config service_tier=fast features.fast_mode=true`) et ne le passe JAMAIS au CLI.
+    // WHY pas luna : luna est un AUTRE modèle (tier rapide au rabais) — on veut sol partout.
+    fastModel: 'gpt-5.6-sol-fast',
     // WHY : un `max` explicitement demandé (ex. « Résoudre tout ») vaut le palier le plus
     // haut de Codex, pas un repli sur le défaut `medium` — le shim clampe déjà max → xhigh.
     effortAlias: { max: 'xhigh' },
@@ -113,14 +118,12 @@ export function buildSettings({ modelId, effort, mode, fast }) {
   return settings;
 }
 
-// Modèle réellement envoyé au backend : le tier RAPIDE quand « Fast » est actif et que
-// le modèle en a un. WHY un axe séparé de l'effort : Fast et effort répondaient au même
-// réglage (Fast = effort bas), donc les choisir tous les deux était impossible — alors
-// que ce sont deux questions distinctes (quelle vitesse de service, quelle profondeur
-// de raisonnement). Côté Codex il n'existe AUCUN interrupteur de vitesse indépendant
-// (les « service tiers » du CLI sont des métadonnées de catalogue, pas un réglage) : le
-// seul vrai levier orthogonal est le tier de modèle, `gpt-5.6-luna` étant le tier rapide
-// de la MÊME famille GPT 5.6. L'effort reste donc entièrement libre par-dessus.
+// Slug WIRE envoyé au backend : le `fastModel` quand « Fast » est actif et que le modèle
+// en a un, sinon le modèle nominal. WHY un axe séparé de l'effort : ce sont deux questions
+// distinctes (vitesse de service vs profondeur de raisonnement), combinables. Côté Codex,
+// « Fast » est le service tier `fast` du CLI (même modèle sol, ~1.5× plus rapide) : il est
+// porté par le slug wire `gpt-5.6-sol-fast`, décodé par codex.js (l'effort reste libre
+// par-dessus). Côté Claude, `fastModel` est un vrai tier de modèle distinct.
 export function wireModel(m, fast) {
   return (fast && m?.fastModel) || m?.model || null;
 }

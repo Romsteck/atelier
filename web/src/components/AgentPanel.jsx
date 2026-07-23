@@ -948,16 +948,19 @@ export default function AgentPanel({ panelKey, variant = 'dev' }) {
             accent={(id) => (id === 'bypass' ? 'amber' : 'blue')}
           />
         </div>
-        {/* Fast = tier RAPIDE du modèle. Axe distinct de l'effort (on peut vouloir un
-            modèle rapide QUI réfléchit longtemps, ou l'inverse) — d'où une bascule à
-            part et non un palier d'effort. Affiché seulement si le modèle a un tier rapide. */}
+        {/* Fast = service RAPIDE du modèle. Axe distinct de l'effort (on peut vouloir un
+            modèle rapide QUI réfléchit longtemps, ou l'inverse) — d'où une bascule à part
+            et non un palier d'effort. Côté Codex = fast mode (service tier, MÊME modèle) ;
+            côté Claude = tier de modèle distinct. Affiché seulement si le modèle a un fast. */}
         {hasFast(selModel) && (
           <button
             onClick={onToggleFast}
             title={
-              fast
-                ? `Tier rapide actif (${selModel.fastModel}) — réponses plus rapides. L'effort reste réglable.`
-                : `Passer au tier rapide de ${selModel.label} — réponses plus rapides, capacité un peu moindre.`
+              selModel.engine === 'codex'
+                ? `Fast mode Codex (service tier)${fast ? ' — actif' : ''} : ~1.5× plus rapide, consomme ~2.5× les crédits. Même modèle (sol), l'effort reste réglable.`
+                : fast
+                  ? `Tier rapide actif (${selModel.fastModel}) — réponses plus rapides. L'effort reste réglable.`
+                  : `Passer au tier rapide de ${selModel.label} — réponses plus rapides, capacité un peu moindre.`
             }
             className={`h-[22px] px-2 rounded-md border text-[11px] ${
               fast

@@ -34,6 +34,20 @@ const { emit, diag, fail } = makeIo('codex');
 // degrade performance and cause issues. »). Seuls gpt-5.6-{sol,terra,luna} sont connus du
 // binaire ; `sol` est le tier codage. Libellé UI inchangé (« GPT 5.6 »).
 const DEFAULT_MODEL = 'gpt-5.6-sol';
+// Slug WIRE interne (aucun tier `-fast` côté CLI) : porte l'état « fast mode » de bout en
+// bout (settings front → meta Postgres → set_model → events). On le DÉCODE ici : le modèle
+// réel reste `sol`, le fast passe par le service tier (cf. makeCodex). Voir agentModels.js.
+const FAST_WIRE = `${DEFAULT_MODEL}-fast`;
+// Décode un slug wire venu du front/meta → { model CLI réel, fast, wire ré-émis }. Tout slug
+// inconnu (luna d'une meta pré-fix, terra, `gpt-5.6` nu, vide) est COERCÉ sur sol standard :
+// un seul modèle est offert par l'UI, un slug étranger ne doit jamais atteindre le CLI (→
+// « model metadata not found » + dégradation). `changed` sert à logger la coercition.
+function decodeModel(wire) {
+  const w = (wire || '').trim();
+  if (w === FAST_WIRE) return { model: DEFAULT_MODEL, fast: true, wire: FAST_WIRE, changed: false };
+  const changed = w !== '' && w !== DEFAULT_MODEL;
+  return { model: DEFAULT_MODEL, fast: false, wire: DEFAULT_MODEL, changed };
+}
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 // Corps de tool_result borné : l'UI n'affiche qu'un extrait, et un `aggregated_output`
 // de build fait des mégaoctets (pipe saturé + buffer transcript inutilement gros).
@@ -317,6 +331,14 @@ let gotInit = false;
 let threadOptions = null;
 let sessionId = null;
 let liveMode = 'plan';
+// Slug WIRE courant (`sol` ou `sol-fast`) : ce que l'UI/meta voient. `threadOptions.model`
+// reste toujours le slug CLI réel (`sol`) ; l'axe fast vit sur l'instance Codex, pas dans
+// threadOptions (le SDK n'a pas de champ service_tier). `codex`/`thread` sont recréés au
+// toggle fast (cf. set_model).
+let liveWire = DEFAULT_MODEL;
+let liveFast = false;
+let codex = null;
+let thread = null;
 let turnActive = false;
 let currentAbort = null;
 let interruptRequested = false;
@@ -377,9 +399,17 @@ rl.on('line', (line) => {
       break;
     case 'set_model':
       if (threadOptions) {
-        threadOptions.model = msg.model || DEFAULT_MODEL;
-        emit({ t: 'model', model: threadOptions.model });
-        if (turnActive) diag(`set_model(${threadOptions.model}) : appliqué au prochain tour (tour en vol)`);
+        const dec = decodeModel(msg.model);
+        if (dec.changed) diag(`set_model('${msg.model}') inconnu → coercé sur ${DEFAULT_MODEL}`);
+        threadOptions.model = dec.model; // toujours sol côté CLI
+        const fastChanged = dec.fast !== liveFast;
+        liveFast = dec.fast;
+        liveWire = dec.wire;
+        // Le fast vit sur l'instance Codex → un changement de tier impose de recréer
+        // codex + thread (resume sur le sessionId courant si le thread est déjà démarré).
+        if (fastChanged) { codex = makeCodex(liveFast); bindThread(); }
+        emit({ t: 'model', model: liveWire });
+        if (turnActive) diag(`set_model(${liveWire}) : appliqué au prochain tour (tour en vol)`);
       }
       break;
     // Stop : tue le child `codex exec` du tour en cours ; la session (le thread) survit.
@@ -669,8 +699,12 @@ function applyMode(mode) {
   threadOptions.networkAccessEnabled = liveMode === 'bypass';
 }
 
+const initModel = decodeModel(model);
+if (initModel.changed) diag(`modèle '${model}' inconnu → coercé sur ${DEFAULT_MODEL}`);
+liveWire = initModel.wire;
+liveFast = initModel.fast;
 threadOptions = {
-  model: model || DEFAULT_MODEL,
+  model: initModel.model, // slug CLI réel (toujours sol) ; le fast passe par le service tier
   modelReasoningEffort: clampEffort(effort),
   workingDirectory: cwd,
   // Le workspace d'une app n'est pas toujours un dépôt git (le bare repo vit ailleurs) :
@@ -681,8 +715,22 @@ threadOptions = {
 applyMode(permissionMode === 'bypassPermissions' ? 'bypass' : 'plan');
 
 const Codex = await loadCodex();
-const codex = new Codex({ env: childEnv(CODEX_HOME) });
-const thread = resume ? codex.resumeThread(resume, threadOptions) : codex.startThread(threadOptions);
+// Fabrique l'instance Codex pour le service tier voulu. WHY sur l'instance et pas dans
+// threadOptions : le SDK 0.144.6 n'a pas de champ service_tier ; `CodexOptions.config` est
+// aplati en `--config key=value` à chaque spawn `codex exec`. `fast` → tier officiel Codex
+// (même modèle sol, ~1.5× plus rapide). Un rebuild recrée aussi le thread (resume si connu).
+function makeCodex(fast) {
+  const opts = { env: childEnv(CODEX_HOME) };
+  if (fast) opts.config = { service_tier: 'fast', features: { fast_mode: true } };
+  return new Codex(opts);
+}
+function bindThread() {
+  // sessionId connu (thread déjà démarré, ou resume) → on reprend ; sinon nouveau thread.
+  thread = sessionId ? codex.resumeThread(sessionId, threadOptions) : codex.startThread(threadOptions);
+}
+codex = makeCodex(liveFast);
+if (resume) sessionId = resume;
+bindThread();
 
 // Mode initial AVANT tout (invariant partagé avec runner.js : l'UI et le buffer backend
 // connaissent la vérité terrain dès le départ).
@@ -693,7 +741,9 @@ function emitSystem(id) {
   if (sessionEmitted) return;
   sessionEmitted = true;
   sessionId = id;
-  emit({ t: 'system', subtype: 'init', session_id: id, model: threadOptions.model });
+  // `liveWire` (sol / sol-fast), PAS threadOptions.model (toujours sol) : c'est le slug wire
+  // que la meta Rust persiste et que le front lit pour restaurer le chip Fast.
+  emit({ t: 'system', subtype: 'init', session_id: id, model: liveWire });
   flushPending(id); // items écrits avant que l'id du thread n'existe (1er tour utilisateur)
 }
 // Reprise : le binding run_id↔session_id côté Rust dépend de l'event `system`, or
