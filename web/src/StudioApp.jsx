@@ -6,6 +6,7 @@ import { NotificationsProvider } from './context/NotificationsContext';
 import { PilotProvider } from './context/PilotContext';
 import StudioShell from './pages/StudioShell';
 import ErrorBoundary from './components/ErrorBoundary';
+import MaintenanceOverlay from './components/pilot/MaintenanceOverlay';
 
 // Slug absent (`/studio/` nu) → rien à éditer : on quitte vers la homepage. WHY
 // `window.location` et pas <Navigate to="/"> : avec `basename="/studio"`, un
@@ -29,6 +30,7 @@ export default function StudioApp() {
       <AuthProvider>
         <NotificationsProvider>
         <PilotProvider>
+          <MaintenanceOverlay />
           <ErrorBoundary>
             <Routes>
               <Route path="/:slug" element={<StudioRoute />} />

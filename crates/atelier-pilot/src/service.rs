@@ -130,6 +130,43 @@ pub struct AtelierWorkerReport {
     pub git_sha_before: Option<String>,
 }
 
+/// Étapes de la mise à jour autonome d'Atelier (worker détaché), diffusées aux
+/// UIs (WS `platform:maintenance` + champ `maintenance` de `/api/pilot/state`)
+/// pour l'overlay « Atelier se met à jour ». La phase vit ICI (mémoire + WS +
+/// fichier `<run>.phase` côté script), JAMAIS dans `backlog_runs.phase` :
+/// `phase='report'` y est le marqueur d'identité du run détaché
+/// (`waiting_atelier`/`reconcile_interrupted`) — l'écraser ferait passer le run
+/// pour un orphelin in-process au boot (failed + arbre restauré à tort).
+#[derive(Debug, Clone, Serialize)]
+pub struct MaintenanceStep {
+    pub phase: String,
+    pub at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MaintenanceSnapshot {
+    pub active: bool,
+    pub run_id: Uuid,
+    pub item_id: i64,
+    pub title: String,
+    pub phase: String,
+    pub steps: Vec<MaintenanceStep>,
+    pub started_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    /// Verdict terminal (`success`|`failed`|`needs_user`) posé à l'acceptation
+    /// du report — l'overlay affiche la fin puis se retire.
+    pub outcome: Option<String>,
+}
+
+const MAINTENANCE_PHASES: &[&str] = &[
+    "checkpoint",
+    "agent",
+    "deploy",
+    "healthcheck",
+    "commit",
+    "rollback",
+];
+
 struct RunningWork {
     run_id: Uuid,
     cancel: CancellationToken,
@@ -216,6 +253,8 @@ struct Inner {
     backlog_tx: broadcast::Sender<PilotEvent>,
     transcript_tx: broadcast::Sender<TranscriptLine>,
     night_tx: broadcast::Sender<NightSnapshot>,
+    maintenance: Mutex<Option<MaintenanceSnapshot>>,
+    maintenance_tx: broadcast::Sender<MaintenanceSnapshot>,
     night_cancel: Mutex<Option<CancellationToken>>,
     detached_atelier: AtomicBool,
     activated: AtomicBool,
@@ -231,6 +270,7 @@ impl PilotService {
         let (backlog_tx, _) = broadcast::channel(256);
         let (transcript_tx, _) = broadcast::channel(1024);
         let (night_tx, _) = broadcast::channel(64);
+        let (maintenance_tx, _) = broadcast::channel(64);
         let mut stores = None;
         if let Some(pool) = pool {
             match crate::run_migrations(&pool).await {
@@ -262,6 +302,8 @@ impl PilotService {
                 backlog_tx,
                 transcript_tx,
                 night_tx,
+                maintenance: Mutex::new(None),
+                maintenance_tx,
                 night_cancel: Mutex::new(None),
                 detached_atelier: AtomicBool::new(false),
                 activated: AtomicBool::new(false),
@@ -358,6 +400,16 @@ impl PilotService {
     }
     pub fn subscribe_night(&self) -> broadcast::Receiver<NightSnapshot> {
         self.inner.night_tx.subscribe()
+    }
+    pub fn subscribe_maintenance(&self) -> broadcast::Receiver<MaintenanceSnapshot> {
+        self.inner.maintenance_tx.subscribe()
+    }
+    pub fn maintenance_snapshot(&self) -> Option<MaintenanceSnapshot> {
+        self.inner
+            .maintenance
+            .lock()
+            .expect("pilot maintenance")
+            .clone()
     }
     pub fn is_busy(&self) -> bool {
         !self.inner.running.lock().expect("pilot running").is_empty()
@@ -1278,6 +1330,7 @@ impl PilotService {
             "secret": secret,
             "oauth_token": (self.hooks().token)().await,
             "api": "http://127.0.0.1:4100/api/pilot/atelier-report",
+            "progress_api": "http://127.0.0.1:4100/api/pilot/atelier-progress",
             "root": self.inner.config.atelier_root,
             "node": std::env::var("ATELIER_AGENT_NODE_BIN").unwrap_or_else(|_| "/usr/bin/node".into()),
             "worker": std::env::var("ATELIER_PILOT_RUNNER").unwrap_or_else(|_| "/opt/atelier/runner/src/worker.js".into()),
@@ -1358,7 +1411,154 @@ impl PilotService {
             ));
         }
         self.inner.detached_atelier.store(true, Ordering::Relaxed);
+        self.begin_maintenance(run_id, item.id, &item.title, "checkpoint");
+        // Relais live du transcript détaché : le worker Atelier tourne dans un
+        // process séparé et écrit son NDJSON dans un fichier — on le tail pour
+        // alimenter le canal `pilot:transcript` comme un run d'app, afin que
+        // l'UI montre moteur / tokens / conversation en direct (sinon la tuile
+        // « En cours » resterait à zéro toute la durée du run Atelier).
+        let transcript_path = runtime_path.join(format!("{run_id}.ndjson"));
+        let svc = self.clone();
+        tokio::spawn(async move { svc.tail_atelier_transcript(run_id, transcript_path).await });
         Ok(())
+    }
+
+    /// Ouvre (ou remplace) le snapshot de maintenance et le diffuse. Appelé au
+    /// spawn du worker détaché et à la réconciliation post-restart.
+    fn begin_maintenance(&self, run_id: Uuid, item_id: i64, title: &str, phase: &str) {
+        let now = Utc::now();
+        let snap = MaintenanceSnapshot {
+            active: true,
+            run_id,
+            item_id,
+            title: title.into(),
+            phase: phase.into(),
+            steps: vec![MaintenanceStep {
+                phase: phase.into(),
+                at: now,
+            }],
+            started_at: now,
+            updated_at: now,
+            outcome: None,
+        };
+        *self.inner.maintenance.lock().expect("pilot maintenance") = Some(snap.clone());
+        let _ = self.inner.maintenance_tx.send(snap);
+    }
+
+    /// Jalon de phase POSTé par le script détaché (loopback + secret vérifiés
+    /// en route). Mémoire + WS uniquement — cf. WHY sur `MaintenanceSnapshot` :
+    /// `backlog_runs.phase` doit rester `report` (identité du run détaché).
+    pub async fn atelier_progress(&self, run_id: Uuid, phase: &str) -> Result<(), String> {
+        if !MAINTENANCE_PHASES.contains(&phase) {
+            return Err("phase inconnue".into());
+        }
+        let runs = self.inner.runs.as_ref().ok_or("store runs indisponible")?;
+        let run = runs
+            .get(run_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("run inconnu")?;
+        if run.scope != "atelier" || run.status != "running" {
+            return Err("run Atelier non actif".into());
+        }
+        // Titre requis seulement si le snapshot doit être (re)créé — cas d'un
+        // jalon reçu avant la réconciliation de boot.
+        let title = match (run.item_id, self.inner.backlog.as_ref()) {
+            (Some(id), Some(b)) => b
+                .get(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|i| i.title)
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let snap = {
+            let now = Utc::now();
+            let mut guard = self.inner.maintenance.lock().expect("pilot maintenance");
+            let snap = match guard.as_mut().filter(|s| s.run_id == run_id) {
+                Some(s) => s,
+                None => guard.insert(MaintenanceSnapshot {
+                    active: true,
+                    run_id,
+                    item_id: run.item_id.unwrap_or_default(),
+                    title,
+                    phase: phase.into(),
+                    steps: Vec::new(),
+                    started_at: now,
+                    updated_at: now,
+                    outcome: None,
+                }),
+            };
+            if snap.phase != phase || snap.steps.is_empty() {
+                snap.steps.push(MaintenanceStep {
+                    phase: phase.into(),
+                    at: now,
+                });
+                snap.phase = phase.into();
+            }
+            snap.updated_at = now;
+            snap.clone()
+        };
+        info!(run_id = %run_id, phase = %phase, "pilot atelier progress");
+        let _ = self.inner.maintenance_tx.send(snap);
+        Ok(())
+    }
+
+    /// Clôt le snapshot (verdict du report) : un dernier event `active:false`
+    /// laisse l'overlay afficher la fin, puis l'état API redevient nul.
+    fn end_maintenance(&self, run_id: Uuid, outcome: &str) {
+        let snap = {
+            let mut guard = self.inner.maintenance.lock().expect("pilot maintenance");
+            let Some(mut snap) = guard.take() else { return };
+            if snap.run_id != run_id {
+                *guard = Some(snap);
+                return;
+            }
+            snap.active = false;
+            snap.outcome = Some(outcome.into());
+            snap.updated_at = Utc::now();
+            snap
+        };
+        let _ = self.inner.maintenance_tx.send(snap);
+    }
+
+    /// Tail le fichier NDJSON du worker Atelier détaché et republie chaque ligne
+    /// complète sur le canal transcript. S'arrête quand le report est arrivé
+    /// (flag `detached_atelier` retombé) après un dernier drain, ou au garde-fou.
+    async fn tail_atelier_transcript(&self, run_id: Uuid, path: PathBuf) {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut offset: u64 = 0;
+        let mut pending: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(9600);
+        loop {
+            if let Ok(mut f) = tokio::fs::File::open(&path).await {
+                if f.seek(std::io::SeekFrom::Start(offset)).await.is_ok() {
+                    let mut chunk = Vec::new();
+                    if let Ok(n) = f.read_to_end(&mut chunk).await {
+                        if n > 0 {
+                            offset += n as u64;
+                            pending.extend_from_slice(&chunk);
+                            while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                                let line: Vec<u8> = pending.drain(..=pos).collect();
+                                let s = String::from_utf8_lossy(&line[..line.len() - 1])
+                                    .trim()
+                                    .to_string();
+                                if !s.is_empty() {
+                                    self.push_transcript(run_id, "atelier", s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Report arrivé → un dernier passage pour drainer la fin, puis stop.
+            let finished = !self.inner.detached_atelier.load(Ordering::Relaxed);
+            if finished || tokio::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
     }
 
     async fn snapshot_other_trees(&self, current: &str) -> HashMap<String, (String, String)> {
@@ -1553,6 +1753,16 @@ impl PilotService {
             .expect("pilot running")
             .remove("atelier");
         self.inner.detached_atelier.store(false, Ordering::Relaxed);
+        self.end_maintenance(
+            report.run_id,
+            if success {
+                "success"
+            } else if report.status == "needs_user" {
+                "needs_user"
+            } else {
+                "failed"
+            },
+        );
         if let Some(schedules) = self.inner.schedule.as_ref() {
             // m2 : seul un run de NUIT clôt pilot_night (status/mark_ran/notif
             // du matin) ; un run manuel ne touche pas à l'état de la nuit.
@@ -1597,6 +1807,7 @@ impl PilotService {
         );
         let _ = std::fs::remove_file(runtime.join(format!("{}.report.json", report.run_id)));
         let _ = std::fs::remove_file(runtime.join(format!("{}.json", report.run_id)));
+        let _ = std::fs::remove_file(runtime.join(format!("{}.phase", report.run_id)));
         Ok(item)
     }
 
@@ -1639,6 +1850,34 @@ impl PilotService {
                 > chrono::Duration::minutes(150);
             if !overdue {
                 self.inner.detached_atelier.store(true, Ordering::Relaxed);
+                // Reprise post-restart : le restart (déclenché par le deploy du
+                // worker lui-même) a perdu le snapshot maintenance ET le tailer.
+                // On les reconstruit pour que l'overlay et la vue live
+                // reprennent — la phase exacte est relue du fichier durable
+                // écrit par le script, et le replay du NDJSON depuis l'offset 0
+                // régénère les mêmes `seq` (dédup mergeLines côté front).
+                let phase = std::fs::read_to_string(
+                    PathBuf::from(&runtime).join(format!("{}.phase", run.id)),
+                )
+                .map(|s| s.trim().to_string())
+                .ok()
+                .filter(|s| MAINTENANCE_PHASES.contains(&s.as_str()))
+                .unwrap_or_else(|| "deploy".into());
+                let title = match (run.item_id, self.inner.backlog.as_ref()) {
+                    (Some(id), Some(b)) => b
+                        .get(id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|i| i.title)
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                self.begin_maintenance(run.id, run.item_id.unwrap_or_default(), &title, &phase);
+                let transcript_path = PathBuf::from(&runtime).join(format!("{}.ndjson", run.id));
+                let svc = self.clone();
+                let rid = run.id;
+                tokio::spawn(async move { svc.tail_atelier_transcript(rid, transcript_path).await });
                 return;
             }
             warn!(run_id = %run.id, unit = %unit, "pilot Atelier worker overdue — stopping unit");

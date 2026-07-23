@@ -27,6 +27,9 @@ config_dir=$(/usr/bin/jq -r '.config_dir' "$payload")
 # jamais en argv (visible /proc/*/cmdline pour tout process romain — y compris un
 # reliquat lancé par l'agent via Bash).
 secret=$(/usr/bin/jq -r '.secret // ""' "$payload")
+progress_api=$(/usr/bin/jq -r '.progress_api // ""' "$payload")
+[[ -z "$progress_api" ]] && progress_api="${api%atelier-report}atelier-progress"
+phase_file="$runtime_dir/$run_id.phase"
 marker="$runtime_dir/$run_id.report.json"
 transcript="$runtime_dir/$run_id.ndjson"
 stderr_log="$runtime_dir/$run_id.stderr.log"
@@ -82,7 +85,7 @@ print(json.dumps(d, ensure_ascii=False))
 $body
 CURL_BODY
     then
-      rm -f "$marker" "$transcript" "$stderr_log" "$run_log" "$payload"
+      rm -f "$marker" "$transcript" "$stderr_log" "$run_log" "$payload" "$phase_file"
       return 0
     fi
     sleep 3
@@ -97,6 +100,21 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
+
+# Jalon de phase : fichier durable (relu par la réconciliation post-restart pour
+# ré-afficher l'overlay de maintenance au bon endroit) + POST fire-and-forget
+# (relayé en WS `platform:maintenance` aux UIs ouvertes). Jamais bloquant :
+# pendant le restart d'Atelier le POST échoue, c'est attendu. Le secret passe
+# par stdin (printf builtin), jamais en argv.
+post_progress() {
+  local ph=$1
+  printf '%s' "$ph" > "$phase_file" 2>/dev/null || true
+  printf '%s' "$secret" | /usr/bin/python3 -c '
+import json, sys
+print(json.dumps({"run_id": sys.argv[1], "phase": sys.argv[2], "secret": sys.stdin.read()}))
+' "$run_id" "$ph" 2>/dev/null | /usr/bin/curl -fsS --connect-timeout 2 --max-time 5 \
+    -H 'Content-Type: application/json' --data-binary @- "$progress_api" >/dev/null 2>&1 || true
+}
 
 phase=preflight
 for bin in /usr/bin/git /usr/bin/jq /usr/bin/python3 /usr/bin/curl /usr/bin/timeout "$node" "$worker"; do
@@ -129,6 +147,7 @@ if [[ -z "$init_json" ]]; then
 fi
 
 phase=checkpoint
+post_progress checkpoint
 dirty=$(/usr/bin/git status --porcelain=v1 --untracked-files=all)
 if [[ -n "$dirty" ]]; then
   /usr/bin/git add -A || { write_report failed commit_failed "git add checkpoint échoué" "" "" || true; exit 1; }
@@ -167,6 +186,7 @@ if [[ $? -ne 0 ]]; then
 fi
 
 phase=agent
+post_progress agent
 # stderr SÉPARÉ du transcript (JAMAIS 2>&1 : une seule ligne non-JSON dans le NDJSON
 # rendait l'ancien parsing en bloc `jq -rs` aveugle). Init par stdin via printf builtin.
 # Timeout dur : TERM à 5400 s (le worker émet alors un verdict `cancelled` typé et sort
@@ -250,6 +270,7 @@ fi
 # `rollback_failed` critique — sans capture, impossible de savoir POURQUOI. Tout le output
 # deploy/rollback va dans $run_log, dont un tail est embarqué dans les reports d'échec.
 rollback_and_redeploy() {
+  post_progress rollback
   {
     echo "--- rollback $(date -Is) ---"
     /usr/bin/git reset --hard "$sha_before" && /usr/bin/git clean -fd
@@ -259,6 +280,7 @@ rollback_and_redeploy() {
 deploy_tail() { tail -c 1500 "$run_log" 2>/dev/null || true; }
 
 phase=deploy
+post_progress deploy
 if ! make deploy-local >>"$run_log" 2>&1; then
   if rollback_and_redeploy; then
     write_report failed deploy_failed "make deploy-local a échoué; source restaurée et plateforme redéployée. Log: $(deploy_tail)" "" "$report_text" || true
@@ -269,6 +291,9 @@ if ! make deploy-local >>"$run_log" 2>&1; then
 fi
 
 phase=healthcheck
+# Pas de jalon POSTé ici : `make deploy-local` vient de redémarrer Atelier, le
+# premier POST joignable est celui de la phase commit (le fichier suffit).
+printf '%s' healthcheck > "$phase_file" 2>/dev/null || true
 healthy=0
 for _ in $(seq 1 60); do
   if /usr/bin/curl -fsS --max-time 3 http://127.0.0.1:4100/api/health >/dev/null \
@@ -287,6 +312,7 @@ if [[ $healthy -ne 1 ]]; then
 fi
 
 phase=commit
+post_progress commit
 /usr/bin/git add -A
 # hooksPath neutralisé (WHY) : un hook posé par l'agent via Bash pendant le run
 # s'exécuterait sinon EN ROMAIN ici, à la phase déterministe.

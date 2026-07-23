@@ -15,19 +15,29 @@ export function PilotProvider({ children }) {
   const [schedule, setSchedule] = useState(null);
   const [night, setNight] = useState(null);
   const [transcripts, setTranscripts] = useState({});
+  // Mise à jour autonome d'Atelier en cours (worker détaché) : snapshot serveur
+  // au fetch + événements live `platform:maintenance` — consommé par
+  // MaintenanceOverlay (bandeau de phase + overlay d'indisponibilité).
+  const [maintenance, setMaintenance] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const refetch = useCallback(async () => {
     try {
       const [a, s, sc, n] = await Promise.all([getPilotBacklog(), getPilotState(), getPilotSchedule(), getPilotNight()]);
       const list = unwrapApi(a); if (Array.isArray(list)) setItems(list);
-      setState(unwrapApi(s)); setSchedule(unwrapApi(sc)); setNight(unwrapApi(n));
+      const st = unwrapApi(s);
+      setState(st); setSchedule(unwrapApi(sc)); setNight(unwrapApi(n));
+      // Champ serveur nul hors maintenance : on purge un snapshot ACTIF périmé
+      // (fin manquée pendant une coupure WS) mais on préserve un verdict
+      // terminal (active:false + outcome) que l'overlay est en train d'afficher.
+      setMaintenance((cur) => st?.maintenance ?? (cur?.active ? null : cur));
     } catch { /* keep the last snapshot */ }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { refetch(); }, [refetch]);
 
-  const { epoch } = useWebSocket({
+  const { epoch, status: wsStatus } = useWebSocket({
+    'platform:maintenance': (snap) => { if (snap) setMaintenance(snap); },
     'pilot:backlog': (ev) => {
       if (!ev) return;
       if (ev.action === 'deleted') setItems((v) => v.filter((x) => x.id !== ev.id));
@@ -79,7 +89,7 @@ export function PilotProvider({ children }) {
   }), [items]);
   useEffect(() => { setBadgeSlice('pilot', counts.attention); }, [counts.attention]);
   useEffect(() => () => setBadgeSlice('pilot', 0), []);
-  const value = useMemo(() => ({ items, state, schedule, night, transcripts, loading, counts, capture, patch, move, remove, run, cancelRun, saveSchedule, launchNight, stopNight, refetch }), [items, state, schedule, night, transcripts, loading, counts, capture, patch, move, remove, run, cancelRun, saveSchedule, launchNight, stopNight, refetch]);
+  const value = useMemo(() => ({ items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, cancelRun, saveSchedule, launchNight, stopNight, refetch }), [items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, cancelRun, saveSchedule, launchNight, stopNight, refetch]);
   return <PilotContext.Provider value={value}>{children}</PilotContext.Provider>;
 }
 

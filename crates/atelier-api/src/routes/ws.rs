@@ -47,6 +47,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut pilot_rx = state.pilot.subscribe();
     let mut pilot_transcript_rx = state.pilot.subscribe_transcript();
     let mut pilot_night_rx = state.pilot.subscribe_night();
+    let mut pilot_maintenance_rx = state.pilot.subscribe_maintenance();
 
     loop {
         tokio::select! {
@@ -87,6 +88,20 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "pilot:night", dropped = n, "ws subscriber lagged");
                         if send_resync(&mut socket, "pilot:night", n).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            result = pilot_maintenance_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "platform:maintenance", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "platform:maintenance", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "platform:maintenance", n).await.is_err() { break; }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

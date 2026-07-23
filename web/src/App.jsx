@@ -21,6 +21,7 @@ import Settings from './pages/Settings';
 import Issues from './pages/Issues';
 import Stats from './pages/Stats';
 import Backlog from './pages/Backlog';
+import MaintenanceOverlay from './components/pilot/MaintenanceOverlay';
 
 // Le Studio est désormais une app Vite SÉPARÉE servie sous `/studio/<slug>` (cf.
 // crates/atelier-api/src/lib.rs). La homepage (cette SPA) ne contient plus le
@@ -47,6 +48,7 @@ function App() {
           <NotificationsProvider>
           <IssuesProvider>
           <PilotProvider>
+          <MaintenanceOverlay />
           <ErrorBoundary>
           <Layout>
           <Routes>

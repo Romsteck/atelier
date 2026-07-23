@@ -29,6 +29,7 @@ pub fn router() -> Router<ApiState> {
         .route("/night", get(get_night).post(start_night))
         .route("/night/cancel", post(cancel_night))
         .route("/atelier-report", post(atelier_report))
+        .route("/atelier-progress", post(atelier_progress))
 }
 
 fn ok(data: impl serde::Serialize) -> axum::response::Response {
@@ -82,6 +83,7 @@ async fn state(State(state): State<ApiState>) -> impl IntoResponse {
     ok(json!({
         "enabled":state.pilot.is_enabled(),
         "busy":state.pilot.is_busy(),
+        "maintenance":state.pilot.maintenance_snapshot(),
         "engines":{
             "claude":claude.get("configured").and_then(Value::as_bool).unwrap_or(false),
             "codex":codex_binary && (codex_auth_file || codex.get("configured").and_then(Value::as_bool).unwrap_or(false)),
@@ -342,6 +344,38 @@ async fn atelier_report(
     }
     match state.pilot.accept_atelier_report(body).await {
         Ok(item) => ok(item),
+        Err(e) => fail(StatusCode::CONFLICT, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProgressBody {
+    run_id: Uuid,
+    secret: String,
+    phase: String,
+}
+
+/// Jalon de phase du worker Atelier détaché (fire-and-forget côté script) :
+/// même porte que le report — loopback + secret de nuit. Alimente l'overlay
+/// de maintenance (WS `platform:maintenance` + `/api/pilot/state`).
+async fn atelier_progress(
+    State(state): State<ApiState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<ProgressBody>,
+) -> impl IntoResponse {
+    if !addr.ip().is_loopback() {
+        return fail(StatusCode::FORBIDDEN, "loopback uniquement");
+    }
+    let Some(s) = state.pilot.schedules() else {
+        return fail(StatusCode::SERVICE_UNAVAILABLE, "Pilote indisponible");
+    };
+    match s.secret_matches(&body.secret).await {
+        Ok(true) => {}
+        Ok(false) => return fail(StatusCode::UNAUTHORIZED, "secret de nuit invalide"),
+        Err(e) => return crate::routes::internal_err("pilot progress auth", e),
+    }
+    match state.pilot.atelier_progress(body.run_id, &body.phase).await {
+        Ok(()) => ok(json!({"accepted":true})),
         Err(e) => fail(StatusCode::CONFLICT, e),
     }
 }
