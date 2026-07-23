@@ -11,8 +11,8 @@
 //! comes from the URL `/studio/{slug}`, so there is no global selection to sync.)
 //!
 //! Degrades to a no-op / "empty" when the pool is absent (Postgres down at boot)
-//! — mirrors [`crate::task_store::TaskStore`]; the UI then falls back to its
-//! localStorage cache.
+//! — same no-op-without-pool contract as the other `atelier_meta` stores; the UI
+//! then falls back to its localStorage cache.
 
 use serde_json::{Value, json};
 use tracing::error;

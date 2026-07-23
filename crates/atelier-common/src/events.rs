@@ -21,8 +21,6 @@ pub struct EventBus {
     pub cert_ready: broadcast::Sender<CertReadyEvent>,
     /// Unified update scan events (registry → websocket)
     pub update_scan: broadcast::Sender<UpdateScanEvent>,
-    /// Task update events (task store → websocket)
-    pub task_update: broadcast::Sender<crate::tasks::TaskUpdateEvent>,
     /// Energy metrics events (energy poller → websocket)
     pub energy_metrics: broadcast::Sender<EnergyMetricsEvent>,
     /// Log entry events (logging layer → websocket for live log viewer)
@@ -66,7 +64,6 @@ impl EventBus {
             host_power: broadcast::channel(64).0,
             cert_ready: broadcast::channel(16).0,
             update_scan: broadcast::channel(256).0,
-            task_update: broadcast::channel(64).0,
             energy_metrics: broadcast::channel(64).0,
             log_entry: broadcast::channel(512).0,
             app_state: broadcast::channel(64).0,

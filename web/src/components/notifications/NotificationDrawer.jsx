@@ -11,8 +11,8 @@ const FILTERS = [
   { key: 'action', label: 'Journal' },
 ];
 
-// Tiroir des notifications plateforme. Desktop : dropdown ancré à la cloche
-// (pattern TaskDropdown) ; mobile : drawer plein-hauteur droit (pattern Sidebar).
+// Tiroir des notifications plateforme. Desktop : dropdown ancré à la cloche ;
+// mobile : drawer plein-hauteur droit (pattern Sidebar).
 // `contextSlug` (Studio) ajoute un filtre « cette app » pré-activable.
 export default function NotificationDrawer({ contextSlug }) {
   const { items, unread, isOpen, setIsOpen, markAllRead } = useNotifications();

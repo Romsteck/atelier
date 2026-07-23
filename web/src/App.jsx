@@ -2,14 +2,11 @@ import { useEffect } from 'react';
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider } from './context/AuthContext';
-import { TaskProvider } from './context/TaskContext';
 import { AppsProvider } from './context/AppsContext';
 import { NotificationsProvider } from './context/NotificationsContext';
 import { PilotProvider } from './context/PilotContext';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
-import Tasks from './pages/Tasks';
-import TaskDetail from './pages/TaskDetail';
 import Git from './pages/Git';
 import Apps from './pages/Apps';
 import DbExplorer from './pages/DbExplorer';
@@ -41,7 +38,6 @@ function App() {
   return (
     <ThemeProvider>
     <AuthProvider>
-      <TaskProvider>
         <AppsProvider>
           <NotificationsProvider>
           <PilotProvider>
@@ -64,10 +60,6 @@ function App() {
             <Route path="/backup" element={<Backup />} />
             <Route path="/settings" element={<Settings />} />
 
-            {/* Tasks panel */}
-            <Route path="/tasks" element={<Tasks />} />
-            <Route path="/tasks/:id" element={<TaskDetail />} />
-
             {/* Compat redirects */}
             <Route path="/studio" element={<Navigate to="/" replace />} />
             <Route path="/apps" element={<Navigate to="/" replace />} />
@@ -83,7 +75,6 @@ function App() {
           </PilotProvider>
           </NotificationsProvider>
         </AppsProvider>
-      </TaskProvider>
     </AuthProvider>
     </ThemeProvider>
   );

@@ -88,11 +88,9 @@ async fn main() -> Result<()> {
 
     let git = Arc::new(atelier_git::GitService::with_repos_dir(git_repos_dir));
     let dv = init_dv(&apps_state_dir).await;
-    // Shared control-plane Postgres pool (atelier_meta). Backs the task store +
-    // docs index now; the registry/port stores migrate onto it in a later stage.
+    // Shared control-plane Postgres pool (atelier_meta). Backs the registry/port
+    // stores, docs index, open-tabs, conversation meta, notifications, etc.
     let meta_pool = init_control_db().await;
-    let task_store =
-        Arc::new(atelier_common::task_store::TaskStore::new(meta_pool.clone()).await);
     // Studio open-tabs store (cross-PC tab sync). Degrades to no-op without the pool.
     let open_tabs = atelier_common::agent_ui_state::OpenTabsStore::new(meta_pool.clone());
     // Réglages par conversation agent (modèle/effort/mode) — suivent l'utilisateur
@@ -373,7 +371,6 @@ async fn main() -> Result<()> {
         git,
         apps_state_dir.clone(),
         dv,
-        task_store,
         open_tabs,
         conversation_meta,
         notifications,

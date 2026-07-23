@@ -9,7 +9,8 @@
 //!   `subdomain` before any mutation (never trusted blindly).
 //!
 //! Mirrors the singleton/COALESCE pattern of `atelier-backup::target::TargetStore`
-//! and the `Option<PgPool>` no-op-when-absent pattern of `TaskStore`.
+//! and the `Option<PgPool>` no-op-when-absent pattern of the other `atelier_meta`
+//! stores.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -108,8 +109,8 @@ pub struct RouteRow {
 }
 
 /// Postgres-backed store. Every op degrades to a best-effort no-op / `None`
-/// when `pool` is `None` (Postgres unreachable at boot) — same contract as
-/// [`crate::task_store::TaskStore`].
+/// when `pool` is `None` (Postgres unreachable at boot) — same no-op-without-pool
+/// contract as the other `atelier_meta` stores.
 #[derive(Clone)]
 pub struct HomerouteStore {
     pool: Option<Pool<Postgres>>,

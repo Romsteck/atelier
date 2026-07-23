@@ -14,7 +14,6 @@ use atelier_common::codex_auth::CodexAuthStore;
 use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::EventBus;
 use atelier_common::notification_store::NotificationStore;
-use atelier_common::task_store::TaskStore;
 use atelier_common::usage_stats::UsageStatsStore;
 use crate::routes::stats::{ProxyStats, StatsCache};
 
@@ -31,9 +30,6 @@ pub struct ApiState {
     pub apps_state_dir: PathBuf,
     pub apps_src_root: PathBuf,
     pub apps_runtime_root: PathBuf,
-
-    // Tasks
-    pub task_store: Arc<TaskStore>,
 
     /// Studio open-tabs state (conversations/files/diffs/commits + active tab),
     /// per app, in `atelier_meta`. Source of truth for cross-PC tab sync; pairs
@@ -144,7 +140,6 @@ impl ApiState {
         git: Arc<atelier_git::GitService>,
         apps_state_dir: PathBuf,
         dv: Option<Arc<atelier_dataverse::manager::DataverseManager>>,
-        task_store: Arc<TaskStore>,
         open_tabs: OpenTabsStore,
         conversation_meta: ConversationMetaStore,
         notifications: NotificationStore,
@@ -172,7 +167,6 @@ impl ApiState {
             apps_state_dir,
             apps_src_root,
             apps_runtime_root,
-            task_store,
             open_tabs,
             conversation_meta,
             notifications,

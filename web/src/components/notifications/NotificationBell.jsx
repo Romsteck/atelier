@@ -1,7 +1,7 @@
 import { Inbox } from 'lucide-react';
 import { useNotifications } from '../../context/NotificationsContext';
 
-// Cloche des notifications plateforme (distincte de TaskBell/Bell : icône Inbox).
+// Cloche des notifications plateforme (icône Inbox).
 // Badge = non-lus serveur (les kind=action naissent lus → seuls les notices comptent).
 export default function NotificationBell() {
   const { unread, isOpen, setIsOpen } = useNotifications();

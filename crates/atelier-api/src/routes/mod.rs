@@ -45,5 +45,4 @@ pub mod pilot;
 pub mod source;
 pub mod stats;
 pub mod surveillance;
-pub mod tasks;
 pub mod ws;

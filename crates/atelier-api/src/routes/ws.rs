@@ -25,10 +25,6 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ApiState>) -> impl
 async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     debug!("ws client connected");
 
-    // task_update has no Atelier-side publisher today (TaskStore is read-only
-    // here — populated by external sync). Channel is wired for future
-    // task lifecycle changes to light up TaskContext / TaskDetail automatically.
-    let mut task_update_rx = state.events.task_update.subscribe();
     let mut log_rx = state.events.log_entry.subscribe();
     let mut logs_pg_rx = state.logs.subscribe();
     let mut app_state_rx = state.events.app_state.subscribe();
@@ -367,27 +363,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(topic = "log:entry", dropped = n, "ws subscriber lagged");
                         if send_resync(&mut socket, "log:entry", n).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-
-            result = task_update_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({
-                            "type": "task:update",
-                            "data": { "task": event.task, "steps": event.steps },
-                        });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(topic = "task:update", dropped = n, "ws subscriber lagged");
-                        if send_resync(&mut socket, "task:update", n).await.is_err() {
                             break;
                         }
                     }

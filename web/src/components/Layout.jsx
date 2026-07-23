@@ -2,8 +2,6 @@ import { useCallback, useState } from "react";
 import Sidebar from "./Sidebar";
 import { Menu } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
-import TaskBell from "./tasks/TaskBell";
-import TaskDropdown from "./tasks/TaskDropdown";
 import NotificationBell from "./notifications/NotificationBell";
 import NotificationDrawer from "./notifications/NotificationDrawer";
 import { PageHeaderSlotProvider, usePageHeaderSlotRegister } from "../context/PageHeaderSlot";
@@ -52,10 +50,6 @@ function LayoutInner({ children }) {
             <div className="relative">
               <NotificationBell />
               <NotificationDrawer />
-            </div>
-            <div className="relative">
-              <TaskBell />
-              <TaskDropdown />
             </div>
           </div>
         </div>

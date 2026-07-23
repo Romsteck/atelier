@@ -146,12 +146,6 @@ export const createAppDbRelation = (slug, body) => api.post(`/apps/${slug}/db/re
 // ========== Logs ==========
 export const getLogs = (params = {}) => api.get('/logs', { params });
 
-// ========== Tasks (control-plane) ==========
-export const getTasks = (params = {}) => api.get('/tasks', { params });
-export const getActiveTasks = () => api.get('/tasks/active');
-export const getTask = (id) => api.get(`/tasks/${id}`);
-export const cancelTask = (id) => api.post(`/tasks/${id}/cancel`);
-
 // ========== Docs (v2: structured overview/screens/features/components + mermaid) ==========
 // Read-only — mutations go through MCP from the agent.
 export const listDocsApps = () => api.get('/docs');
