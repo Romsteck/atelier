@@ -411,7 +411,15 @@ async fn run_ws_bridge(
         copy_header(h, &src_headers, "authorization");
         copy_header(h, &src_headers, "user-agent");
         copy_header(h, &src_headers, "sec-websocket-protocol");
-        copy_header(h, &src_headers, "sec-websocket-extensions");
+        // WHY: do NOT forward `Sec-WebSocket-Extensions`. This bridge is a raw-byte
+        // tunnel (axum WebSocket client-side, tungstenite upstream-side) that relays
+        // frames verbatim and cannot inflate/deflate permessage-deflate frames. If we
+        // forwarded the client's offer, the upstream (e.g. uvicorn) would ACCEPT the
+        // extension and start emitting compressed frames, which we'd relay to a client
+        // whose 101 never negotiated deflate → immediate close after the handshake
+        // (iss-31327e76). tungstenite is built without the `deflate` feature and axum's
+        // WebSocketUpgrade doesn't negotiate compression, so dropping the offer keeps
+        // frames in clear text end-to-end.
         // Same precedence as the HTTP path: keep the public host from hr-proxy.
         if let Some(host) = src_headers
             .get("x-forwarded-host")
