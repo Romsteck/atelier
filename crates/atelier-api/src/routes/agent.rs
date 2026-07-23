@@ -43,6 +43,7 @@ use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::{AgentEvent, AgentOpenTabsEvent, StudioTabEvent};
 use atelier_common::usage_stats::{TurnUsage, UsageStatsStore};
 
+use crate::mcp::apps_ops::AppsContext;
 use crate::state::ApiState;
 
 /// Moteur d'agent d'une conversation. FIGÉ au binding de session (cf. doc du module) :
@@ -2469,6 +2470,34 @@ async fn delete_sdk_auth(State(state): State<ApiState>) -> impl IntoResponse {
 // un `claude setup-token`), même validation (op:auth_check), stocké dans
 // `atelier_meta.app_claude_auth`. Endpoints sous `/api/agent/apps-token`.
 
+/// Re-render le `.env` de chaque app opt-in `claude_access`. À appeler après
+/// (re)configuration OU suppression du token Claude des apps.
+///
+/// WHY : `reconcile_app_env` est le SEUL writer du `.env` (cf. `env_ops.rs`).
+/// `platform_env` lit le token FRAIS à chaque render, mais rien ne re-render
+/// après un `set`/`clear` du token → un token posé/retiré APRÈS l'opt-in
+/// n'atteignait jamais l'app (le restart relit un `.env` périmé, symptôme b de
+/// iss-fa13bdb2 sur `hevy`). Même mécanique que la rotation `HR_DV_TOKEN`.
+/// Best-effort, non bloquant. Renvoie le nombre d'apps effectivement reconciliées.
+#[instrument(skip(state))]
+async fn reconcile_claude_access_apps(state: &ApiState) -> usize {
+    let ctx = AppsContext::from_api_state(state);
+    let mut reconciled = 0usize;
+    for app in state.supervisor.registry.list().await {
+        if !app.claude_access {
+            continue;
+        }
+        match ctx.reconcile_app_env(&app.slug, false).await {
+            Ok(_) => reconciled += 1,
+            Err(e) => {
+                warn!(slug = %app.slug, error = %e, "apps-token: reconcile du .env échoué")
+            }
+        }
+    }
+    info!(reconciled, "apps-token: .env des apps claude_access re-rendus");
+    reconciled
+}
+
 /// `GET /api/agent/apps-token` — statut masqué. `?probe=1` = smoke-test live avec
 /// le token STOCKÉ + MAJ télémétrie.
 #[instrument(skip(state))]
@@ -2525,8 +2554,14 @@ async fn set_apps_token(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "échec de persistance du token");
     }
     info!(token_len = token.len(), "apps-token: token validé et persisté");
-    // Le nouveau token n'atteint les apps opt-in qu'au prochain reconcile de leur
-    // `.env` (create/env-change/boot-sweep) ; on ne force pas de re-render ici.
+    // Propagation immédiate : re-render le `.env` des apps opt-in pour que le token
+    // neuf les atteigne SANS re-toggle ni attente du boot-sweep (un restart relirait
+    // sinon un `.env` périmé, sans `CLAUDE_CODE_OAUTH_TOKEN`).
+    let reconciled = reconcile_claude_access_apps(&state).await;
+    let body = format!(
+        "CLAUDE_CODE_OAUTH_TOKEN propagé à {reconciled} app(s) opt-in (claude_access) — \
+         redémarre-les pour qu'elles reprennent le nouveau token."
+    );
     let _ = state
         .notifications
         .push(
@@ -2535,20 +2570,22 @@ async fn set_apps_token(
             "action",
             "info",
             "Token Claude des apps configuré",
-            Some("Les apps opt-in (claude_access) recevront CLAUDE_CODE_OAUTH_TOKEN au prochain reconcile de leur .env."),
+            Some(body.as_str()),
         )
         .await;
     Json(state.app_claude_auth.status().await).into_response()
 }
 
-/// `DELETE /api/agent/apps-token` — retire le token (les apps opt-in n'auront plus
-/// `CLAUDE_CODE_OAUTH_TOKEN` au prochain reconcile).
+/// `DELETE /api/agent/apps-token` — retire le token ET re-render immédiatement le
+/// `.env` des apps opt-in pour en retirer `CLAUDE_CODE_OAUTH_TOKEN` (sinon la valeur
+/// révoquée persiste dans le `.env` jusqu'au prochain reconcile fortuit).
 #[instrument(skip(state))]
 async fn delete_apps_token(State(state): State<ApiState>) -> impl IntoResponse {
     if let Err(e) = state.app_claude_auth.clear_token().await {
         error!(error = %e, "apps-token: clear échoué");
         return err(StatusCode::INTERNAL_SERVER_ERROR, "échec du retrait du token");
     }
+    reconcile_claude_access_apps(&state).await;
     Json(state.app_claude_auth.status().await).into_response()
 }
 

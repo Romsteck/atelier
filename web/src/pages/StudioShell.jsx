@@ -24,7 +24,7 @@ import {
 import {
   controlApp, deleteApp, updateApp,
   getApp, getAppStatus, getAppLogs, getLogs,
-  getStudioTab, setStudioTab,
+  getStudioTab, setStudioTab, getAppsClaudeToken,
 } from '../api/client';
 import { statusDot } from '../lib/appsUi';
 import { pushRecentSlug } from '../lib/recentApps';
@@ -154,7 +154,20 @@ function SettingsTab({ app, onUpdate, onDelete }) {
   const [healthPath, setHealthPath] = useState(app?.health_path || '/api/health');
   const [claudeAccess, setClaudeAccess] = useState(!!app?.claude_access);
   const [saving, setSaving] = useState(false);
+  // Statut (masqué) du token Claude des apps : `true`/`false`/`null` (inconnu).
+  // Sert à avertir quand `claude_access` est activé alors qu'AUCUN token global
+  // n'est configuré → sinon l'app n'a aucun signal (le token est simplement omis
+  // du `.env`, cf. iss-fa13bdb2 symptôme b).
+  const [appsTokenConfigured, setAppsTokenConfigured] = useState(null);
   const { toast, showToast } = useToast();
+
+  useEffect(() => {
+    let alive = true;
+    getAppsClaudeToken()
+      .then(r => { if (alive) setAppsTokenConfigured(!!r.data?.configured); })
+      .catch(() => { if (alive) setAppsTokenConfigured(null); });
+    return () => { alive = false; };
+  }, []);
 
   // Ré-hydrate les champs quand la valeur de l'app change (pas seulement la
   // référence objet) : run_command peut être posé par l'agent (app.update) APRÈS
@@ -216,6 +229,15 @@ function SettingsTab({ app, onUpdate, onDelete }) {
             </span>
           </span>
         </label>
+        {claudeAccess && appsTokenConfigured === false && (
+          <div className="mt-2 flex items-start gap-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>
+              Aucun « Token Claude pour les apps » n&apos;est configuré à l&apos;échelle de la plateforme :
+              <code>CLAUDE_CODE_OAUTH_TOKEN</code> est <strong>omis</strong> du <code>.env</code> tant qu&apos;un token n&apos;est pas posé dans <span className="text-amber-200">Paramètres → Authentification</span>.
+            </span>
+          </div>
+        )}
       </div>
       <Button onClick={handleSave} disabled={saving} loading={saving} icon={Save} variant="primary" size="md">Sauvegarder</Button>
       <p className="text-xs text-gray-500">Les variables d&apos;environnement sont désormais dans l&apos;onglet <span className="text-gray-300">Variables</span>.</p>

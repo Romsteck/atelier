@@ -227,16 +227,9 @@ impl AppsContext {
         // (JS ou Python) reconnaît `CLAUDE_CODE_OAUTH_TOKEN` en top-level : l'app
         // n'a besoin d'aucun `CLAUDE_CONFIG_DIR` ni fichier partagé.
         if app.claude_access {
-            if let Some(tok) = self.app_claude_auth.token().await {
-                out.push(RenderedVar {
-                    key: "CLAUDE_CODE_OAUTH_TOKEN".into(),
-                    value: tok,
-                    secret: true,
-                    scope: EnvScope::Runtime,
-                    platform: true,
-                });
-            } else {
-                warn!(slug = %app.slug, "platform_env: claude_access activé mais aucun token apps configuré — CLAUDE_CODE_OAUTH_TOKEN omis");
+            match claude_token_var(self.app_claude_auth.token().await) {
+                Some(var) => out.push(var),
+                None => warn!(slug = %app.slug, "platform_env: claude_access activé mais aucun token apps configuré — CLAUDE_CODE_OAUTH_TOKEN omis"),
             }
         }
         out
@@ -619,6 +612,23 @@ fn build_env_sh_script(vars: &[(String, String)]) -> String {
         .collect()
 }
 
+/// Rendu du token Claude des apps (`CLAUDE_CODE_OAUTH_TOKEN`) en variable
+/// plateforme secrète runtime. `None` quand aucun token n'est configuré — le
+/// caller émet alors le warn d'observabilité et la clé est simplement omise.
+///
+/// Extrait de `platform_env` pour être testable sans store live : c'est
+/// exactement ce que `reconcile_app_env` écrit dans le `.env`, donc l'invariant
+/// dont dépend la propagation du token vers les apps opt-in `claude_access`.
+fn claude_token_var(token: Option<String>) -> Option<RenderedVar> {
+    token.map(|value| RenderedVar {
+        key: "CLAUDE_CODE_OAUTH_TOKEN".into(),
+        value,
+        secret: true,
+        scope: EnvScope::Runtime,
+        platform: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +669,21 @@ mod tests {
         let script = build_env_sh_script(&vars);
         assert!(script.contains("export VITE_A='plain'\n"));
         assert!(script.contains("'\\''quote'\\''"));
+    }
+
+    #[test]
+    fn claude_token_var_renders_when_configured_and_omits_when_absent() {
+        // Token configuré → variable plateforme SECRÈTE runtime (ce que reconcile
+        // écrit dans le `.env` des apps opt-in). C'est l'invariant sur lequel repose
+        // la propagation : sans lui, le token neuf n'atteint jamais l'app.
+        let v = claude_token_var(Some("oauth-tok".into())).expect("token → variable");
+        assert_eq!(v.key, "CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(v.value, "oauth-tok");
+        assert!(v.secret && v.platform);
+        assert!(v.scope.in_runtime());
+        // Aucun token → omission (le caller loggue le warn d'observabilité, et l'UI
+        // affiche l'avertissement « claude_access sans token »).
+        assert!(claude_token_var(None).is_none());
     }
 
     #[test]
