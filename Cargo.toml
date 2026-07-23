@@ -97,7 +97,17 @@ atelier-watcher = { path = "crates/atelier-watcher" }
 atelier-backup  = { path = "crates/atelier-backup" }
 atelier-pilot   = { path = "crates/atelier-pilot" }
 
+# Profil de deploy (make deploy → cargo build --release). Optimisé pour la
+# VITESSE DE BUILD, pas la perf runtime : Atelier est I/O-bound (proxy/PG/agents),
+# le gain de LTO+cgu=1 y est imperceptible. cgu=16 parallélise le codegen sur les
+# cœurs ; pas de LTO → plus de passe inter-modules rejouée à chaque link.
 [profile.release]
+codegen-units = 16
+strip = true
+
+# Soupape « perf max » pour les rares occasions (binaire à publier, chemin
+# CPU-bound éventuel) : cargo build --profile release-max. Non utilisé par le deploy.
+[profile.release-max]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
-strip = true
