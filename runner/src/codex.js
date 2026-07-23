@@ -54,6 +54,42 @@ const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 const MAX_TOOL_RESULT = 700;
 const SUMMARY_LEN = 80;
 
+// --- Faux mode plan (parité UX avec le gate de plan Claude) ----------------
+// Codex n'a ni ExitPlanMode ni canUseTool → on reproduit le flux par CONVENTION : en mode
+// plan, l'agent termine son message par la sentinelle puis le plan. Le shim scinde à la
+// sentinelle (prose avant = streamée ; plan après = capturé, non streamé, envoyé dans un
+// event `plan_review` que le front rend en carte « Implémenter / Renvoyer »). L'approbation
+// bascule la session en bypass et injecte un tour d'implémentation. Cf. runner.js (Claude).
+const PLAN_SENTINEL = '⟦PLAN_READY⟧';
+const PLAN_PREAMBLE = `# Mode plan (lecture seule — OBLIGATOIRE)
+
+Tu es en mode PLAN : sandbox en lecture seule, tu ne peux RIEN écrire ni exécuter de mutation. Explore le code et CONÇOIS une solution.
+
+Quand — et seulement quand — ton plan d'implémentation est complet et prêt à être approuvé par l'utilisateur, termine ton message ainsi :
+1. une courte phrase d'intro (ex. « Voici mon plan : ») ;
+2. sur une ligne SEULE, exactement : ${PLAN_SENTINEL}
+3. puis le plan COMPLET en markdown (le texte après la sentinelle).
+
+Tout ce qui suit la sentinelle est présenté à l'utilisateur comme un plan à approuver (bouton « Implémenter »). N'émets PAS la sentinelle tant que tu enquêtes encore ou si tu as une question — dans ce cas réponds normalement, sans sentinelle.
+
+---
+
+`;
+// Scinde un message d'agent à la sentinelle. `plan` = null si absente. Sûr en STREAMING :
+// tant que la sentinelle n'est pas complète, on retient en fin de `visible` tout suffixe qui
+// pourrait être un début de sentinelle (sinon « ⟦PL… » fuiterait dans la prose avant d'être
+// reconnu, puis un rollback non-préfixe salirait le rendu). Au message final la sentinelle
+// est forcément entière ou absente → pas de cas partiel.
+function splitPlan(text) {
+  const t = text || '';
+  const i = t.indexOf(PLAN_SENTINEL);
+  if (i >= 0) return { visible: t.slice(0, i), plan: t.slice(i + PLAN_SENTINEL.length).replace(/^\s*\n/, '').trimEnd() };
+  for (let k = Math.min(PLAN_SENTINEL.length - 1, t.length); k > 0; k -= 1) {
+    if (t.endsWith(PLAN_SENTINEL.slice(0, k))) return { visible: t.slice(0, t.length - k), plan: null };
+  }
+  return { visible: t, plan: null };
+}
+
 // Toolchain sur PATH (WHY) : identique à runner.js — le runner est spawné via
 // `sudo -H -u hr-studio` qui réinitialise l'env sur son secure_path, où `~/.cargo/bin`
 // et `~/.local/bin` sont absents. Le CLI codex hérite de ce process.env pour exécuter
@@ -313,7 +349,17 @@ function readTranscript(threadId) {
       diag('transcript : dernière ligne invalide ignorée (écriture interrompue)');
     }
   }
-  return items;
+  // Fold des décisions de plan : replie chaque `plan_decision` dans le `plan_review` de même
+  // request_id (decided/approved) et le retire → au reload d'une session morte, la carte
+  // s'affiche décidée (front lit `it.decided`), sans doublon. Cf. faux mode plan.
+  const byId = new Map();
+  for (const it of items) if (it?.type === 'plan_review' && it.request_id) byId.set(it.request_id, it);
+  return items.filter((it) => {
+    if (it?.type !== 'plan_decision') return true;
+    const pr = byId.get(it.request_id);
+    if (pr) { pr.decided = true; pr.approved = !!it.approved; }
+    return false; // l'enregistrement de décision ne se rend pas
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +386,9 @@ let liveFast = false;
 let codex = null;
 let thread = null;
 let turnActive = false;
+// Faux mode plan : plan capturé dans le tour courant (sentinelle) + compteur de request_id.
+let capturedPlan = null;
+let planSeq = 0;
 let currentAbort = null;
 let interruptRequested = false;
 
@@ -382,12 +431,30 @@ rl.on('line', (line) => {
         pushTurn({ text: msg.text == null ? '' : String(msg.text), images: msg.images });
       }
       break;
-    // Codex n'a ni AskUserQuestion ni ExitPlanMode : le contrat HTTP est commun aux deux
-    // moteurs, on accepte donc ces messages sans les traiter (jamais d'erreur au client).
+    // Codex n'a pas d'AskUserQuestion : `answer` reste sans objet.
     case 'answer':
-    case 'plan_decision':
       diag(`message '${msg.type}' ignoré : Codex n'a pas de dialogue interactif`);
       break;
+    // Décision sur un plan (faux mode plan) : approuver = bascule bypass + tour d'implémentation ;
+    // renvoyer = tour d'affinage, toujours en plan. Le fold reload (readTranscript) marque la
+    // carte décidée. Le run reste vivant (boucle nextTurn) → le POST plan_decision atterrit ici.
+    case 'plan_decision': {
+      const request_id = msg.request_id || null;
+      appendTranscript(sessionId, { type: 'plan_decision', request_id, approved: !!msg.approved });
+      if (msg.approved) {
+        // Le sandbox vit sur threadOptions, relu par le SDK à chaque tour (cf. set_mode) →
+        // muter suffit, pas de rebind. L'implémentation tourne au prochain tour en full-access.
+        applyMode('bypass');
+        emit({ t: 'permission_mode', mode: liveMode });
+        pushTurn({ text: "J'approuve ce plan. Implémente-le maintenant, entièrement." });
+      } else {
+        const why = (msg.feedback || '').trim();
+        pushTurn({ text: why
+          ? `Je n'approuve pas encore le plan. Retour : ${why}\nAffine-le (toujours en lecture seule) puis re-propose avec la sentinelle.`
+          : "Je n'approuve pas encore le plan. Affine-le (toujours en lecture seule) puis re-propose avec la sentinelle." });
+      }
+      break;
+    }
     // set_mode / set_model : `threadOptions` est relu par le SDK à CHAQUE tour → muter
     // l'objet suffit, mais l'effet est différé au tour suivant si un tour est en vol.
     case 'set_mode':
@@ -801,11 +868,16 @@ function handleItem(ev, item) {
   const phase = ev.type; // item.started | item.updated | item.completed
   switch (item.type) {
     case 'agent_message': {
-      const d = streamDelta(item.id, item.text);
+      // En mode plan : scinde à la sentinelle. Seule la prose AVANT est streamée/persistée ;
+      // le plan APRÈS est capturé et sortira en `plan_review` (turn.completed), jamais en prose.
+      const { visible, plan } = liveMode === 'plan' ? splitPlan(item.text) : { visible: item.text, plan: null };
+      if (plan != null) capturedPlan = plan;
+      const d = streamDelta(item.id, visible);
       if (d) emit({ t: 'assistant_delta', text: d });
       if (phase === 'item.completed') {
         streamed.delete(item.id);
-        if (item.text) appendTranscript(sessionId, { type: 'assistant', text: item.text });
+        const text = visible.trimEnd();
+        if (text) appendTranscript(sessionId, { type: 'assistant', text });
       }
       break;
     }
@@ -891,7 +963,9 @@ const IMG_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg'
 // Codex ne consomme les images que par CHEMIN de fichier ({type:'local_image'}), pas en
 // base64 inline : on matérialise chaque image dans un dossier temp, nettoyé après le tour.
 async function buildInput(turn) {
-  const text = turn.text || '';
+  // Préambule plan prependé à l'INPUT (pas à turn.text : le sidecar/le transcript utilisateur
+  // restent propres) uniquement en mode plan → l'agent connaît la convention de sentinelle.
+  const text = (liveMode === 'plan' ? PLAN_PREAMBLE : '') + (turn.text || '');
   const images = Array.isArray(turn.images) ? turn.images.filter((i) => i && i.media_type && i.data) : [];
   if (!images.length) return { input: text, cleanup: async () => {} };
   let dir = null;
@@ -957,6 +1031,7 @@ async function runTurn(turn) {
   turnActive = true;
   turnEnded = false;
   interruptRequested = false;
+  capturedPlan = null;
   currentAbort = new AbortController();
   emittedTools.clear();
   streamed.clear();
@@ -998,6 +1073,13 @@ async function runTurn(turn) {
         case 'turn.completed':
           usage = ev.usage || null;
           completed = true;
+          // Plan capturé (sentinelle en mode plan) → carte d'approbation côté front. Émis
+          // AVANT le result/turn_done : il devient le dernier item → `awaitingUser` s'active.
+          if (capturedPlan && liveMode === 'plan') {
+            const request_id = `plan-${(planSeq += 1)}`;
+            emit({ t: 'plan_review', request_id, plan: capturedPlan });
+            appendTranscript(sessionId, { type: 'plan_review', request_id, plan: capturedPlan });
+          }
           break;
         // Verdict TERMINAL du tour. Le générateur jette ensuite (`codex exec` sort en 1) :
         // le flag `turnEnded` garantit qu'on n'émet pas un deuxième couple result+turn_done.
