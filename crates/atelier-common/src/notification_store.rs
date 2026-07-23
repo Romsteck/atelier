@@ -11,8 +11,7 @@
 //! (`read_at = created_at`) — elles ne gonflent jamais le compteur non-lus ni
 //! le badge, elles se consultent dans le tiroir Notifications.
 //!
-//! Dégrade en no-op / vide quand le pool est absent (Postgres down au boot) —
-//! mirror de [`crate::issue_store::PlatformIssueStore`].
+//! Dégrade en no-op / vide quand le pool est absent (Postgres down au boot).
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value, json};

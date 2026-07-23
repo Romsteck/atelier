@@ -107,11 +107,8 @@ pub struct AppsContext {
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Broadcast channel for build progress events.
     pub app_build_tx: broadcast::Sender<AppBuildEvent>,
-    /// Remontées plateforme (`atelier_meta.platform_issues`) — purgées au delete
-    /// d'app pour ne pas laisser de remontées orphelines dans le triage dev.
-    pub issues: atelier_common::issue_store::PlatformIssueStore,
     /// Notifications plateforme (`atelier_meta.platform_notifications`) —
-    /// purgées au delete d'app, même raison que `issues`.
+    /// purgées au delete d'app pour ne pas laisser de notifs orphelines.
     pub notifications: atelier_common::notification_store::NotificationStore,
     /// Réglages par conversation agent (`atelier_meta.agent_conversation_meta`) —
     /// purgés au delete d'app (les sessions SDK de l'app disparaissent avec elle).
@@ -140,7 +137,6 @@ impl AppsContext {
             base_domain: state.context_generator.base_domain.clone(),
             build_locks: state.build_locks.clone(),
             app_build_tx: state.events.app_build.clone(),
-            issues: state.issues.clone(),
             notifications: state.notifications.clone(),
             conversation_meta: state.conversation_meta.clone(),
             app_claude_auth: state.app_claude_auth.clone(),
@@ -576,10 +572,10 @@ impl AppsContext {
                 warn!(slug = %slug, error = %e, "AppDelete: port release failed");
             }
         }
-        // 5. Purge des remontées plateforme de l'app (best-effort). WHY même quand
-        // keep_data : ce sont des frictions PLATEFORME, pas de la donnée d'app ;
-        // une app supprimée n'a plus de chat qui les contextualise.
-        self.issues.delete_by_slug(&slug).await;
+        // 5. Purge des notifications plateforme de l'app (best-effort). WHY même
+        // quand keep_data : une app supprimée n'a plus de chat qui les
+        // contextualise. (Les remontées ne sont plus stockées : elles sont
+        // triées à la volée en items backlog — plus rien à purger ici.)
         self.notifications.delete_by_slug(&slug).await;
         // Idem pour les réglages de conversations agent : les sessions SDK de
         // l'app disparaissent avec son workspace, leur meta n'a plus de sens.

@@ -99,19 +99,12 @@ async fn main() -> Result<()> {
     // entre PCs, comme les onglets. Degrades to no-op without the pool.
     let conversation_meta =
         atelier_common::conversation_meta::ConversationMetaStore::new(meta_pool.clone());
-    // EventBus créé AVANT les stores : le PlatformIssueStore et le
-    // NotificationStore embarquent le sender de leur canal (`issue` / `notify`,
-    // insert + publish indissociables).
+    // EventBus créé AVANT les stores : le NotificationStore embarque le sender
+    // de son canal `notify` (insert + publish indissociables).
     let events = Arc::new(atelier_common::events::EventBus::new());
-    // Remontées plateforme (CLAUDE_ISSUES) — store central dans atelier_meta.
-    // One-shot : rapatrie les anciens fichiers per-app `{slug}/src/CLAUDE_ISSUES.json`
-    // vers la base PUIS les supprime (la feature concerne des bugs plateforme,
-    // pas des apps → rien ne doit subsister au niveau projet). Idempotent.
-    let issues = atelier_common::issue_store::PlatformIssueStore::new(
-        meta_pool.clone(),
-        events.issue.clone(),
-    );
-    issues.backfill_from_files(&apps_src_root).await;
+    // Remontées plateforme : plus de store d'issues (2026-07-23). Une remontée
+    // (`issue_report` / POST /api/apps/{slug}/issues) est enfilée pour triage par
+    // le Pilote (`pilot.report_issue`) et devient un item de backlog planifié.
     // Notifications plateforme (notify_user + journal d'actions des agents).
     let notifications = atelier_common::notification_store::NotificationStore::new(
         meta_pool.clone(),
@@ -242,16 +235,37 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    // Instance headless du chef de projet pour le triage des remontées : réutilise
+    // scan.js (lecture seule + MCP scope pilot) mais en user romain + config dir du
+    // PM @pilot + cwd source Atelier. Modèle du Pilote, effort/timeout dédiés.
+    let pilot_atelier_user =
+        std::env::var("ATELIER_PILOT_ATELIER_USER").unwrap_or_else(|_| "romain".into());
+    let pilot_claude_config_dir = std::env::var("ATELIER_PILOT_CLAUDE_CONFIG_DIR")
+        .unwrap_or_else(|_| "/var/lib/atelier/pilot/.claude".into());
+    let triage_engine = ClaudeWorkerEngine {
+        node_bin: std::env::var("ATELIER_AGENT_NODE_BIN").unwrap_or_else(|_| "/usr/bin/node".into()),
+        script: PathBuf::from(std::env::var("ATELIER_SCAN_RUNNER").unwrap_or_else(|_| "/opt/atelier/runner/src/scan.js".into())),
+        run_as_user: pilot_atelier_user.clone(),
+        config_dir: PathBuf::from(&pilot_claude_config_dir),
+        mcp_endpoint: Some(format!("{mcp_endpoint}?scope=pilot")),
+        mcp_token: std::env::var("MCP_TOKEN").ok(),
+        model: pilot_engine.model.clone(),
+        effort: std::env::var("ATELIER_PILOT_TRIAGE_EFFORT").unwrap_or_else(|_| "high".into()),
+        timeout: Duration::from_secs(
+            std::env::var("ATELIER_PILOT_TRIAGE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600u64),
+        ),
+    };
     let pilot = PilotService::start(meta_pool.clone(), PilotConfig {
         apps_src_root: apps_src_root.clone(),
         atelier_root: atelier_source_root.clone(),
         app_user: std::env::var("ATELIER_AGENT_USER").unwrap_or_else(|_| "hr-studio".into()),
-        atelier_user: std::env::var("ATELIER_PILOT_ATELIER_USER").unwrap_or_else(|_| "romain".into()),
+        atelier_user: pilot_atelier_user,
         model: pilot_engine.model.clone(),
         effort: pilot_engine.effort.clone(),
         timeout: pilot_engine.timeout,
         engine: pilot_engine,
         codex_engine: codex_worker,
+        triage_engine,
     }).await;
 
     // Câblage d'auth SDK pour le watcher (closures plutôt qu'une dép du watcher vers
@@ -362,7 +376,6 @@ async fn main() -> Result<()> {
         task_store,
         open_tabs,
         conversation_meta,
-        issues,
         notifications,
         agent_auth,
         app_claude_auth,

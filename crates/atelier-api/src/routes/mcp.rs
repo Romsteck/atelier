@@ -85,9 +85,8 @@ pub struct McpState {
     /// Notifications plateforme — tools `notify_user` (kind=notice) + journal
     /// automatique des actions des agents (kind=action, cf. `journal_agent_action`).
     pub notifications: atelier_common::notification_store::NotificationStore,
-    /// Remontées plateforme — tool `issue_report` (même store que POST /issues).
-    pub issues: atelier_common::issue_store::PlatformIssueStore,
     /// Project backlog tools used by PM assistants and autonomous workers.
+    /// `issue_report` route désormais vers `pilot.report_issue` (triage → item).
     pub pilot: atelier_pilot::PilotService,
 }
 
@@ -114,7 +113,6 @@ impl McpState {
             docs_dir: state.docs_dir.clone(),
             surveillance: state.surveillance.clone(),
             notifications: state.notifications.clone(),
-            issues: state.issues.clone(),
             pilot: state.pilot.clone(),
         })
     }
@@ -264,15 +262,13 @@ fn tool_definitions() -> Value {
 
 fn tool_definitions_pilot() -> Value {
     json!([
-        { "name":"backlog_add", "description":"Create and score a project backlog item. In a project-scoped assistant, scope is injected automatically.", "inputSchema":{"type":"object","properties":{"scope":{"type":"string"},"title":{"type":"string"},"request":{"type":"string"},"description":{"type":"string"},"plan":{"type":"string"},"kind":{"type":"string","enum":["feature","bug","improvement","finding_fix"]},"priority":{"type":"string","enum":["critical","high","medium","low"]},"severity":{"type":"string","enum":["critical","high","medium","low"]},"effort":{"type":"string","enum":["xs","s","m","l","xl"]},"finding_id":{"type":"integer"},"needs_user":{"type":"boolean"},"reason":{"type":"string"},"questions":{"type":"array","items":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}},"required":["title","kind","priority","severity","effort"]}},
-        { "name":"backlog_update", "description":"Update scoring, plan, lane or block an item with explicit questions for the user.", "inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"request":{"type":"string"},"description":{"type":"string"},"plan":{"type":"string"},"kind":{"type":"string"},"priority":{"type":"string"},"severity":{"type":"string"},"effort":{"type":"string"},"lane":{"type":"string"},"engine":{"type":"string"},"needs_user":{"type":"boolean"},"reason":{"type":"string"},"questions":{"type":"array","items":{"type":"object","properties":{"q":{"type":"string"},"answer":{"type":"string"}},"required":["q"]}}},"required":["id"]}},
+        { "name":"backlog_add", "description":"Create and score a project backlog item. In a project-scoped assistant, scope is injected automatically. When needs_user, phrase each question as a QCM: a short `q` plus 2-4 mutually-exclusive `options` (recommended one first) so the user answers in ONE click instead of typing.", "inputSchema":{"type":"object","properties":{"scope":{"type":"string"},"title":{"type":"string"},"request":{"type":"string"},"description":{"type":"string"},"plan":{"type":"string"},"kind":{"type":"string","enum":["feature","bug","improvement","finding_fix"]},"priority":{"type":"string","enum":["critical","high","medium","low"]},"severity":{"type":"string","enum":["critical","high","medium","low"]},"effort":{"type":"string","enum":["xs","s","m","l","xl"]},"finding_id":{"type":"integer"},"needs_user":{"type":"boolean"},"reason":{"type":"string"},"questions":{"type":"array","items":{"type":"object","properties":{"q":{"type":"string"},"options":{"type":"array","items":{"type":"string"},"description":"2-4 clickable choices, recommended first"}},"required":["q"]}}},"required":["title","kind","priority","severity","effort"]}},
+        { "name":"backlog_update", "description":"Update scoring, plan, lane or block an item with explicit questions for the user. Questions are QCM: short `q` + 2-4 mutually-exclusive `options` (recommended first) for one-click answers.", "inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"request":{"type":"string"},"description":{"type":"string"},"plan":{"type":"string"},"kind":{"type":"string"},"priority":{"type":"string"},"severity":{"type":"string"},"effort":{"type":"string"},"lane":{"type":"string"},"engine":{"type":"string"},"needs_user":{"type":"boolean"},"reason":{"type":"string"},"questions":{"type":"array","items":{"type":"object","properties":{"q":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"answer":{"type":"string"}},"required":["q"]}}},"required":["id"]}},
         { "name":"backlog_list", "description":"List backlog items, optionally filtered by scope and lane.", "inputSchema":{"type":"object","properties":{"scope":{"type":"string"},"lane":{"type":"string"}}}},
-        { "name":"backlog_get", "description":"Get one backlog item including its plan and pending questions.", "inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}},
-        // Lecture des remontées plateforme (platform_issues) : permet au CP de trier
-        // les frictions remontées par les agents et d'en faire des items backlog
-        // scope=atelier. En ?project= le slug est injecté (une app ne voit que les
-        // siennes) ; en ?scope=pilot tous les slugs sont visibles.
-        { "name":"issues_list", "description":"List platform issue reports (remontées) — read-only. Filter by status (default open; 'all' for every status), kind (error|limitation|suggestion) and slug. Use it to triage frictions into backlog items (scope 'atelier').", "inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["open","resolved","dismissed","all"],"default":"open"},"kind":{"type":"string","enum":["error","limitation","suggestion"]},"slug":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}}}}
+        { "name":"backlog_get", "description":"Get one backlog item including its plan and pending questions.", "inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}
+        // NB : `issues_list` retiré (2026-07-23) — les remontées plateforme ne
+        // sont plus une liste à trier : chaque `issue_report` est triée par une
+        // instance headless du chef de projet et devient un item de backlog.
     ])
 }
 
@@ -562,11 +558,13 @@ fn is_surveillance_tool(name: &str) -> bool {
 }
 
 fn is_pilot_pm_tool(name: &str) -> bool {
+    // NB : ni `issues_list` ni `issue_report` (2026-07-23). Le CP ne lit plus de
+    // remontées (elles arrivent pré-triées en items backlog) et n'en émet pas —
+    // couper `issue_report` ici casse la boucle triage→triage.
     matches!(name,
         "backlog_add" | "backlog_update" | "backlog_list" | "backlog_get"
-        | "issues_list"
         | "findings_list" | "runs_list" | "pm_query" | "scan_get" | "memory_get"
-        | "notify_user" | "issue_report"
+        | "notify_user"
         | "status" | "app.status" | "app.get" | "app.list"
         | "db_tables" | "db_schema" | "db_overview" | "db_count_rows" | "db_get_schema"
         | "db.tables" | "db.list_tables" | "db.describe" | "db.describe_table" | "db.overview" | "db.count_rows" | "db.get_schema"
@@ -797,11 +795,6 @@ async fn handle_tools_call(
         if tool_name.starts_with("backlog_") {
             arguments["scope"] = json!(slug);
         }
-        // Même ownership pour les remontées : en ?project= une app ne lit que
-        // les siennes (le CP global en ?scope=pilot voit tout).
-        if tool_name == "issues_list" {
-            arguments["slug"] = json!(slug);
-        }
     }
     if scope == McpScope::PilotWorker {
         arguments["_pilot_worker"] = json!(true);
@@ -938,7 +931,6 @@ async fn handle_tools_call(
         "backlog_add" => tool_backlog_add(id, &arguments, state).await,
         "backlog_update" => tool_backlog_update(id, &arguments, state).await,
         "backlog_list" => tool_backlog_list(id, &arguments, state).await,
-        "issues_list" => tool_issues_list(id, &arguments, state).await,
         "backlog_get" => tool_backlog_get(id, &arguments, state).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
@@ -1672,60 +1664,32 @@ async fn tool_notify_user(id: Value, args: &Value, state: &McpState) -> Value {
     }
 }
 
-/// `issue_report` — remontée d'une friction PLATEFORME (même store que
-/// `POST /api/apps/{slug}/issues`, que la skill historique appelait en curl).
+/// `issue_report` — remontée d'une friction PLATEFORME. Enfile désormais un
+/// triage (`pilot.report_issue`) : une instance headless du chef de projet
+/// investigue et en fait un item de backlog planifié. Même surface qu'avant pour
+/// l'agent déclarant (nom, args) ; réponse = `{queued, triage_id}`. Le slug est
+/// injecté en `?project=` (surveillance : slug explicite).
 async fn tool_issue_report(id: Value, args: &Value, state: &McpState) -> Value {
     let slug = req_str!(args, "slug", id);
     let title = req_str!(args, "title", id);
     if title.trim().is_empty() {
         return tool_error(id, "title requis (non vide)");
     }
-    let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("error");
-    let area = args.get("area").and_then(|v| v.as_str()).unwrap_or("other");
-    let severity = args
-        .get("severity")
-        .and_then(|v| v.as_str())
-        .unwrap_or("medium");
-    let context = args.get("context").and_then(|v| v.as_str()).unwrap_or("");
-    let tried = args.get("tried").and_then(|v| v.as_str()).unwrap_or("");
-    match state
-        .issues
-        .insert(slug, kind, area, severity, title.trim(), context, tried)
-        .await
-    {
-        Ok(entry) => {
-            info!(slug, kind, area, severity, "AppIssueReport (mcp)");
-            tool_success(id, entry)
+    let payload = atelier_pilot::TriagePayload {
+        title: title.trim().to_string(),
+        kind: args.get("kind").and_then(|v| v.as_str()).unwrap_or("error").to_string(),
+        area: args.get("area").and_then(|v| v.as_str()).unwrap_or("other").to_string(),
+        severity: args.get("severity").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+        context: args.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        tried: args.get("tried").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    };
+    match state.pilot.report_issue(slug, payload).await {
+        Ok(triage_id) => {
+            info!(slug, triage_id, "issue_report enqueued for triage (mcp)");
+            tool_success(id, json!({ "queued": true, "triage_id": triage_id }))
         }
         Err(e) => tool_error(id, &format!("issue_report failed: {e}")),
     }
-}
-
-/// `issues_list` — lecture des remontées plateforme (pendant read-only
-/// d'`issue_report`, même store). Le CP global (scope pilot) trie les
-/// frictions et les convertit en items backlog ; en `?project=` le slug est
-/// injecté en amont (une app ne voit que ses propres remontées).
-async fn tool_issues_list(id: Value, args: &Value, state: &McpState) -> Value {
-    // `all` explicite → pas de filtre (le défaut reste `open` : c'est le
-    // besoin du triage, et ça borne la réponse).
-    let status = match args.get("status").and_then(Value::as_str) {
-        Some("all") => None,
-        Some(s) => Some(s),
-        None => Some("open"),
-    };
-    let slug = args.get("slug").and_then(Value::as_str);
-    let kind = args.get("kind").and_then(Value::as_str);
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(100)
-        .clamp(1, 200) as usize;
-    let mut items = state.issues.list(status, slug).await;
-    if let Some(k) = kind {
-        items.retain(|it| it.get("kind").and_then(Value::as_str) == Some(k));
-    }
-    items.truncate(limit);
-    tool_success(id, json!({ "count": items.len(), "issues": items }))
 }
 
 /// `ship` — livraison prod (stop + restart, artefacts déjà buildés par
@@ -3143,11 +3107,12 @@ mod tests {
     fn pilot_scope_permissions_match_the_safety_contract() {
         assert!(McpScope::Pilot.permits("backlog_add"));
         assert!(McpScope::Pilot.permits("findings_list"));
-        assert!(McpScope::Pilot.permits("issues_list"));
         assert!(!McpScope::Pilot.permits("ship"));
         assert!(!McpScope::Pilot.permits("db_execute"));
-        // Le scan-agent de surveillance n'a pas à lire les remontées.
-        assert!(!McpScope::Surveillance.permits("issues_list"));
+        // Anti-récursion : ni le CP ni l'instance de triage (tous deux ?scope=pilot)
+        // ne peuvent émettre/lire des remontées.
+        assert!(!McpScope::Pilot.permits("issues_list"));
+        assert!(!McpScope::Pilot.permits("issue_report"));
 
         assert!(McpScope::PilotWorker.permits("ship"));
         assert!(McpScope::PilotWorker.permits("app.build"));

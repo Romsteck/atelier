@@ -16,6 +16,7 @@ pub mod gitops;
 pub mod runs;
 pub mod schedule;
 pub mod service;
+pub mod triage;
 
 pub use backlog::{BacklogItem, BacklogPatch, BacklogStore, NewBacklogItem, Question};
 pub use engine::{ClaudeWorkerEngine, CodexWorkerEngine, EnginePolicy, WorkerEvent, WorkerExec};
@@ -24,6 +25,7 @@ pub use schedule::{NightSnapshot, PilotSchedule, ScheduleStore};
 pub use service::{
     AtelierWorkerReport, PilotConfig, PilotEvent, PilotHooks, PilotService, TranscriptLine,
 };
+pub use triage::{TriagePayload, TriageStore, TriageSummary};
 
 pub const INIT_SQL: &str = include_str!("../migrations/001_init.sql");
 

@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import useWebSocket from '../hooks/useWebSocket';
 import {
   cancelPilotNight, cancelPilotRun, createPilotItem, deletePilotItem, dequeuePilotItem,
-  getPilotBacklog, getPilotNight, getPilotSchedule, getPilotState, movePilotItem,
+  getPilotBacklog, getPilotNight, getPilotSchedule, getPilotState, getPilotTriage, movePilotItem,
   patchPilotItem, runPilotItem, setPilotSchedule, startPilotNight, unwrapApi,
 } from '../api/client';
 import { setBadgeSlice } from '../lib/notify';
@@ -19,14 +19,16 @@ export function PilotProvider({ children }) {
   // au fetch + événements live `platform:maintenance` — consommé par
   // MaintenanceOverlay (bandeau de phase + overlay d'indisponibilité).
   const [maintenance, setMaintenance] = useState(null);
+  // Triage des remontées en cours (bandeau « le chef de projet trie N… »).
+  const [triage, setTriage] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const refetch = useCallback(async () => {
     try {
-      const [a, s, sc, n] = await Promise.all([getPilotBacklog(), getPilotState(), getPilotSchedule(), getPilotNight()]);
+      const [a, s, sc, n, tr] = await Promise.all([getPilotBacklog(), getPilotState(), getPilotSchedule(), getPilotNight(), getPilotTriage()]);
       const list = unwrapApi(a); if (Array.isArray(list)) setItems(list);
       const st = unwrapApi(s);
-      setState(st); setSchedule(unwrapApi(sc)); setNight(unwrapApi(n));
+      setState(st); setSchedule(unwrapApi(sc)); setNight(unwrapApi(n)); setTriage(unwrapApi(tr));
       // Champ serveur nul hors maintenance : on purge un snapshot ACTIF périmé
       // (fin manquée pendant une coupure WS) mais on préserve un verdict
       // terminal (active:false + outcome) que l'overlay est en train d'afficher.
@@ -38,6 +40,7 @@ export function PilotProvider({ children }) {
 
   const { epoch, status: wsStatus } = useWebSocket({
     'platform:maintenance': (snap) => { if (snap) setMaintenance(snap); },
+    'pilot:triage': (snap) => setTriage(snap),
     'pilot:backlog': (ev) => {
       if (!ev) return;
       if (ev.action === 'deleted') setItems((v) => v.filter((x) => x.id !== ev.id));
@@ -53,6 +56,16 @@ export function PilotProvider({ children }) {
   });
   const prevEpoch = useRef(0);
   useEffect(() => { if (epoch && epoch !== prevEpoch.current) { prevEpoch.current = epoch; refetch(); } }, [epoch, refetch]);
+  // Filet anti-obsolescence : au retour sur l'onglet (focus / visibilité), on
+  // resynchronise le backlog. Le WS livre déjà les mutations en direct, mais si
+  // le socket a été gelé/coupé pendant que l'onglet était en arrière-plan (ex.
+  // un restart d'Atelier pendant un run autonome), on rattrape sans F5 manuel.
+  useEffect(() => {
+    const resync = () => { if (document.visibilityState === 'visible') refetch(); };
+    document.addEventListener('visibilitychange', resync);
+    window.addEventListener('focus', resync);
+    return () => { document.removeEventListener('visibilitychange', resync); window.removeEventListener('focus', resync); };
+  }, [refetch]);
 
   // NOTE : la capture directe (quick-add) est retirée de l'UI — les items
   // naissent via le CP (MCP backlog_add). L'endpoint HTTP POST reste serveur.
@@ -96,7 +109,7 @@ export function PilotProvider({ children }) {
   }), [items]);
   useEffect(() => { setBadgeSlice('pilot', counts.attention); }, [counts.attention]);
   useEffect(() => () => setBadgeSlice('pilot', 0), []);
-  const value = useMemo(() => ({ items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, dequeue, cancelRun, saveSchedule, launchNight, stopNight, refetch }), [items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, dequeue, cancelRun, saveSchedule, launchNight, stopNight, refetch]);
+  const value = useMemo(() => ({ items, state, schedule, night, transcripts, maintenance, triage, wsStatus, loading, counts, capture, patch, move, remove, run, dequeue, cancelRun, saveSchedule, launchNight, stopNight, refetch }), [items, state, schedule, night, transcripts, maintenance, triage, wsStatus, loading, counts, capture, patch, move, remove, run, dequeue, cancelRun, saveSchedule, launchNight, stopNight, refetch]);
   return <PilotContext.Provider value={value}>{children}</PilotContext.Provider>;
 }
 

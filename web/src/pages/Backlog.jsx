@@ -91,6 +91,23 @@ function NightLivePanel({ night, showToast }) {
   );
 }
 
+// Bandeau léger « le chef de projet trie N remontée(s) » : entre l'arrivée d'une
+// remontée (issue_report) et l'apparition de l'item planifié, le triage tourne
+// en arrière-plan (instance headless) — ce bandeau est le seul signal visible.
+// Alimenté par le snapshot `pilot:triage` (WS + fetch initial).
+function TriageBanner() {
+  const { triage } = usePilot();
+  if (!triage || !triage.active) return null;
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-800 dark:text-blue-200">
+      <Bot className="w-4 h-4 shrink-0" />
+      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-blue-600 dark:text-blue-400" />
+      <span className="shrink-0">Le chef de projet trie <span className="font-medium">{triage.active}</span> remontée{triage.active > 1 ? 's' : ''} plateforme…</span>
+      {triage.running_title && <span className="min-w-0 truncate text-blue-700 dark:text-blue-300">· {triage.running_slug ? `${triage.running_slug} — ` : ''}{triage.running_title}</span>}
+    </div>
+  );
+}
+
 // Bande « État des dépôts » : agrège le git status des 8 dépôts (apps + Atelier)
 // — fichiers en attente de commit, commits en attente de push. Repliable, live
 // via `source:changed` (debounce) + refetch après chaque event backlog (les
@@ -276,6 +293,46 @@ function confirmExecute(confirm, item) {
   });
 }
 
+// Une question d'un run incertain, rendue en QCM cliquable (comme
+// AskUserQuestion) quand l'agent a fourni des `options` : un clic suffit, pas
+// besoin de deviner les possibilités. « Autre… » révèle une réponse libre ;
+// sans options (legacy / fallback) on retombe sur le champ texte.
+function QuestionField({ q, onAnswer }) {
+  const hasOptions = (q.options || []).length > 0;
+  const [custom, setCustom] = useState(!hasOptions || (!!q.answer && !q.options.includes(q.answer)));
+  return (
+    <div className="text-xs text-gray-300 space-y-1.5">
+      <div className="font-medium text-gray-200">{q.q}</div>
+      {hasOptions && (
+        <div className="flex flex-wrap gap-1.5">
+          {q.options.map((opt) => {
+            const sel = !custom && q.answer === opt;
+            return (
+              <button key={opt} type="button" onClick={() => { setCustom(false); onAnswer(opt); }}
+                className={`px-2.5 py-1.5 rounded-md border text-left leading-snug transition ${sel
+                  ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                  : 'border-gray-700 hover:border-gray-500 text-gray-300'}`}>
+                {opt}
+              </button>
+            );
+          })}
+          <button type="button" onClick={() => { setCustom(true); onAnswer(''); }}
+            className={`px-2.5 py-1.5 rounded-md border transition ${custom
+              ? 'border-blue-500/50 bg-blue-500/10 text-blue-700 dark:text-blue-300'
+              : 'border-gray-700 hover:border-gray-500 text-gray-400'}`}>
+            Autre…
+          </button>
+        </div>
+      )}
+      {(custom || !hasOptions) && (
+        <textarea value={q.answer || ''} onChange={(e) => onAnswer(e.target.value)} rows={2}
+          placeholder={hasOptions ? 'Ta réponse libre' : 'Ta réponse (optionnelle)'}
+          className="w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" />
+      )}
+    </div>
+  );
+}
+
 // Champ markdown en LECTURE SEULE : les attributs d'un item sont la propriété
 // du chef de projet — toute reformulation passe par une conversation avec lui.
 function MarkdownBlock({ label, value, className = '' }) {
@@ -297,11 +354,21 @@ function ItemDrawer({ item, onClose, showToast }) {
   const [selectedRun, setSelectedRun] = useState(null);
   const [persistedTranscript, setPersistedTranscript] = useState([]);
   const [note, setNote] = useState('');
+  // Réponse libre globale masquée par défaut : l'expérience par défaut est le
+  // QCM (un clic), la saisie libre reste un repli explicite (mode déprécié).
+  const [showFreeNote, setShowFreeNote] = useState(false);
   // Animation d'entrée : le panneau part hors-écran à droite puis glisse en place.
   const [shown, setShown] = useState(false);
   useEffect(() => { const t = requestAnimationFrame(() => setShown(true)); return () => cancelAnimationFrame(t); }, []);
   const close = () => { setShown(false); setTimeout(onClose, 200); };
-  useEffect(() => { setDraft(item); getPilotItemRuns(item.id).then((r) => setRuns(unwrapApi(r) || [])).catch(() => setRuns([])); }, [item]);
+  // Reset du brouillon de réponses UNIQUEMENT au changement d'item (identité) :
+  // une mise à jour WS du même item (fréquente pendant un run) ne doit pas
+  // effacer une réponse en cours de frappe. Le contenu live (request/desc/plan)
+  // reste à jour car il est lu depuis `item`, pas depuis `draft`.
+  useEffect(() => { setDraft(item); }, [item.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Historique des runs : rafraîchi au changement d'item ET quand son état de run
+  // évolue (nouvelle tentative, settle) — l'activité ouverte reste vivante.
+  useEffect(() => { getPilotItemRuns(item.id).then((r) => setRuns(unwrapApi(r) || [])).catch(() => setRuns([])); }, [item.id, item.updated_at, item.last_run_id]);
   const active = ['queued', 'running'].includes(item.exec_status);
   // Vue live du run en cours : hydrate le ring (lignes émises avant l'ouverture)
   // puis fusionne le flux WS. `engineHint` = engine du run avant l'event `system`.
@@ -359,26 +426,52 @@ function ItemDrawer({ item, onClose, showToast }) {
     ['type', item.kind, 'bg-gray-800 text-gray-400'],
     ['moteur', ENGINE_CHOICE[item.engine] || item.engine, 'bg-blue-500/15 text-blue-700 dark:text-blue-300'],
   ];
+  // Panneau « Questions — décision requise » : rendu en colonne latérale gauche
+  // (comme la conversation live) pour les items needs_user, avec repli inline en
+  // mobile. Un item needs_user n'est jamais running → les deux colonnes gauches
+  // (live / questions) sont mutuellement exclusives.
+  const questionsPanel = (
+    <section className="rounded-lg border border-amber-500/35 bg-amber-500/5 p-3 space-y-3">
+      <div className="text-sm font-medium text-amber-700 dark:text-amber-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4" />Questions — décision requise</div>
+      <p className="text-xs text-gray-400">{item.needs_user_reason}</p>
+      {(draft.questions || []).map((q, i) => <QuestionField key={i} q={q} onAnswer={(answer) => { const questions = [...(draft.questions || [])]; questions[i] = { ...q, answer }; setDraft({ ...draft, questions }); }} />)}
+      {(showFreeNote || note)
+        ? <label className="block text-xs text-gray-300">Réponse libre globale<textarea autoFocus={showFreeNote && !note} value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Ex. « pars sur l’option A, plus simple »" className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" /></label>
+        : <button type="button" onClick={() => setShowFreeNote(true)} className="text-[11px] text-gray-500 hover:text-gray-300">＋ Ajouter une réponse libre</button>}
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button variant="success" size="sm" icon={CirclePlay} onClick={() => submitAnswers(true)}>Répondre &amp; relancer</Button>
+        <Button variant="neutral" size="sm" onClick={() => submitAnswers(false)}>Répondre (planifier la nuit)</Button>
+      </div>
+      <p className="text-[10px] text-gray-500">Clique une option par question. « Relancer » remet l’agent au travail immédiatement avec tes réponses.</p>
+    </section>
+  );
+  // Colonne latérale gauche : conversation live (run en cours) OU questions
+  // (needs_user). Élargit le drawer quand elle est présente.
+  const hasLeftColumn = Boolean(liveRunId) || item.needs_user;
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <div className={`absolute inset-0 bg-black/55 transition-opacity duration-200 ${shown ? 'opacity-100' : 'opacity-0'}`} onMouseDown={close} />
-      <aside className={`relative w-full ${liveRunId ? 'max-w-7xl' : 'max-w-5xl'} h-full bg-gray-900 border-l border-gray-700 flex flex-col shadow-2xl transition-transform duration-200 ease-out will-change-transform ${shown ? 'translate-x-0' : 'translate-x-full'}`}>
+      <aside className={`relative w-full ${hasLeftColumn ? 'max-w-7xl' : 'max-w-5xl'} h-full bg-gray-900 border-l border-gray-700 flex flex-col shadow-2xl transition-transform duration-200 ease-out will-change-transform ${shown ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className="h-12 px-4 border-b border-gray-700 flex items-center gap-2 shrink-0">
           <ClipboardList className="w-4 h-4 text-blue-600 dark:text-blue-400" /><span className="font-medium text-sm flex-1 truncate">Item #{item.id} · {item.title}</span>
           {ENGINE_LABEL[item.last_engine] && <Chip className="bg-blue-500/15 text-blue-700 dark:text-blue-300" title="Moteur du dernier run">{ENGINE_LABEL[item.last_engine]}</Chip>}
           <button onClick={close} className="p-1.5 text-gray-400 hover:text-white"><X className="w-4 h-4" /></button>
         </div>
         <div className="flex-1 min-h-0 flex">
-          {/* Conversation live en colonne latérale (lg+) : elle défile sur toute
-              la hauteur sans écraser le contenu de l'item. */}
-          {liveRunId && <div className="hidden lg:block w-[360px] shrink-0 border-r border-gray-700 p-3 min-h-0">
-            <PilotRunLive fill lines={liveLines} engineHint={liveEngineHint} onStop={stop} statusLine={maintenanceStatus} />
+          {/* Colonne latérale gauche (lg+) : conversation live OU questions
+              (needs_user) — défile sur toute la hauteur sans écraser l'item. */}
+          {hasLeftColumn && <div className="hidden lg:block w-[380px] shrink-0 border-r border-gray-700 p-3 min-h-0 overflow-y-auto">
+            {liveRunId
+              ? <PilotRunLive fill lines={liveLines} engineHint={liveEngineHint} onStop={stop} statusLine={maintenanceStatus} />
+              : questionsPanel}
           </div>}
           <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2">
             {/* Colonne définition : attributs (lecture seule — propriété du CP),
-                request/description, questions, historique. */}
+                request/description, historique. */}
             <div className="min-h-0 overflow-y-auto p-4 space-y-4 lg:border-r border-gray-800">
+              {/* Repli mobile de la colonne latérale (pas de colonne dédiée < lg). */}
               {liveRunId && <div className="lg:hidden"><PilotRunLive lines={liveLines} engineHint={liveEngineHint} onStop={stop} statusLine={maintenanceStatus} /></div>}
+              {item.needs_user && <div className="lg:hidden">{questionsPanel}</div>}
               <div>
                 <div className="flex flex-wrap gap-1.5">
                   {metaChips.map(([label, value, cls]) => <Chip key={label} title={label} className={cls}>{value}</Chip>)}
@@ -387,17 +480,6 @@ function ItemDrawer({ item, onClose, showToast }) {
               </div>
               <MarkdownBlock label="Demande" value={item.request} />
               <MarkdownBlock label="Description" value={item.description} />
-              {item.needs_user && <section className="rounded-lg border border-amber-500/35 bg-amber-500/5 p-3 space-y-3">
-                <div className="text-sm font-medium text-amber-700 dark:text-amber-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4" />Questions — décision requise</div>
-                <p className="text-xs text-gray-400">{item.needs_user_reason}</p>
-                {(draft.questions || []).map((q, i) => <label key={i} className="block text-xs text-gray-300">{q.q}<textarea value={q.answer || ''} onChange={(e) => { const questions = [...draft.questions]; questions[i] = { ...q, answer: e.target.value }; setDraft({ ...draft, questions }); }} rows={2} placeholder="Ta réponse (optionnelle)" className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" /></label>)}
-                <label className="block text-xs text-gray-300">Consigne libre / réponse globale<textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Ex. « pars sur l’option A, plus simple » — tu peux répondre ici sans remplir les champs ci-dessus" className="mt-1 w-full bg-gray-950 border border-gray-700 rounded-sm px-2 py-1.5" /></label>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Button variant="success" size="sm" icon={CirclePlay} onClick={() => submitAnswers(true)}>Répondre &amp; relancer</Button>
-                  <Button variant="neutral" size="sm" onClick={() => submitAnswers(false)}>Répondre (planifier la nuit)</Button>
-                </div>
-                <p className="text-[10px] text-gray-500">Réponds à ce qui te parle — un seul champ suffit. « Relancer » remet l’agent au travail immédiatement avec tes réponses.</p>
-              </section>}
               {item.exec_status === 'blocked' && !item.needs_user && <section className="rounded-lg border border-red-500/35 bg-red-500/5 p-3"><div className="text-sm text-red-700 dark:text-red-300 font-medium">Bloqué — {item.attempts || 3} échec{(item.attempts || 3) > 1 ? 's' : ''}</div><p className="text-xs text-gray-400 mt-1">{item.needs_user_reason}</p></section>}
               <section><h3 className="text-xs uppercase text-gray-500 mb-2">Historique des runs</h3>{runs.length === 0 ? <p className="text-xs text-gray-600">Aucun run.</p> : <div className="space-y-1">{runs.map((r) => <button key={r.id} onClick={() => showRun(r)} className={`w-full text-left rounded-sm border px-2 py-1.5 text-xs ${selectedRun === r.id ? 'border-blue-500/50 bg-blue-500/10' : 'border-gray-800 hover:bg-gray-800/50'}`}><span className={r.status === 'success' ? 'text-emerald-600 dark:text-emerald-400' : r.status === 'running' ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'}>{r.status}</span>{r.attempt > 1 ? ` · tentative ${r.attempt}/3` : ''} · {r.phase}{r.failure_reason ? ` · ${r.failure_reason}` : ''}{ENGINE_LABEL[r.engine] ? ` · ${ENGINE_LABEL[r.engine]}` : ''}</button>)}</div>}{selectedRun && (transcript.length > 0
                 ? <pre className="mt-2 max-h-64 overflow-auto bg-gray-950 border border-gray-800 rounded-sm p-2 text-[10px] whitespace-pre-wrap text-gray-400">{transcript.map((l) => l.line).join('\n')}</pre>
@@ -536,6 +618,7 @@ export default function Backlog({ lockedScope = null, embedded = false }) {
       {!embedded && <PageHeader title="Pilote · Backlog autonome" icon={Bot}><SchedulePanel showToast={showToast} /></PageHeader>}
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
         {nightActive && <NightLivePanel night={night} showToast={showToast} />}
+        <TriageBanner />
         {!embedded && <RepoStatusBand showToast={showToast} />}
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex border border-gray-700 rounded-md overflow-hidden divide-x divide-gray-700 bg-gray-900/60">

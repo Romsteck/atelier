@@ -14,6 +14,14 @@ pub const ACTIVE_EXEC: &[&str] = &["queued", "running"];
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Question {
     pub q: String,
+    /// Choix proposés (QCM, comme AskUserQuestion) : 2-4 options mutuellement
+    /// exclusives, la recommandée en premier — le mode STANDARD depuis 2026-07-23.
+    /// L'UI rend des boutons cliquables (« Autre » reste possible en réponse
+    /// libre). Vide = question ouverte à réponse libre : mode **déprécié**, gardé
+    /// uniquement pour les items antérieurs ; les prompts (triage + worker nuit)
+    /// imposent désormais des options.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
 }
@@ -211,6 +219,26 @@ impl BacklogStore {
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(row_to_item).transpose()
+    }
+
+    /// Garde anti-doublon du fallback de triage : un item OUVERT (ni done ni
+    /// archived) de même scope+titre déjà créé par le système. Évite qu'une
+    /// remontée récurrente dont le triage échoue crée un item Attention par
+    /// occurrence.
+    pub async fn find_open_system_item(
+        &self,
+        scope: &str,
+        title: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let row = query(
+            "SELECT id FROM backlog_items WHERE scope=$1 AND title=$2 AND created_by='system' \
+             AND lane NOT IN ('done','archived') ORDER BY id DESC LIMIT 1",
+        )
+        .bind(scope)
+        .bind(title)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.try_get("id")).transpose()?)
     }
 
     pub async fn update(

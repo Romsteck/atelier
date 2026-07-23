@@ -23,6 +23,7 @@ pub fn router() -> Router<ApiState> {
         .route("/backlog/{id}/run", post(run_item))
         .route("/backlog/{id}/dequeue", post(dequeue_item))
         .route("/attention", get(attention))
+        .route("/triage", get(triage_state))
         .route("/repos", get(repos))
         .route("/runs/{id}/transcript", get(transcript))
         .route("/runs/{id}/cancel", post(cancel_run))
@@ -111,6 +112,11 @@ async fn attention(State(state): State<ApiState>) -> impl IntoResponse {
         Ok(v) => ok(v),
         Err(e) => crate::routes::internal_err("pilot attention", e),
     }
+}
+/// Snapshot du triage des remontées (bandeau « le chef de projet trie N
+/// remontée(s) ») — fetch initial, la suite arrive en WS `pilot:triage`.
+async fn triage_state(State(state): State<ApiState>) -> impl IntoResponse {
+    ok(state.pilot.triage_summary().await)
 }
 /// État git agrégé des dépôts (apps + Atelier) — bande « État des dépôts »
 /// du Backlog : fichiers en attente de commit, commits en attente de push.

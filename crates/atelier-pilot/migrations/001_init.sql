@@ -122,3 +122,25 @@ CREATE TABLE IF NOT EXISTS pilot_night (
 );
 INSERT INTO pilot_night (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
 
+-- Triage automatique des remontées plateforme (2026-07-23) : une remontée
+-- d'agent (issue_report / POST /api/apps/{slug}/issues) est enfilée ICI plutôt
+-- que dans l'ex-table platform_issues. Une instance headless du chef de projet
+-- (run Claude lecture seule) la lit, investigue, et crée un item de backlog.
+-- La TABLE EST LA FILE : le dispatcher single-flight claim la plus ancienne
+-- ligne `pending` ; au boot les `running` (run tué par un restart) repassent
+-- `pending` et sont rejoués — restart-safe par construction (pas de file mémoire).
+CREATE TABLE IF NOT EXISTS pilot_triage (
+    id              BIGSERIAL PRIMARY KEY,
+    slug            TEXT NOT NULL,
+    payload         JSONB NOT NULL,            -- {title,kind,area,severity,context,tried}
+    status          TEXT NOT NULL DEFAULT 'pending',
+    outcome         TEXT,                      -- planned|needs_user|duplicate|rejected|fallback
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    backlog_item_id BIGINT,
+    error           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT pilot_triage_status_check CHECK (status IN ('pending','running','done','failed'))
+);
+CREATE INDEX IF NOT EXISTS pilot_triage_pending_idx ON pilot_triage (id) WHERE status IN ('pending','running');
+

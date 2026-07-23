@@ -5,7 +5,6 @@ import { AuthProvider } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
 import { AppsProvider } from './context/AppsContext';
 import { NotificationsProvider } from './context/NotificationsContext';
-import { IssuesProvider } from './context/IssuesContext';
 import { PilotProvider } from './context/PilotContext';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -18,7 +17,6 @@ import SchemaPage from './pages/SchemaPage';
 import Surveillance from './pages/Surveillance';
 import Backup from './pages/Backup';
 import Settings from './pages/Settings';
-import Issues from './pages/Issues';
 import Stats from './pages/Stats';
 import Backlog from './pages/Backlog';
 import MaintenanceOverlay from './components/pilot/MaintenanceOverlay';
@@ -46,7 +44,6 @@ function App() {
       <TaskProvider>
         <AppsProvider>
           <NotificationsProvider>
-          <IssuesProvider>
           <PilotProvider>
           <MaintenanceOverlay />
           <ErrorBoundary>
@@ -60,8 +57,9 @@ function App() {
             <Route path="/schema" element={<SchemaPage />} />
             <Route path="/git" element={<Git />} />
             <Route path="/surveillance" element={<Surveillance />} />
-            <Route path="/issues" element={<Issues />} />
             <Route path="/backlog" element={<Backlog />} />
+            {/* /issues décommissionnée : les remontées deviennent des items Pilote. */}
+            <Route path="/issues" element={<Navigate to="/backlog" replace />} />
             <Route path="/stats" element={<Stats />} />
             <Route path="/backup" element={<Backup />} />
             <Route path="/settings" element={<Settings />} />
@@ -83,7 +81,6 @@ function App() {
           </Layout>
           </ErrorBoundary>
           </PilotProvider>
-          </IssuesProvider>
           </NotificationsProvider>
         </AppsProvider>
       </TaskProvider>

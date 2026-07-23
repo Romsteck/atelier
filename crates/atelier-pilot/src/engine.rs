@@ -29,6 +29,21 @@ pub struct WorkerExec {
     pub lines: Vec<String>,
 }
 
+/// D'où provient le rapport final d'un run.
+///
+/// - `FinalReportEvent` — `worker.js` émet un event dédié `{t:'final_report'}` ;
+///   son absence = échec (`agent_error`).
+/// - `LastAssistant` — `scan.js` (réutilisé pour le triage headless) n'émet PAS
+///   de `final_report` : le rapport est le dernier `{t:'assistant',text}`.
+///
+/// Un seul driver NDJSON (`run_worker_command`) sert les deux, paramétré ici —
+/// pas de boucle dupliquée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSource {
+    FinalReportEvent,
+    LastAssistant,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EnginePolicy {
     pub codex_enabled: bool,
@@ -107,16 +122,59 @@ impl CodexWorkerEngine {
             c
         };
         cmd.current_dir(cwd).env("CODEX_HOME", &self.codex_home);
-        run_worker_command(cmd, init, self.timeout, cancel, on_event).await
+        run_worker_command(
+            cmd,
+            init,
+            self.timeout,
+            ReportSource::FinalReportEvent,
+            cancel,
+            on_event,
+        )
+        .await
     }
 }
 
 impl ClaudeWorkerEngine {
+    /// Run worker.js (rapport = event `final_report`).
     pub async fn exec<F>(
         &self,
         cwd: &Path,
         prompt: &str,
         oauth_token: Option<&str>,
+        cancel: CancellationToken,
+        on_event: F,
+    ) -> WorkerExec
+    where
+        F: FnMut(&Value) + Send,
+    {
+        self.exec_inner(cwd, prompt, oauth_token, ReportSource::FinalReportEvent, cancel, on_event)
+            .await
+    }
+
+    /// Run scan.js (lecture seule stricte : canUseTool Read/Glob/Grep + `mcp__*`,
+    /// disallowed durs). Réutilisé pour le triage headless des remontées : pas de
+    /// `final_report`, le rapport est le dernier message assistant.
+    pub async fn exec_scan<F>(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        oauth_token: Option<&str>,
+        cancel: CancellationToken,
+        on_event: F,
+    ) -> WorkerExec
+    where
+        F: FnMut(&Value) + Send,
+    {
+        self.exec_inner(cwd, prompt, oauth_token, ReportSource::LastAssistant, cancel, on_event)
+            .await
+    }
+
+    async fn exec_inner<F>(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        oauth_token: Option<&str>,
+        report: ReportSource,
         cancel: CancellationToken,
         on_event: F,
     ) -> WorkerExec
@@ -151,10 +209,10 @@ impl ClaudeWorkerEngine {
         };
         cmd.current_dir(cwd)
             .env("CLAUDE_CONFIG_DIR", &self.config_dir);
-        let out = run_worker_command(cmd, init, self.timeout, cancel, on_event).await;
-        // worker.js auto-nettoie sa session en fin de run normal ; un run tué
-        // (timeout/cancel → SIGKILL groupe) ou en échec laisse sa session SDK
-        // persistée derrière lui et polluerait la liste du Studio.
+        let out = run_worker_command(cmd, init, self.timeout, report, cancel, on_event).await;
+        // worker.js/scan.js auto-nettoient leur session en fin de run normal ; un
+        // run tué (timeout/cancel → SIGKILL groupe) ou en échec laisse sa session
+        // SDK persistée derrière lui et polluerait la liste du Studio.
         if (out.cancelled || out.failure_reason.is_some())
             && let Some(sid) = out.session_id.clone()
         {
@@ -228,6 +286,7 @@ async fn run_worker_command<F>(
     mut cmd: Command,
     init: Value,
     timeout: Duration,
+    report: ReportSource,
     cancel: CancellationToken,
     mut on_event: F,
 ) -> WorkerExec
@@ -297,6 +356,9 @@ where
     };
     let mut reader = BufReader::new(stdout).lines();
     let mut out = WorkerExec::default();
+    // scan.js n'émet pas `final_report` : on garde le DERNIER texte assistant,
+    // promu en rapport final ci-dessous quand `report == LastAssistant`.
+    let mut last_assistant: Option<String> = None;
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     loop {
@@ -323,6 +385,11 @@ where
                         on_event(&v);
                         match v.get("t").and_then(Value::as_str).unwrap_or("") {
                             "system" => out.session_id = v.get("session_id").and_then(Value::as_str).map(String::from),
+                            "assistant" => {
+                                if let Some(t) = v.get("text").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                                    last_assistant = Some(t.to_string());
+                                }
+                            }
                             "final_report" => out.final_report = v.get("text").and_then(Value::as_str).map(String::from),
                             "result" => {
                                 out.tokens_in = v.pointer("/usage/input_tokens").and_then(Value::as_i64);
@@ -346,6 +413,11 @@ where
     }
     let status = child.wait().await.ok();
     let stderr_tail = join_stderr(stderr_task).await;
+    // scan.js : le rapport final EST le dernier message assistant (pas d'event
+    // `final_report`) — on le promeut avant la validation, qui devient uniforme.
+    if report == ReportSource::LastAssistant {
+        out.final_report = last_assistant;
+    }
     if !out.cancelled && out.failure_reason.is_none() {
         out.exit_ok = out.exit_ok && status.map(|s| s.success()).unwrap_or(false);
         if !out.exit_ok || out.final_report.is_none() {

@@ -13,7 +13,6 @@ use atelier_common::agent_ui_state::OpenTabsStore;
 use atelier_common::codex_auth::CodexAuthStore;
 use atelier_common::conversation_meta::ConversationMetaStore;
 use atelier_common::events::EventBus;
-use atelier_common::issue_store::PlatformIssueStore;
 use atelier_common::notification_store::NotificationStore;
 use atelier_common::task_store::TaskStore;
 use atelier_common::usage_stats::UsageStatsStore;
@@ -46,12 +45,6 @@ pub struct ApiState {
     /// rouvrir une conversation depuis un autre PC restaure (et relance) le bon
     /// modèle/effort au lieu du défaut localStorage. No-op quand Postgres est down.
     pub conversation_meta: ConversationMetaStore,
-
-    /// Remontées plateforme (CLAUDE_ISSUES) signalées par les chats Claude Code
-    /// des apps, centralisées dans `atelier_meta.platform_issues` (plus aucun
-    /// fichier per-app). Endpoints `POST /api/apps/{slug}/issues` (report) +
-    /// `/api/issues*` (triage dev). No-op/vide quand Postgres est down.
-    pub issues: PlatformIssueStore,
 
     /// Notifications plateforme (canal agent → utilisateur) : tool MCP
     /// `notify_user` + journal automatique des actions des agents, dans
@@ -154,7 +147,6 @@ impl ApiState {
         task_store: Arc<TaskStore>,
         open_tabs: OpenTabsStore,
         conversation_meta: ConversationMetaStore,
-        issues: PlatformIssueStore,
         notifications: NotificationStore,
         agent_auth: AgentAuthStore,
         app_claude_auth: AppClaudeAuthStore,
@@ -183,7 +175,6 @@ impl ApiState {
             task_store,
             open_tabs,
             conversation_meta,
-            issues,
             notifications,
             agent_auth,
             app_claude_auth,

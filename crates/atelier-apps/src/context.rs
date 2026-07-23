@@ -594,8 +594,7 @@ fn render_mcp_tools_md(app: &Application) -> String {
          ## Plateforme (tes « pattes » vers Atelier et l'utilisateur)\n\
          - `ship` — livraison prod : stop + restart pour reprendre les artefacts compilés par 0-build (aucune compilation). `BUILD_BUSY` = un build/ship est en cours, ne PAS retry.\n\
          - `notify_user` — notifie Romain (cloche + appareils). Réservé à ce qui mérite VRAIMENT son attention (décision, anomalie, résultat inattendu). Tes actions plateforme (restart, ship, env, schéma) sont déjà **journalisées automatiquement** — ne notifie pas pour ça.\n\
-         - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier) ou une suggestion d'amélioration (`kind: error|limitation|suggestion`). Voir `.claude/rules/report-issues.md`.\n\
-         - `issues_list` — relit les remontées de CETTE app (statut `open` par défaut, lecture seule) : vérifie avant de remonter qu'un souci n'est pas déjà signalé.\n\
+         - `issue_report` — remonte une friction PLATEFORME (tool MCP qui bug/manque, doc trompeuse, build/deploy/dataverse qui déraille côté Atelier) ou une suggestion d'amélioration (`kind: error|limitation|suggestion`). Le chef de projet la trie et en fait un item de backlog planifié ; tu n'as pas à vérifier les doublons. Voir `.claude/rules/report-issues.md`.\n\
          \n\
          ## Backlog Pilote (`backlog_*`)\n\
          - `backlog_list`, `backlog_get` — lire les besoins et leurs décisions\n\
@@ -1626,7 +1625,7 @@ fn render_report_issues_rule_md(app: &Application) -> String {
     format!(
         "# Remonter les soucis plateforme à Atelier (`report-issues`)\n\
          \n\
-         > Quand un souci que tu rencontres relève de **la plateforme Atelier** (et non du code de ton app `{slug}`), tu DOIS le remonter via la skill `0-report-issue`. Ces remontées sont **centralisées côté Atelier** (dans son control-plane, **hors de ton dépôt**) et relues par le développeur d'Atelier. Sans ça le souci se perd : tu contournes en silence et personne ne le corrige jamais.\n\
+         > Quand un souci que tu rencontres relève de **la plateforme Atelier** (et non du code de ton app `{slug}`), tu DOIS le remonter via la skill `0-report-issue`. Chaque remontée est **triée automatiquement par le chef de projet d'Atelier** : il l'investigue et en fait un **item de backlog planifié** (visible dans le Pilote), corrigé ensuite comme le reste. Sans ça le souci se perd : tu contournes en silence et personne ne le corrige jamais.\n\
          \n\
          ## QUAND remonter\n\
          \n\
@@ -1648,8 +1647,8 @@ fn render_report_issues_rule_md(app: &Application) -> String {
          \n\
          ## COMMENT remonter\n\
          \n\
-         1. Appelle le tool MCP **`issue_report(title, kind?, area?, severity?, context?, tried?)`** (la skill `0-report-issue` documente les champs) : Atelier enregistre la remontée côté plateforme.\n\
-         2. **Ne stocke rien toi-même** (pas de fichier dans ton dépôt) : Atelier est l'unique writer, il estampe id + horodatage + statut côté serveur, dans son control-plane centralisé.\n\
+         1. Appelle le tool MCP **`issue_report(title, kind?, area?, severity?, context?, tried?)`** (la skill `0-report-issue` documente les champs) : Atelier enfile la remontée pour triage par le chef de projet.\n\
+         2. **Ne stocke rien toi-même** (pas de fichier dans ton dépôt) et **ne vérifie pas les doublons** : le chef de projet déduplique et planifie côté backlog.\n\
          3. **Dis-le à l'utilisateur** en une phrase (« j'ai remonté un souci plateforme : … ») — pas de remontée silencieuse.\n\
          \n\
          ## Barème\n\
@@ -1674,7 +1673,7 @@ fn render_report_issue_skill(app: &Application) -> String {
          \n\
          # Remonter un souci plateforme — `{slug}`\n\
          \n\
-         Appelle le tool MCP **`issue_report`** (serveur `studio`) : Atelier enregistre la remontée dans son control-plane (centralisé, **hors de ton dépôt**). Tu ne stockes rien toi-même. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
+         Appelle le tool MCP **`issue_report`** (serveur `studio`) : Atelier confie la remontée au chef de projet, qui l'investigue et en fait un item de backlog planifié (visible dans le Pilote). Tu ne stockes rien toi-même et tu ne vérifies pas les doublons. Voir `.claude/rules/report-issues.md` pour QUAND remonter (et quand NE PAS).\n\
          \n\
          ## Champs\n\
          \n\
@@ -1686,7 +1685,7 @@ fn render_report_issue_skill(app: &Application) -> String {
          \n\
          ## Retour\n\
          \n\
-         Le JSON de l'entrée stockée (`id`, `ts`, `status:\"open\"`, …). Mentionne ensuite à l'utilisateur, en une phrase, que tu as remonté le souci.\n\
+         `{{queued:true, triage_id}}` — la remontée est en file de triage. Mentionne ensuite à l'utilisateur, en une phrase, que tu as remonté le souci.\n\
          \n\
          ## Interdits\n\
          \n\

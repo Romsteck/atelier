@@ -348,19 +348,14 @@ export const markAllNotificationsRead = () =>
 export const deleteNotification = (id) =>
   api.delete(`/notifications/${id}`);
 
-// ========== Remontées plateforme (page /issues + pastille sidebar) ==========
-// Store central `atelier_meta.platform_issues`, alimenté par les agents des
-// apps (tool MCP `issue_report` / POST /apps/{slug}/issues). Live via WS
-// `issue:event` (created/updated/deleted).
-export const getIssues = (params = {}) =>
-  api.get('/issues', { params });
-export const patchIssue = (id, body) =>
-  api.patch(`/issues/${id}`, body);
-export const deleteIssue = (id) =>
-  api.delete(`/issues/${id}`);
+// Remontées plateforme : plus d'API de liste/triage (2026-07-23). Une remontée
+// (`issue_report` / POST /apps/{slug}/issues) est triée par le chef de projet
+// et devient un item de backlog — le suivi se fait dans le Pilote.
 
 // ========== Pilote : backlog projet + exécutions autonomes ==========
 export const getPilotState = () => api.get('/pilot/state');
+// Snapshot du triage des remontées (bandeau) — la suite arrive en WS pilot:triage.
+export const getPilotTriage = () => api.get('/pilot/triage');
 export const getPilotBacklog = (params = {}) => api.get('/pilot/backlog', { params });
 export const createPilotItem = (body) => api.post('/pilot/backlog', body);
 export const getPilotItem = (id) => api.get(`/pilot/backlog/${id}`);

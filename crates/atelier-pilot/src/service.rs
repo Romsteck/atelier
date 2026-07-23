@@ -24,6 +24,10 @@ use crate::engine::{ClaudeWorkerEngine, CodexWorkerEngine, EnginePolicy, WorkerE
 use crate::gitops;
 use crate::runs::RunsStore;
 use crate::schedule::{NightSnapshot, PilotSchedule, ScheduleStore, due};
+use crate::triage::{
+    TriagePayload, TriageRow, TriageStore, TriageSummary, build_triage_prompt, kind_to_backlog_kind,
+    severity_to_priority, triage_outcome,
+};
 use crate::sqlx::PgPool;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -94,6 +98,10 @@ pub struct PilotConfig {
     pub timeout: Duration,
     pub engine: ClaudeWorkerEngine,
     pub codex_engine: Option<CodexWorkerEngine>,
+    /// Instance headless du chef de projet pour le triage des remontées : run
+    /// `scan.js` (lecture seule + MCP scope `pilot`) en user `romain`, cwd =
+    /// racine du dépôt Atelier. Cf. [`crate::triage`].
+    pub triage_engine: ClaudeWorkerEngine,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -245,10 +253,18 @@ struct Inner {
     backlog: Option<BacklogStore>,
     runs: Option<RunsStore>,
     schedule: Option<ScheduleStore>,
+    triage: Option<TriageStore>,
     config: PilotConfig,
     hooks: RwLock<PilotHooks>,
     running: Mutex<HashMap<String, RunningWork>>,
     manual: Mutex<ManualQueue>,
+    // Un seul run de triage à la fois (patron `ManualQueue.active`). Le triage
+    // NE touche NI `running` NI `is_busy()` : read-only + méta-DB, il tourne en
+    // parallèle de la nuit/scan/backup sans jamais les retarder.
+    triage_active: AtomicBool,
+    // Bandeau UI « le chef de projet trie N remontée(s) » : snapshot rediffusé à
+    // chaque transition (enqueue / claim / settle / drain).
+    triage_tx: broadcast::Sender<TriageSummary>,
     transcript: Mutex<TranscriptBuf>,
     backlog_tx: broadcast::Sender<PilotEvent>,
     transcript_tx: broadcast::Sender<TranscriptLine>,
@@ -271,6 +287,7 @@ impl PilotService {
         let (transcript_tx, _) = broadcast::channel(1024);
         let (night_tx, _) = broadcast::channel(64);
         let (maintenance_tx, _) = broadcast::channel(64);
+        let (triage_tx, _) = broadcast::channel(64);
         let mut stores = None;
         if let Some(pool) = pool {
             match crate::run_migrations(&pool).await {
@@ -278,15 +295,16 @@ impl PilotService {
                     stores = Some((
                         BacklogStore::new(pool.clone()).with_events(backlog_tx.clone()),
                         RunsStore::new(pool.clone()),
-                        ScheduleStore::new(pool),
+                        ScheduleStore::new(pool.clone()),
+                        TriageStore::new(pool),
                     ))
                 }
                 Err(e) => error!(error=%e, "pilot migrations failed — service disabled"),
             }
         }
-        let (backlog, runs, schedule) = match stores {
-            Some((b, r, s)) => (Some(b), Some(r), Some(s)),
-            None => (None, None, None),
+        let (backlog, runs, schedule, triage) = match stores {
+            Some((b, r, s, t)) => (Some(b), Some(r), Some(s), Some(t)),
+            None => (None, None, None, None),
         };
         let svc = Self {
             inner: Arc::new(Inner {
@@ -294,10 +312,13 @@ impl PilotService {
                 backlog,
                 runs,
                 schedule,
+                triage,
                 config,
                 hooks: RwLock::new(PilotHooks::default()),
                 running: Mutex::new(HashMap::new()),
                 manual: Mutex::new(ManualQueue::default()),
+                triage_active: AtomicBool::new(false),
+                triage_tx,
                 transcript: Mutex::new(TranscriptBuf::default()),
                 backlog_tx,
                 transcript_tx,
@@ -389,6 +410,10 @@ impl PilotService {
                 // du Pilote REDÉMARRE Atelier : sans cette reprise, les items
                 // enfilés derrière restaient « En file » pour toujours.
                 svc.resume_pending_queue().await;
+                // Triage : rejoue les remontées interrompues par un restart +
+                // migre une fois les ex-remontées `platform_issues` open, puis
+                // draine la file. Indépendant de la nuit (read-only).
+                svc.resume_triage().await;
                 svc.scheduler_loop().await;
             });
         }
@@ -407,6 +432,25 @@ impl PilotService {
     }
     pub fn subscribe_maintenance(&self) -> broadcast::Receiver<MaintenanceSnapshot> {
         self.inner.maintenance_tx.subscribe()
+    }
+    pub fn subscribe_triage(&self) -> broadcast::Receiver<TriageSummary> {
+        self.inner.triage_tx.subscribe()
+    }
+    /// Snapshot du triage pour `GET /api/pilot/triage` (fetch initial du bandeau).
+    pub async fn triage_summary(&self) -> TriageSummary {
+        match self.inner.triage.as_ref() {
+            Some(t) => t.summary().await.unwrap_or_default(),
+            None => TriageSummary::default(),
+        }
+    }
+    /// Rediffuse l'état du triage sur le canal `pilot:triage`. Appelé à chaque
+    /// transition (enqueue / claim / settle / drain).
+    async fn publish_triage_state(&self) {
+        if let Some(t) = self.inner.triage.as_ref() {
+            if let Ok(summary) = t.summary().await {
+                let _ = self.inner.triage_tx.send(summary);
+            }
+        }
     }
     pub fn maintenance_snapshot(&self) -> Option<MaintenanceSnapshot> {
         self.inner
@@ -711,6 +755,256 @@ impl PilotService {
             true
         } else {
             false
+        }
+    }
+
+    // ---- Triage des remontées plateforme (instance headless du chef de projet) ----
+
+    /// Enfile une remontée pour triage automatique (appelé par `issue_report`
+    /// MCP et `POST /api/apps/{slug}/issues`). Renvoie l'id de triage. Le
+    /// dispatcher single-flight fait le reste — read-only, hors nuit.
+    pub async fn report_issue(&self, slug: &str, payload: TriagePayload) -> Result<i64, String> {
+        let triage = self.inner.triage.as_ref().ok_or("Pilote indisponible")?;
+        if payload.title.trim().is_empty() {
+            return Err("title requis".into());
+        }
+        let id = triage
+            .enqueue(
+                slug,
+                &payload.title,
+                &payload.kind,
+                &payload.area,
+                &payload.severity,
+                &payload.context,
+                &payload.tried,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        info!(triage_id = id, slug = %slug, "pilot issue enqueued for triage");
+        self.publish_triage_state().await;
+        self.kick_triage();
+        Ok(id)
+    }
+
+    /// Rejoue les triages interrompus par un restart (`running`→`pending`) +
+    /// migre une fois les ex-remontées `platform_issues` open, puis draine.
+    async fn resume_triage(&self) {
+        let Some(triage) = self.inner.triage.as_ref() else {
+            return;
+        };
+        if let Err(e) = triage.requeue_interrupted().await {
+            warn!(error = %e, "pilot triage requeue-interrupted failed");
+        }
+        match triage.migrate_platform_issues().await {
+            Ok(n) if n > 0 => info!(migrated = n, "pilot triage: migrated open platform_issues"),
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "pilot triage platform_issues migration failed"),
+        }
+        // Le dispatcher spawn scan.js qui se connecte au MCP local — attendre que
+        // le serveur HTTP/MCP écoute, sinon la 1re (et parfois la 2e) tentative
+        // échoue en "MCP init failed" et brûle le triage jusqu'au fallback à tort.
+        // (Un restart déclenché par un deploy Atelier rejoue ce chemin.)
+        self.await_local_ready().await;
+        self.kick_triage();
+    }
+
+    /// Sonde bornée du serveur local avant le premier spawn de triage au boot
+    /// (le triage a besoin du MCP `?scope=pilot`, servi par ce même process).
+    async fn await_local_ready(&self) {
+        for _ in 0..60 {
+            let ok = Command::new("curl")
+                .args(["-fsS", "--max-time", "2", "http://127.0.0.1:4100/api/health"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        warn!("pilot triage: serveur local non prêt après 60s — démarrage quand même");
+    }
+
+    /// Démarre le dispatcher de triage si aucun ne tourne (single-flight via
+    /// `triage_active`). Ne touche NI `running` NI `is_busy`.
+    fn kick_triage(&self) {
+        if self.inner.triage.is_none() {
+            return;
+        }
+        if self.inner.triage_active.swap(true, Ordering::SeqCst) {
+            return; // un dispatcher tourne déjà
+        }
+        let svc = self.clone();
+        tokio::spawn(async move { svc.run_triage_dispatcher().await });
+    }
+
+    async fn run_triage_dispatcher(&self) {
+        loop {
+            let Some(triage) = self.inner.triage.as_ref() else {
+                self.inner.triage_active.store(false, Ordering::SeqCst);
+                return;
+            };
+            match triage.claim_oldest().await {
+                Ok(Some(row)) => {
+                    // Snapshot « en cours » (l'item est passé running au claim),
+                    // puis re-snapshot après settle (le compteur a bougé).
+                    self.publish_triage_state().await;
+                    self.run_one_triage(row).await;
+                    self.publish_triage_state().await;
+                }
+                Ok(None) => {
+                    self.inner.triage_active.store(false, Ordering::SeqCst);
+                    // Course : un enqueue entre claim(None) et store(false) verrait
+                    // active=true et ne relancerait pas. On re-vérifie et se réarme.
+                    if triage.has_pending().await.unwrap_or(false)
+                        && !self.inner.triage_active.swap(true, Ordering::SeqCst)
+                    {
+                        continue;
+                    }
+                    self.publish_triage_state().await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(error = %e, "pilot triage claim failed");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    /// Un run de triage : spawn scan.js (lecture seule + MCP scope pilot) en
+    /// user romain, cwd = source Atelier. Le run crée/enrichit l'item via MCP ;
+    /// on lit son verdict (fence JSON). 2 tentatives puis fallback déterministe.
+    async fn run_one_triage(&self, row: TriageRow) {
+        let Some(triage) = self.inner.triage.as_ref() else {
+            return;
+        };
+        let token = (self.hooks().token)().await;
+        let prompt = build_triage_prompt(&row);
+        let cwd = self.inner.config.atelier_root.clone();
+        info!(triage_id = row.id, slug = %row.slug, attempt = row.attempts, "pilot triage run start");
+        let exec = self
+            .inner
+            .config
+            .triage_engine
+            .exec_scan(&cwd, &prompt, token.as_deref(), CancellationToken::new(), |_| {})
+            .await;
+
+        // Auth SDK morte = systémique : pas de retry (tout run échouerait pareil),
+        // notif dédupliquée + fallback direct.
+        if exec.failure_reason.as_deref() == Some("sdk_auth_failed") {
+            let msg = exec
+                .error
+                .clone()
+                .unwrap_or_else(|| "authentification SDK expirée".into());
+            (self.hooks().on_auth_failure)(msg.clone());
+            self.triage_fallback(&row, &format!("auth SDK: {msg}")).await;
+            return;
+        }
+        if let Some(reason) = exec.failure_reason.clone() {
+            let err = exec.error.clone().unwrap_or(reason);
+            if row.attempts >= 2 {
+                self.triage_fallback(&row, &err).await;
+            } else {
+                info!(triage_id = row.id, error = %err, "pilot triage attempt failed — requeue");
+                let _ = triage.requeue(row.id).await;
+            }
+            return;
+        }
+
+        let report = exec.final_report.clone().unwrap_or_default();
+        match triage_outcome(&report) {
+            Some(o) => {
+                info!(triage_id = row.id, outcome = %o.outcome, item = ?o.item_id, "pilot triage done");
+                // L'item a été créé/enrichi par l'agent via MCP (qui publie déjà) ;
+                // republish garantit un état frais côté WS backlog (idempotent).
+                if let (Some(item_id), Some(b)) = (o.item_id, self.inner.backlog.as_ref()) {
+                    b.republish(item_id).await;
+                }
+                let _ = triage.settle_done(row.id, o.item_id, &o.outcome).await;
+            }
+            None => {
+                if row.attempts >= 2 {
+                    self.triage_fallback(&row, "run de triage sans verdict exploitable")
+                        .await;
+                } else {
+                    let _ = triage.requeue(row.id).await;
+                }
+            }
+        }
+    }
+
+    /// Fallback déterministe (triage épuisé ou auth morte) : crée un item brut en
+    /// Attention (`created_by='system'`, needs_user) — rien n'est jamais perdu.
+    /// Garde anti-doublon : une remontée récurrente ne crée qu'un seul item.
+    async fn triage_fallback(&self, row: &TriageRow, error: &str) {
+        let Some(triage) = self.inner.triage.as_ref() else {
+            return;
+        };
+        let p = &row.payload;
+        let title = format!("Remontée non triée — {}", p.title);
+        let Some(backlog) = self.inner.backlog.as_ref() else {
+            let _ = triage.settle_failed(row.id, error).await;
+            return;
+        };
+        if let Ok(Some(existing)) = backlog.find_open_system_item("atelier", &title).await {
+            info!(triage_id = row.id, existing, "pilot triage fallback deduplicated");
+            let _ = triage.settle_done(row.id, Some(existing), "duplicate").await;
+            return;
+        }
+        let ctx = if p.context.trim().is_empty() { "(aucun)" } else { p.context.trim() };
+        let tried = if p.tried.trim().is_empty() { "(aucun)" } else { p.tried.trim() };
+        let description = format!(
+            "Remontée automatique que le chef de projet n'a pas pu trier.\n\n\
+             - App source : {}\n- Type : {}\n- Domaine : {}\n- Sévérité : {}\n\
+             - Contexte : {}\n- Déjà tenté : {}\n\nErreur de triage : {}",
+            row.slug, p.kind, p.area, p.severity, ctx, tried, error,
+        );
+        let item = NewBacklogItem {
+            scope: "atelier".into(),
+            title: title.clone(),
+            request: p.title.clone(),
+            description,
+            plan: None,
+            kind: kind_to_backlog_kind(&p.kind).into(),
+            priority: severity_to_priority(&p.severity).into(),
+            severity: severity_to_priority(&p.severity).into(),
+            effort: "m".into(),
+            lane: "attention".into(),
+            engine: "auto".into(),
+            needs_user: true,
+            needs_user_reason: Some("Remontée non triée automatiquement — à cadrer".into()),
+            questions: Vec::new(),
+            finding_id: None,
+            created_by: "system".into(),
+        };
+        match backlog.insert(item).await {
+            Ok(created) => {
+                self.publish("created", Some(created.clone()), Some(created.id));
+                let _ = triage.settle_done(row.id, Some(created.id), "fallback").await;
+                (self.hooks().notify)(
+                    Some(row.slug.clone()),
+                    "warn".into(),
+                    format!("Remontée à cadrer : {}", p.title),
+                    "Le triage automatique a échoué — un item a été créé en Attention.".into(),
+                )
+                .await;
+            }
+            Err(e) => {
+                let _ = triage
+                    .settle_failed(row.id, &format!("{error} | fallback insert: {e}"))
+                    .await;
+                (self.hooks().notify)(
+                    Some(row.slug.clone()),
+                    "error".into(),
+                    "Triage de remontée échoué".into(),
+                    e.to_string(),
+                )
+                .await;
+            }
         }
     }
 
@@ -2617,11 +2911,11 @@ Questions/réponses précédentes :
 
 Contrat : investigue puis implémente strictement ce périmètre. Tu peux modifier uniquement ce workspace. Ne commite jamais, ne pousse jamais et ne redémarre aucun service : l'orchestrateur build/ship/healthcheck/commit après toi. N'utilise ni sudo ni systemctl. Les suppressions de données en masse sont interdites.
 Si une décision produit, une ambiguïté, un plan caduc ou un risque empêche un changement sûr, appelle backlog_update avec id={id}, needs_user=true, une reason courte, puis ARRÊTE sans modifier davantage.
-Tes questions à Romain doivent être SIMPLES et rapides à trancher : un choix binaire (oui/non) ou A-vs-B, UNE seule décision par question, 2 questions maximum, et formule TA recommandation par défaut (« je propose X parce que… »). Bannis les questions ouvertes, purement techniques ou interdépendantes — Romain répond vite, sans relire le code. S'il te donne une consigne partielle ou une seule réponse, avance avec ce que tu as plutôt que de re-bloquer. Sinon valide localement autant que possible.
+Tes questions à Romain sont des QCM : formule une question courte + une liste `options` de 2 à 4 choix mutuellement exclusifs, cliquables, la RECOMMANDÉE en premier (suffixée « (recommandé) »). UNE décision par question, 2 questions maximum. Romain répond en un clic, sans relire le code ni deviner les possibilités — c'est toi qui proposes les options. Bannis les questions ouvertes ou interdépendantes. S'il te donne une réponse partielle, avance avec ce que tu as.
 
 Ta réponse finale doit se terminer par un bloc JSON valide de cette forme (sans texte après) :
 ```json
-{{"pilot":{{"outcome":"done|needs_user","summary":"résumé","reason":"raison si besoin","questions":["choix binaire ou A-vs-B, avec ta reco"]}}}}
+{{"pilot":{{"outcome":"done|needs_user","summary":"résumé","reason":"raison si besoin","questions":[{{"q":"la question","options":["Option A (recommandé)","Option B","Option C"]}}]}}}}
 ```
 Utilise outcome=needs_user pour tout doute; Atelier appliquera ce rapport même si ton moteur n'a pas accès au MCP."#,
         scope = item.scope,
@@ -2668,14 +2962,35 @@ fn worker_needs_user(report: Option<&str>) -> Option<(String, Vec<Question>)> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("Décision requise")
         .to_string();
+    // Chaque question est soit une chaîne (legacy, question ouverte), soit un
+    // objet `{q, options:[...]}` (QCM cliquable côté UI, comme AskUserQuestion).
     let questions = pilot
         .get("questions")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|q| {
-            q.as_str().map(|s| Question {
-                q: s.to_string(),
+            if let Some(s) = q.as_str() {
+                return Some(Question {
+                    q: s.to_string(),
+                    options: Vec::new(),
+                    answer: None,
+                });
+            }
+            let obj = q.as_object()?;
+            let text = obj.get("q").and_then(serde_json::Value::as_str)?.to_string();
+            let options = obj
+                .get("options")
+                .and_then(serde_json::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| o.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some(Question {
+                q: text,
+                options,
                 answer: None,
             })
         })

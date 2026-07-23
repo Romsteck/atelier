@@ -3,12 +3,11 @@ import {
   LogOut, User, LayoutGrid, Database, Hammer,
   GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
   Play, Square, Archive, Loader2, Settings2,
-  MessageSquareWarning, CheckCircle2, BarChart3,
+  CheckCircle2, BarChart3,
   ClipboardList, Bot,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useApps } from '../context/AppsContext';
-import { useIssues } from '../context/IssuesContext';
 import { usePilot } from '../context/PilotContext';
 import { statusDot } from '../lib/appsUi';
 import { openStudio } from '../lib/openStudio';
@@ -40,7 +39,6 @@ const navGroups = [
       // Ouvre le dock du chef de projet (PmAssistantDock, monté par le Layout).
       { action: 'pilot:open-assistant', icon: Bot, label: 'Chef de projet' },
       { to: '/surveillance', icon: ShieldAlert, label: 'Surveillance' },
-      { to: '/issues', icon: MessageSquareWarning, label: 'Remontées' },
     ],
   },
   {
@@ -60,28 +58,6 @@ const linkClass = ({ isActive }) =>
       ? 'border-l-3 border-amber-400 bg-gray-700/50 text-gray-50'
       : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
   }`;
-
-// Pastille de l'entrée « Remontées » : santé plateforme d'un coup d'œil.
-// Rouge = erreurs/limitations ouvertes (à traiter) ; bleu = uniquement des
-// suggestions ouvertes (rien d'alarmant) ; check vert = rien d'ouvert.
-function IssuesBadge() {
-  const { counts } = useIssues();
-  if (counts.openAlerts > 0) {
-    return (
-      <span className="bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
-        {counts.openAlerts > 99 ? '99+' : counts.openAlerts}
-      </span>
-    );
-  }
-  if (counts.openSuggestions > 0) {
-    return (
-      <span className="bg-blue-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
-        {counts.openSuggestions > 99 ? '99+' : counts.openSuggestions}
-      </span>
-    );
-  }
-  return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
-}
 
 function PilotBadge() {
   const { counts } = usePilot();
@@ -241,9 +217,6 @@ function Sidebar({ onClose, collapsed }) {
                     <NavLink to={to} className={(s) => `${linkClass(s)} ${railRow}`}>
                       <Icon className={`w-5 h-5 shrink-0${highlight ? ' text-amber-400' : ''}`} />
                       <span className={`flex-1 whitespace-nowrap ${railLabel}`}>{label}</span>
-                      {to === '/issues' && (
-                        <span className={railLabel}><IssuesBadge /></span>
-                      )}
                       {to === '/backlog' && <span className={railLabel}><PilotBadge /></span>}
                     </NavLink>
                   </li>

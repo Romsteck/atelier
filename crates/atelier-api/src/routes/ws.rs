@@ -43,11 +43,11 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut studio_tab_rx = state.events.studio_tab.subscribe();
     let mut homeroute_routes_rx = state.events.homeroute_routes.subscribe();
     let mut notify_rx = state.events.notify.subscribe();
-    let mut issue_rx = state.events.issue.subscribe();
     let mut pilot_rx = state.pilot.subscribe();
     let mut pilot_transcript_rx = state.pilot.subscribe_transcript();
     let mut pilot_night_rx = state.pilot.subscribe_night();
     let mut pilot_maintenance_rx = state.pilot.subscribe_maintenance();
+    let mut pilot_triage_rx = state.pilot.subscribe_triage();
 
     loop {
         tokio::select! {
@@ -107,6 +107,20 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                 }
             }
 
+            result = pilot_triage_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({ "type": "pilot:triage", "data": event });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(topic = "pilot:triage", dropped = n, "ws subscriber lagged");
+                        if send_resync(&mut socket, "pilot:triage", n).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
             result = agent_rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -143,23 +157,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                 }
             }
 
-            result = issue_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({ "type": "issue:event", "data": event });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(topic = "issue:event", dropped = n, "ws subscriber lagged");
-                        if send_resync(&mut socket, "issue:event", n).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
 
             result = agent_open_tabs_rx.recv() => {
                 match result {

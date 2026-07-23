@@ -354,13 +354,6 @@ impl UsageStatsStore {
         .fetch_all(pool)
         .await?;
 
-        // Remontées plateforme.
-        let issues: Vec<(String, String, i64)> = query_as(
-            "SELECT kind, status, count(*)::bigint FROM platform_issues GROUP BY kind, status",
-        )
-        .fetch_all(pool)
-        .await?;
-
         Ok(json!({
             "apps": {
                 "total": apps_total,
@@ -413,9 +406,6 @@ impl UsageStatsStore {
                     .map(|(m, n)| json!({"model": m.unwrap_or_else(|| "défaut".into()), "count": n}))
                     .collect::<Vec<_>>(),
             },
-            "issues": issues.into_iter()
-                .map(|(kind, status, n)| json!({"kind": kind, "status": status, "count": n}))
-                .collect::<Vec<_>>(),
         }))
     }
 
