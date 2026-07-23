@@ -186,7 +186,7 @@ struct ManualQueue {
 }
 
 enum ManualPick {
-    Dispatch(i64),
+    Dispatch(i64, String),
     Wait,
     Done,
 }
@@ -385,6 +385,10 @@ impl PilotService {
                     }
                     let _ = r.prune().await;
                 }
+                // La file manuelle mémoire meurt au restart — or un run Atelier
+                // du Pilote REDÉMARRE Atelier : sans cette reprise, les items
+                // enfilés derrière restaient « En file » pour toujours.
+                svc.resume_pending_queue().await;
                 svc.scheduler_loop().await;
             });
         }
@@ -562,6 +566,64 @@ impl PilotService {
         Ok(pending)
     }
 
+    /// Reconstruit la file manuelle depuis la DB au boot (items `queued` sans
+    /// run_id, posés par mark_pending et jamais lancés) : la file mémoire ne
+    /// survit pas au restart, l'état persisté si.
+    async fn resume_pending_queue(&self) {
+        let Some(b) = self.inner.backlog.as_ref() else {
+            return;
+        };
+        let pending = match b.pending_queue().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "pilot pending queue resume failed");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let spawn = {
+            let mut q = self.inner.manual.lock().expect("pilot manual");
+            for it in &pending {
+                if !q.items.iter().any(|(id, _)| *id == it.id) {
+                    q.items.push_back((it.id, it.scope.clone()));
+                }
+            }
+            if q.active {
+                false
+            } else {
+                q.active = true;
+                true
+            }
+        };
+        info!(count = pending.len(), "pilot manual queue resumed after restart");
+        if spawn {
+            let svc = self.clone();
+            tokio::spawn(async move { svc.run_manual_dispatcher().await });
+        }
+    }
+
+    /// Retire un item de la file d'attente manuelle (jamais démarré). Un run
+    /// déjà lancé s'annule via `cancel_run`, pas ici.
+    pub async fn dequeue_manual(&self, id: i64) -> Result<BacklogItem, String> {
+        let backlog = self.inner.backlog.as_ref().ok_or("Pilote indisponible")?;
+        {
+            let mut q = self.inner.manual.lock().expect("pilot manual");
+            q.items.retain(|(i, _)| *i != id);
+        }
+        // La DB tranche (l'item peut avoir été pris par le dispatcher entre
+        // temps) : unqueue ne touche que l'état « en file jamais démarré ».
+        match backlog.unqueue(id).await.map_err(|e| e.to_string())? {
+            Some(item) => {
+                info!(item_id = id, "pilot manual dequeue");
+                self.publish("exec", Some(item.clone()), Some(id));
+                Ok(item)
+            }
+            None => Err("item déjà lancé ou hors file".into()),
+        }
+    }
+
     /// Boucle qui vide la file manuelle en respectant : plafond global (map
     /// `running`, partagé avec la nuit), un run par scope, Atelier après tout le
     /// reste. Un seul dispatcher vit à la fois (flag `active` sous le verrou).
@@ -574,10 +636,21 @@ impl PilotService {
             .max(1) as usize;
             let decision = self.pick_manual(cap);
             match decision {
-                ManualPick::Dispatch(item_id) => {
-                    // run_item re-valide et peut refuser (session interactive
-                    // apparue, etc.) : l'item est déjà `queued` en base, on le
-                    // bascule alors en attention pour ne pas le laisser coincé.
+                ManualPick::Dispatch(item_id, scope) => {
+                    // Session interactive sur le scope = condition TRANSIENTE :
+                    // on rend l'item à la file et on retente plus tard (l'envoyer
+                    // en attention punirait l'item pour un chat Studio ouvert).
+                    if (self.hooks().live_sessions)(&scope) {
+                        {
+                            let mut q = self.inner.manual.lock().expect("pilot manual");
+                            q.items.push_back((item_id, scope));
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                    // run_item re-valide et peut refuser (état changé, etc.) :
+                    // l'item est déjà `queued` en base, on le bascule alors en
+                    // attention pour ne pas le laisser coincé.
                     if let Err(e) = self.run_item(item_id, "manual").await {
                         warn!(item_id, error = %e, "pilot manual dispatch rejected");
                         if let Some(b) = self.inner.backlog.as_ref() {
@@ -612,12 +685,20 @@ impl PilotService {
             q.active = false;
             return ManualPick::Done;
         }
-        let running_scopes: Vec<&str> = running.keys().map(String::as_str).collect();
+        let mut running_scopes: Vec<&str> = running.keys().map(String::as_str).collect();
+        // Le worker Atelier détaché occupe son scope sans entrée `running`
+        // (après un restart, seule la réconciliation repose le flag) : sans ce
+        // garde, le dispatcher relançait un 2e run atelier voué au refus.
+        if self.inner.detached_atelier.load(Ordering::Relaxed)
+            && !running_scopes.contains(&"atelier")
+        {
+            running_scopes.push("atelier");
+        }
         let queue_scopes: Vec<&str> = q.items.iter().map(|(_, s)| s.as_str()).collect();
         match manual_dispatch_index(cap, &running_scopes, &queue_scopes) {
             Some(i) => {
-                let (id, _) = q.items.remove(i).expect("pilot manual item");
-                ManualPick::Dispatch(id)
+                let (id, scope) = q.items.remove(i).expect("pilot manual item");
+                ManualPick::Dispatch(id, scope)
             }
             None => ManualPick::Wait,
         }

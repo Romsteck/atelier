@@ -624,7 +624,7 @@ export default function StudioShell({ slug }) {
             droit du split) : monté partout, il chargeait l'agent PM sur tous
             les onglets du Studio. */}
         {((effectiveMode === 'tabs' && activeTab === 'backlog') || (effectiveMode === 'split' && rightTab === 'backlog'))
-          && <PmAssistantDock slug={slug} />}
+          && <PmAssistantDock slug={slug} defaultOpen reopenPill />}
       </div>
       <Toast toast={toast} />
     </div>

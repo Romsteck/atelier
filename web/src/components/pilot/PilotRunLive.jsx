@@ -18,15 +18,23 @@ export function engineLabel(model, hint) {
 
 // Agrège les métriques live d'un run à partir de ses lignes de transcript
 // (NDJSON). Réutilisé par la carte (compact) et le drawer (détaillé).
+// Les tokens générés sont ESTIMÉS en continu depuis les chars produits
+// (messages assistant + arguments d'outils) : `result.usage` n'arrive qu'en
+// toute fin de run — sans l'estimation, le compteur restait à 0 tout du long.
 export function pilotRunMetrics(lines) {
-  let thinkingChars = 0, inputTokens = 0, outputTokens = 0, actions = 0, model = null;
+  let thinkingChars = 0, generatedChars = 0, inputTokens = 0, outputTokens = 0, actions = 0, model = null;
   for (const l of lines || []) {
     let ev;
     try { ev = JSON.parse(l.line); } catch { continue; }
     switch (ev.t) {
       case 'system': if (ev.model) model = ev.model; break;
       case 'thinking': thinkingChars += ev.chars || 0; break;
-      case 'tool_use': actions += 1; break;
+      case 'assistant': generatedChars += (ev.text || '').length; break;
+      case 'tool_use': {
+        actions += 1;
+        try { generatedChars += JSON.stringify(ev.input || {}).length; } catch { /* ignore */ }
+        break;
+      }
       case 'result': {
         const u = ev.usage || {};
         inputTokens += u.input_tokens || 0;
@@ -36,7 +44,13 @@ export function pilotRunMetrics(lines) {
       default: break;
     }
   }
-  return { thinkingTokens: charsToTokens(thinkingChars), inputTokens, outputTokens, actions, model };
+  return {
+    thinkingTokens: charsToTokens(thinkingChars),
+    inputTokens,
+    outputTokens: Math.max(outputTokens, charsToTokens(generatedChars)),
+    actions,
+    model,
+  };
 }
 
 // Une ligne de conversation lisible (icône + texte + tonalité), ou null pour
@@ -88,24 +102,37 @@ function Metric({ icon: Icon, value, label }) {
   );
 }
 
-// Panneau live d'un run Pilote : moteur + compteurs (réflexion / génération /
-// actions, incrémentés en direct) + conversation qui défile. Présentation
-// seule : le parent fournit `lines` (ring hydraté + flux WS mergés).
-export default function PilotRunLive({ lines, engineHint, onStop, stopping }) {
+/**
+ * Panneau live d'un run Pilote : moteur + compteurs (réflexion / génération /
+ * actions, incrémentés en direct) + conversation qui défile. Présentation
+ * seule : le parent fournit `lines` (ring hydraté + flux WS mergés).
+ * `fill` : occupe toute la hauteur du conteneur (colonne latérale du drawer) au
+ * lieu d'un bandeau borné. `statusLine` : ligne d'état hors-transcript (ex.
+ * phase de deploy du worker Atelier détaché, invisible dans le NDJSON).
+ * Autoscroll « épinglé » : collé en bas tant que l'utilisateur n'est pas
+ * remonté lire — remonter décroche, revenir en bas raccroche.
+ */
+export default function PilotRunLive({ lines, engineHint, onStop, stopping, fill = false, statusLine = null }) {
   const bodyRef = useRef(null);
+  const pinnedRef = useRef(true);
   const m = useMemo(() => pilotRunMetrics(lines), [lines]);
   const entries = useMemo(
     () => (lines || []).map((l) => formatPilotEvent(l.line)).filter((e) => e && (e.text?.trim() || e.tone === 'meta')),
     [lines],
   );
+  const onScroll = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
     const el = bodyRef.current;
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
-  }, [entries.length]);
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [entries.length, statusLine]);
 
   return (
-    <section className="rounded-lg border border-blue-500/35 bg-blue-500/5 overflow-hidden">
-      <div className="px-3 py-2 border-b border-blue-500/25 flex items-center gap-3 flex-wrap">
+    <section className={`${fill ? 'h-full flex flex-col' : ''} rounded-lg border border-blue-500/35 bg-blue-500/5 overflow-hidden`}>
+      <div className="px-3 py-2 border-b border-blue-500/25 flex items-center gap-3 flex-wrap shrink-0">
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-800 dark:text-blue-200">
           <Bot className="w-4 h-4" />{engineLabel(m.model, engineHint)}
         </span>
@@ -116,8 +143,8 @@ export default function PilotRunLive({ lines, engineHint, onStop, stopping }) {
         </span>
         {onStop && <Button size="xs" variant="danger" icon={Square} loading={stopping} onClick={onStop}>Stopper</Button>}
       </div>
-      <div ref={bodyRef} className="max-h-72 overflow-y-auto p-2 space-y-1 text-[11px] font-mono leading-relaxed">
-        {entries.length === 0
+      <div ref={bodyRef} onScroll={onScroll} className={`${fill ? 'flex-1 min-h-0' : 'max-h-72'} overflow-y-auto p-2 space-y-1 text-[11px] font-mono leading-relaxed`}>
+        {entries.length === 0 && !statusLine
           ? <div className="text-gray-500 px-1 py-2">En attente des premières lignes de l’agent…</div>
           : entries.map((e, i) => (
             <div key={i} className={`flex gap-1.5 ${TONE_CLS[e.tone] || 'text-gray-400'}`}>
@@ -125,6 +152,12 @@ export default function PilotRunLive({ lines, engineHint, onStop, stopping }) {
               <span className="whitespace-pre-wrap break-words min-w-0">{e.text}</span>
             </div>
           ))}
+        {statusLine && (
+          <div className="flex gap-1.5 items-center text-blue-700 dark:text-blue-300">
+            <span className="shrink-0 select-none animate-pulse">⏵</span>
+            <span className="whitespace-pre-wrap break-words min-w-0 font-medium">{statusLine}</span>
+          </div>
+        )}
       </div>
     </section>
   );

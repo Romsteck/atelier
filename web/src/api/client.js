@@ -369,6 +369,7 @@ export const deletePilotItem = (id) => api.delete(`/pilot/backlog/${id}`);
 export const movePilotItem = (id, body) => api.post(`/pilot/backlog/${id}/move`, body);
 export const getPilotItemRuns = (id) => api.get(`/pilot/backlog/${id}/runs`);
 export const runPilotItem = (id, confirm = false) => api.post(`/pilot/backlog/${id}/run`, { confirm });
+export const dequeuePilotItem = (id) => api.post(`/pilot/backlog/${id}/dequeue`);
 export const cancelPilotRun = (id) => api.post(`/pilot/runs/${id}/cancel`);
 export const getPilotTranscript = (id) => api.get(`/pilot/runs/${id}/transcript`);
 export const getPilotSchedule = () => api.get('/pilot/schedule');

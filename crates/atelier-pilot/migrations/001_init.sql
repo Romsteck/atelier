@@ -45,10 +45,12 @@ ALTER TABLE backlog_items ADD COLUMN IF NOT EXISTS last_engine TEXT;
 -- le chef de projet, il n'y a plus de saisie brute à parquer. Migration des bases
 -- existantes (rejouée à chaque boot, idempotente) : les résidus passent en `ready`,
 -- puis le CHECK est resserré.
+-- Lane `archived` ajoutée (2026-07-23) : rangement manuel des items livrés — la
+-- colonne « Terminé » reste courte, l'historique vit dans la vue Archivés.
 UPDATE backlog_items SET lane = 'ready' WHERE lane = 'inbox';
 ALTER TABLE backlog_items DROP CONSTRAINT IF EXISTS backlog_items_lane_check;
 ALTER TABLE backlog_items ADD CONSTRAINT backlog_items_lane_check
-    CHECK (lane IN ('ready','in_progress','attention','done'));
+    CHECK (lane IN ('ready','in_progress','attention','done','archived'));
 ALTER TABLE backlog_items ALTER COLUMN lane SET DEFAULT 'ready';
 
 CREATE INDEX IF NOT EXISTS backlog_items_board_idx ON backlog_items (scope, lane, position, id);

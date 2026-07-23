@@ -1,9 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import useWebSocket from '../hooks/useWebSocket';
 import {
-  cancelPilotNight, cancelPilotRun, createPilotItem, deletePilotItem, getPilotBacklog,
-  getPilotNight, getPilotSchedule, getPilotState, movePilotItem, patchPilotItem,
-  runPilotItem, setPilotSchedule, startPilotNight, unwrapApi,
+  cancelPilotNight, cancelPilotRun, createPilotItem, deletePilotItem, dequeuePilotItem,
+  getPilotBacklog, getPilotNight, getPilotSchedule, getPilotState, movePilotItem,
+  patchPilotItem, runPilotItem, setPilotSchedule, startPilotNight, unwrapApi,
 } from '../api/client';
 import { setBadgeSlice } from '../lib/notify';
 
@@ -73,6 +73,12 @@ export function PilotProvider({ children }) {
   }, [refetch]);
   const remove = useCallback(async (id) => { setItems((v) => v.filter((x) => x.id !== id)); try { await deletePilotItem(id); } catch (e) { refetch(); throw e; } }, [refetch]);
   const run = useCallback(async (id, confirm = false) => unwrapApi(await runPilotItem(id, confirm)), []);
+  // Retrait de la file d'attente manuelle (item queued jamais démarré).
+  const dequeue = useCallback(async (id) => {
+    const item = unwrapApi(await dequeuePilotItem(id));
+    setItems((v) => v.map((x) => x.id === id ? item : x));
+    return item;
+  }, []);
   // Annulation d'un run live — l'état de l'item revient par le WS `pilot:backlog`
   // (settle côté service), pas de mutation optimiste ici.
   const cancelRun = useCallback(async (runId) => unwrapApi(await cancelPilotRun(runId)), []);
@@ -86,10 +92,11 @@ export function PilotProvider({ children }) {
     running: items.filter((x) => ['queued', 'running'].includes(x.exec_status)).length,
     ready: items.filter((x) => x.lane === 'ready' && x.exec_status === 'idle').length,
     done: items.filter((x) => x.lane === 'done').length,
+    archived: items.filter((x) => x.lane === 'archived').length,
   }), [items]);
   useEffect(() => { setBadgeSlice('pilot', counts.attention); }, [counts.attention]);
   useEffect(() => () => setBadgeSlice('pilot', 0), []);
-  const value = useMemo(() => ({ items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, cancelRun, saveSchedule, launchNight, stopNight, refetch }), [items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, cancelRun, saveSchedule, launchNight, stopNight, refetch]);
+  const value = useMemo(() => ({ items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, dequeue, cancelRun, saveSchedule, launchNight, stopNight, refetch }), [items, state, schedule, night, transcripts, maintenance, wsStatus, loading, counts, capture, patch, move, remove, run, dequeue, cancelRun, saveSchedule, launchNight, stopNight, refetch]);
   return <PilotContext.Provider value={value}>{children}</PilotContext.Provider>;
 }
 

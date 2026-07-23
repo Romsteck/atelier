@@ -4,7 +4,7 @@ import {
   GitBranch, X, ExternalLink, TableProperties, ShieldAlert,
   Play, Square, Archive, Loader2, Settings2,
   MessageSquareWarning, CheckCircle2, BarChart3,
-  ClipboardList,
+  ClipboardList, Bot,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useApps } from '../context/AppsContext';
@@ -17,17 +17,36 @@ import useBuildingApps from '../hooks/useBuildingApps';
 import InstallButton from './InstallButton';
 import NotificationsToggle from './NotificationsToggle';
 
+// Navigation groupée par domaine : Applications (landing), Données (explorer),
+// Autonomie (Pilote + assistant + signaux des agents), Plateforme (outillage).
 const navGroups = [
   {
-    label: 'Applications',
+    label: null,
     items: [
       { to: '/', icon: LayoutGrid, label: 'Applications', highlight: true },
-      { to: '/database', icon: Database, label: 'Base de donnees' },
-      { to: '/schema', icon: TableProperties, label: 'Schema' },
-      { to: '/git', icon: GitBranch, label: 'Git' },
-      { to: '/surveillance', icon: ShieldAlert, label: 'Surveillance' },
+    ],
+  },
+  {
+    label: 'Données',
+    items: [
+      { to: '/database', icon: Database, label: 'Base de données' },
+      { to: '/schema', icon: TableProperties, label: 'Schéma' },
+    ],
+  },
+  {
+    label: 'Autonomie',
+    items: [
       { to: '/backlog', icon: ClipboardList, label: 'Pilote' },
+      // Ouvre le dock du chef de projet (PmAssistantDock, monté par le Layout).
+      { action: 'pilot:open-assistant', icon: Bot, label: 'Chef de projet' },
+      { to: '/surveillance', icon: ShieldAlert, label: 'Surveillance' },
       { to: '/issues', icon: MessageSquareWarning, label: 'Remontées' },
+    ],
+  },
+  {
+    label: 'Plateforme',
+    items: [
+      { to: '/git', icon: GitBranch, label: 'Git' },
       { to: '/stats', icon: BarChart3, label: 'Statistiques' },
       { to: '/backup', icon: Archive, label: 'Sauvegarde' },
       { to: '/settings', icon: Settings2, label: 'Paramètres' },
@@ -134,7 +153,20 @@ function Sidebar({ onClose, collapsed }) {
             )}
             <ul className="space-y-0.5">
               {group.items.map((item) => {
-                const { icon: Icon, label, highlight, external, href, to } = item;
+                const { icon: Icon, label, highlight, external, href, to, action } = item;
+                if (action) {
+                  return (
+                    <li key={action}>
+                      <button
+                        onClick={() => { window.dispatchEvent(new CustomEvent(action)); onClose?.(); }}
+                        className={`w-full flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30 ${railRow}`}
+                      >
+                        <Icon className="w-5 h-5 shrink-0" />
+                        <span className={`flex-1 text-left whitespace-nowrap ${railLabel}`}>{label}</span>
+                      </button>
+                    </li>
+                  );
+                }
                 if (external) {
                   return (
                     <li key={href}>

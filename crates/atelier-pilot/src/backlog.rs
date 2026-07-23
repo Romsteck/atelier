@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::service::PilotEvent;
 use crate::sqlx::{PgPool, PgRow, Row, query};
 
-pub const LANES: &[&str] = &["ready", "in_progress", "attention", "done"];
+pub const LANES: &[&str] = &["ready", "in_progress", "attention", "done", "archived"];
 pub const ACTIVE_EXEC: &[&str] = &["queued", "running"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -199,7 +199,7 @@ impl BacklogStore {
         let rows = query(
             r#"SELECT * FROM backlog_items
                WHERE ($1::text IS NULL OR scope=$1) AND ($2::text IS NULL OR lane=$2)
-               ORDER BY CASE lane WHEN 'ready' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'attention' THEN 2 ELSE 3 END,
+               ORDER BY CASE lane WHEN 'ready' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'attention' THEN 2 WHEN 'done' THEN 3 ELSE 4 END,
                         position, id"#,
         ).bind(scope).bind(lane).fetch_all(&self.pool).await?;
         rows.iter().map(row_to_item).collect()
@@ -378,23 +378,43 @@ impl BacklogStore {
     }
 
     pub async fn reconcile_boot(&self) -> anyhow::Result<u64> {
-        // Un item « en file mais jamais démarré » (queued sans run_id, cf.
-        // mark_pending) n'a rien exécuté : la file manuelle étant en mémoire, il
-        // est simplement perdu au restart → on le rend `ready`, sans le punir.
-        query(
-            "UPDATE backlog_items SET exec_status='idle',updated_at=now() \
-             WHERE exec_status='queued' AND last_run_id IS NULL",
-        )
-        .execute(&self.pool)
-        .await?;
-        // Les runs réellement interrompus (queued avec run_id, ou running) →
-        // attention, sauf le worker atelier détaché encore en phase report.
+        // Les items « en file jamais démarrés » (queued sans run_id, cf.
+        // mark_pending) ne sont PAS réinitialisés : la file manuelle mémoire est
+        // reconstruite au boot depuis cet état (`resume_pending_queue`) — c'est
+        // ce qui fait survivre la file au restart déclenché par un deploy
+        // Atelier du Pilote lui-même. Seuls les runs réellement interrompus
+        // (queued/running AVEC run_id) partent en attention, sauf le worker
+        // atelier détaché encore en phase report.
         Ok(query(
             "UPDATE backlog_items b SET exec_status='failed',lane='attention',needs_user_reason='Run interrompu par le redémarrage d’Atelier',updated_at=now() \
-             WHERE exec_status IN ('queued','running') AND NOT EXISTS (\
+             WHERE exec_status IN ('queued','running') AND NOT (exec_status='queued' AND last_run_id IS NULL) AND NOT EXISTS (\
                SELECT 1 FROM backlog_runs r WHERE r.item_id=b.id AND r.status='running' AND r.scope='atelier' AND r.phase='report'\
              )"
         ).execute(&self.pool).await?.rows_affected())
+    }
+
+    /// Items « en file jamais démarrés », dans l'ordre d'enfilement (updated_at
+    /// posé par mark_pending) — base de la reconstruction de la file au boot.
+    pub async fn pending_queue(&self) -> anyhow::Result<Vec<BacklogItem>> {
+        let rows = query(
+            "SELECT * FROM backlog_items WHERE exec_status='queued' AND last_run_id IS NULL ORDER BY updated_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_item).collect()
+    }
+
+    /// Retrait volontaire de la file d'attente : uniquement un item « en file
+    /// jamais démarré » — un run déjà lancé s'annule via cancel_run.
+    pub async fn unqueue(&self, id: i64) -> anyhow::Result<Option<BacklogItem>> {
+        let row = query(
+            "UPDATE backlog_items SET exec_status='idle',updated_at=now() \
+             WHERE id=$1 AND exec_status='queued' AND last_run_id IS NULL RETURNING *",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_item).transpose()
     }
 }
 

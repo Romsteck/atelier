@@ -15,6 +15,18 @@ const PHASE_LABEL = {
   commit: 'Commit & push',
 };
 
+// Libellés courts par phase, consommés par la page Backlog (carte + drawer de
+// l'item Atelier en vol) — le worker détaché ne trace pas ces phases dans son
+// transcript, c'est la seule visibilité sur le build/deploy en cours.
+export const MAINTENANCE_STATUS = {
+  checkpoint: 'Checkpoint git en cours…',
+  agent: 'Agent autonome au travail…',
+  deploy: 'Build & installation d’Atelier — redémarrage imminent…',
+  healthcheck: 'Vérification de santé de la plateforme…',
+  commit: 'Commit & push…',
+  rollback: 'Échec — restauration de la version précédente…',
+};
+
 /**
  * Détection d'indisponibilité d'Atelier. Le WS (auto-reconnect) est le signal
  * primaire ; quand il est fermé, une sonde `/api/health` tranche entre « bref

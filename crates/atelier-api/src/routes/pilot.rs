@@ -21,6 +21,7 @@ pub fn router() -> Router<ApiState> {
         .route("/backlog/{id}/move", post(move_item))
         .route("/backlog/{id}/runs", get(item_runs))
         .route("/backlog/{id}/run", post(run_item))
+        .route("/backlog/{id}/dequeue", post(dequeue_item))
         .route("/attention", get(attention))
         .route("/repos", get(repos))
         .route("/runs/{id}/transcript", get(transcript))
@@ -277,6 +278,15 @@ async fn run_item(
         Err(e) => fail(StatusCode::CONFLICT, e),
     }
 }
+/// Retire un item de la file d'attente manuelle (jamais démarré). 409 si le
+/// dispatcher l'a déjà lancé — dans ce cas c'est cancel_run qui s'applique.
+async fn dequeue_item(State(state): State<ApiState>, Path(id): Path<i64>) -> impl IntoResponse {
+    match state.pilot.dequeue_manual(id).await {
+        Ok(item) => ok(item),
+        Err(e) => fail(StatusCode::CONFLICT, e),
+    }
+}
+
 async fn transcript(State(state): State<ApiState>, Path(id): Path<Uuid>) -> impl IntoResponse {
     ok(state.pilot.transcript(id))
 }
