@@ -251,7 +251,7 @@ fn generate_table_module(table: &TableDefinition) -> String {
     s.push_str("    #[serde(default)]\n");
     s.push_str("    pub is_deleted: bool,\n");
     for col in &table.columns {
-        s.push_str("    #[serde(default)]\n");
+        s.push_str(&serde_field_attr("default", &col.name));
         s.push_str(&format!(
             "    pub {field}: Option<{ty}>,\n",
             field = sanitize_field(&col.name),
@@ -264,7 +264,7 @@ fn generate_table_module(table: &TableDefinition) -> String {
     s.push_str("#[derive(Debug, Default, Clone, Serialize)]\n");
     s.push_str(&format!("pub struct {} {{\n", insert_struct));
     for col in &table.columns {
-        s.push_str("    #[serde(skip_serializing_if = \"Option::is_none\")]\n");
+        s.push_str(&serde_field_attr("skip_serializing_if = \"Option::is_none\"", &col.name));
         s.push_str(&format!(
             "    pub {field}: Option<{ty}>,\n",
             field = sanitize_field(&col.name),
@@ -276,7 +276,7 @@ fn generate_table_module(table: &TableDefinition) -> String {
     s.push_str("#[derive(Debug, Default, Clone, Serialize)]\n");
     s.push_str(&format!("pub struct {} {{\n", update_struct));
     for col in &table.columns {
-        s.push_str("    #[serde(skip_serializing_if = \"Option::is_none\")]\n");
+        s.push_str(&serde_field_attr("skip_serializing_if = \"Option::is_none\"", &col.name));
         s.push_str(&format!(
             "    pub {field}: Option<{ty}>,\n",
             field = sanitize_field(&col.name),
@@ -501,6 +501,22 @@ fn singular(name: &str) -> String {
     }
 }
 
+/// Rust reserved words (strict + reserved-for-future, 2021 edition).
+/// A generated field whose sanitised name lands on one of these gets a
+/// trailing `_` — and, because the name then diverges from the real
+/// column name, a `#[serde(rename)]` so the wire JSON keeps the column
+/// name intact (see `serde_field_attr`).
+const RUST_KEYWORDS: &[&str] = &[
+    // strict keywords (2015 + 2018)
+    "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
+    "trait", "true", "type", "unsafe", "use", "where", "while", "async", "await",
+    // reserved for future use
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv",
+    "typeof", "unsized", "virtual", "yield", "try",
+];
+
 /// Sanitise a column name to be a valid Rust identifier. Leaves
 /// snake_case names untouched; replaces invalid chars with `_`.
 fn sanitize_field(name: &str) -> String {
@@ -520,14 +536,30 @@ fn sanitize_field(name: &str) -> String {
             out.push('_');
         }
     }
-    // Avoid Rust keywords (extend list as needed).
-    if matches!(
-        out.as_str(),
-        "type" | "self" | "super" | "crate" | "mod" | "as" | "where" | "ref" | "use" | "fn" | "let"
-    ) {
+    // Avoid Rust keywords (would fail to parse as a field ident).
+    if RUST_KEYWORDS.contains(&out.as_str()) {
         out.push('_');
     }
     out
+}
+
+/// Build the `#[serde(...)]` attribute line for a generated field.
+///
+/// `base` is the struct-specific token (`default` for the Row struct,
+/// `skip_serializing_if = "Option::is_none"` for Insert/Update). When the
+/// emitted Rust field name diverges from the real column name — because
+/// `sanitize_field` renamed a keyword (`type` → `type_`) or replaced an
+/// invalid char (`user-id` → `user_id`) — append `rename = "<col>"` so the
+/// wire JSON keeps the real column name. Without it, a write serialises the
+/// key as `type_` and the gateway rejects it with 422 « column 'type_' not
+/// declared » (the GET path only survived by luck: `#[serde(default)]` hides
+/// the absent key). Indented + newline-terminated, ready to `push_str`.
+fn serde_field_attr(base: &str, col_name: &str) -> String {
+    if sanitize_field(col_name) != col_name {
+        format!("    #[serde({base}, rename = \"{col_name}\")]\n")
+    } else {
+        format!("    #[serde({base})]\n")
+    }
 }
 
 /// Generated the helper `ListParams` struct + URL-encoder. Emitted once
@@ -678,6 +710,48 @@ mod tests {
         assert_eq!(sanitize_field("type"), "type_");
         assert_eq!(sanitize_field("amount"), "amount");
         assert_eq!(sanitize_field("user-id"), "user_id");
+        // A few of the freshly-added reserved words.
+        assert_eq!(sanitize_field("match"), "match_");
+        assert_eq!(sanitize_field("loop"), "loop_");
+        assert_eq!(sanitize_field("move"), "move_");
+    }
+
+    #[test]
+    fn renamed_keyword_field_keeps_serde_rename() {
+        // A `type` column is renamed to `type_` to dodge the Rust keyword;
+        // all three structs MUST carry `#[serde(rename = "type")]` so writes
+        // serialise the real column name (else the gateway 422s). Regression
+        // for iss-c53d324e (app hevy).
+        let schema = DatabaseSchema {
+            tables: vec![TableDefinition {
+                name: "widgets".into(),
+                slug: "widgets".into(),
+                columns: vec![col("type", FieldType::Text), col("label", FieldType::Text)],
+                description: None,
+                id_strategy: IdStrategy::Bigserial,
+                display_column: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }],
+            relations: vec![],
+            version: 1,
+            updated_at: None,
+        };
+        let out = generate_lib("hevy", &schema).unwrap();
+        // Row: default + rename ; Insert/Update: skip_serializing_if + rename.
+        assert!(
+            out.contains("#[serde(default, rename = \"type\")]"),
+            "Row struct must rename the `type` field"
+        );
+        assert!(
+            out.contains("#[serde(skip_serializing_if = \"Option::is_none\", rename = \"type\")]"),
+            "Insert/Update structs must rename the `type` field"
+        );
+        // The renamed identifier is what's emitted as the Rust field.
+        assert!(out.contains("pub type_: Option<"));
+        // A plain field carries no rename.
+        assert!(out.contains("    #[serde(default)]\n    pub label: Option<"));
+        assert!(!out.contains("rename = \"label\""));
     }
 
     #[test]
